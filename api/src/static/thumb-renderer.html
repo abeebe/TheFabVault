@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background: #1a1a2e; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c" width="512" height="512"></canvas>
+<script src="/static/three.min.js"></script>
+<script>
+window.__done = false;
+window.__error = null;
+
+function parseSTL(buffer) {
+  // Detect binary vs ASCII
+  const header = new Uint8Array(buffer, 0, 80);
+  const numTriangles = new DataView(buffer).getUint32(80, true);
+  const expectedBinarySize = 84 + numTriangles * 50;
+
+  const isBinary = buffer.byteLength === expectedBinarySize && numTriangles > 0;
+
+  const geometry = new THREE.BufferGeometry();
+
+  if (isBinary) {
+    const view = new DataView(buffer);
+    const positions = [];
+    const normals = [];
+    for (let i = 0; i < numTriangles; i++) {
+      const base = 84 + i * 50;
+      const nx = view.getFloat32(base, true);
+      const ny = view.getFloat32(base + 4, true);
+      const nz = view.getFloat32(base + 8, true);
+      for (let v = 0; v < 3; v++) {
+        const vBase = base + 12 + v * 12;
+        positions.push(
+          view.getFloat32(vBase, true),
+          view.getFloat32(vBase + 4, true),
+          view.getFloat32(vBase + 8, true)
+        );
+        normals.push(nx, ny, nz);
+      }
+    }
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  } else {
+    // ASCII STL — parse text
+    const text = new TextDecoder().decode(buffer);
+    const positions = [];
+    const normals = [];
+    const vertexRe = /vertex\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)/g;
+    const normalRe = /facet normal\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)/g;
+    let nm, vm;
+    const normalList = [];
+    while ((nm = normalRe.exec(text)) !== null) {
+      normalList.push([parseFloat(nm[1]), parseFloat(nm[2]), parseFloat(nm[3])]);
+    }
+    let triIdx = 0;
+    while ((vm = vertexRe.exec(text)) !== null) {
+      positions.push(parseFloat(vm[1]), parseFloat(vm[2]), parseFloat(vm[3]));
+      const n = normalList[Math.floor(triIdx / 3)] || [0, 1, 0];
+      normals.push(n[0], n[1], n[2]);
+      triIdx++;
+    }
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  }
+
+  return geometry;
+}
+
+window.__renderSTL = function(base64data) {
+  try {
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      preserveDrawingBuffer: true,
+    });
+    renderer.setSize(512, 512);
+    renderer.setClearColor(0x1a1a2e);
+    renderer.shadowMap.enabled = true;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.001, 1000000);
+
+    // Decode base64 to ArrayBuffer
+    const binary = atob(base64data);
+    const buf = new ArrayBuffer(binary.length);
+    const view = new Uint8Array(buf);
+    for (let i = 0; i < binary.length; i++) {
+      view[i] = binary.charCodeAt(i);
+    }
+
+    const geometry = parseSTL(buf);
+    geometry.computeVertexNormals();
+    geometry.center();
+    geometry.computeBoundingSphere();
+
+    const sphere = geometry.boundingSphere;
+    const radius = sphere ? sphere.radius : 1;
+    const dist = radius * 3.5;
+
+    camera.position.set(dist, dist * 0.75, dist);
+    camera.lookAt(0, 0, 0);
+    camera.near = dist * 0.001;
+    camera.far = dist * 100;
+    camera.updateProjectionMatrix();
+
+    const material = new THREE.MeshPhongMaterial({
+      color: 0x4a9eff,
+      specular: 0x222222,
+      shininess: 30,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    // Lighting
+    const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambient);
+
+    const key = new THREE.DirectionalLight(0xffffff, 1.0);
+    key.position.set(1, 2, 1.5);
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
+    fill.position.set(-1, 0.5, -1);
+    scene.add(fill);
+
+    renderer.render(scene, camera);
+    window.__done = true;
+  } catch(e) {
+    window.__error = e.message || String(e);
+    window.__done = true;
+  }
+};
+
+window.__renderImage = function(base64data, mimeType) {
+  try {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = function() {
+      const scale = Math.min(512 / img.width, 512 / img.height, 1);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      ctx.fillStyle = '#f9fafb';
+      ctx.fillRect(0, 0, 512, 512);
+      ctx.drawImage(img, (512 - w) / 2, (512 - h) / 2, w, h);
+      window.__done = true;
+    };
+    img.onerror = function() {
+      window.__error = 'Image load failed';
+      window.__done = true;
+    };
+    img.src = 'data:' + mimeType + ';base64,' + base64data;
+  } catch(e) {
+    window.__error = e.message || String(e);
+    window.__done = true;
+  }
+};
+</script>
+</body>
+</html>
