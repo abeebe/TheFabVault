@@ -1,7 +1,7 @@
 import type {
   AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult,
   ProjectOut, ProjectDetailOut, ProjectOverrides,
-  PrinterSettings, LaserSettings, VinylSettings,
+  PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
 } from '../types/index.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
@@ -206,5 +206,18 @@ export const api = {
 
   import: {
     scan: (): Promise<ScanResult> => apiFetch('/import/scan', { method: 'POST' }),
+  },
+
+  admin: {
+    getConfig: (): Promise<AdminConfig> => apiFetch('/admin/config'),
+
+    updateStoragePath: (newPath: string): Promise<{ success: boolean; message: string }> =>
+      apiFetch('/admin/config/storage', {
+        method: 'POST',
+        body: JSON.stringify({ newPath }),
+      }),
+
+    restart: (): Promise<{ success: boolean; message: string }> =>
+      apiFetch('/admin/restart', { method: 'POST' }),
   },
 };

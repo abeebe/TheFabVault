@@ -136,4 +136,28 @@ export interface ScanResult {
   failed: number;
 }
 
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+export interface StorageStats {
+  total: number;
+  totalFormatted: string;
+  assets: number;
+  assetsFormatted: string;
+  thumbnails: number;
+  thumbnailsFormatted: string;
+  assetCount: number;
+}
+
+export interface AdminConfig {
+  storagePath: string;
+  storagePathDisplay: string;
+  dataDirPath: string;
+  storage: StorageStats;
+  config: {
+    maxUploadMb: number;
+    authEnabled: boolean;
+    corsOrigins: string[];
+  };
+}
+
 export type Theme = 'light' | 'dark' | 'system';

@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { LogOut } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.js';
 import { AssetGrid } from './components/AssetGrid.js';
 import { SearchBar } from './components/SearchBar.js';
@@ -8,6 +8,7 @@ import { UploadZone } from './components/UploadZone.js';
 import { Spinner } from './components/Spinner.js';
 import { Modal } from './components/Modal.js';
 import { ProjectView } from './components/ProjectView.js';
+import { AdminSettings } from './components/AdminSettings.js';
 import { useAuth } from './hooks/useAuth.js';
 import { useAssets } from './hooks/useAssets.js';
 import { useFolders } from './hooks/useFolders.js';
@@ -15,6 +16,25 @@ import { useTheme } from './hooks/useTheme.js';
 import { useProjects } from './hooks/useProjects.js';
 import { api } from './lib/api.js';
 import type { AssetOut } from './types/index.js';
+
+// Category detection utilities
+type Category = '3dprint' | 'laser' | 'vinyl';
+
+function getAssetCategories(asset: AssetOut): Category[] {
+  const categories: Category[] = [];
+
+  // 3D files - automatic detection
+  const ext = asset.filename.split('.').pop()?.toLowerCase();
+  if (['.stl', '.obj', '.3mf'].includes(`.${ext}`)) {
+    categories.push('3dprint');
+  }
+
+  // Tags-based - manual assignment
+  if (asset.tags.includes('laser')) categories.push('laser');
+  if (asset.tags.includes('vinyl')) categories.push('vinyl');
+
+  return categories;
+}
 
 function LoginPage({ onLogin }: { onLogin: (u: string, p: string) => Promise<void> }) {
   const [username, setUsername] = useState('');
@@ -90,11 +110,15 @@ export function App() {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
 
   // New project modal
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
+
+  // Admin settings modal
+  const [adminSettingsOpen, setAdminSettingsOpen] = useState(false);
 
   const cleanParams = Object.fromEntries(
     Object.entries({
@@ -113,6 +137,23 @@ export function App() {
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
     );
   }
+
+  function handleCategorySelect(category: Category) {
+    setSelectedCategory(category);
+    setSelectedFolderId(null);
+    setSelectedTags([]);
+    setSearchQuery('');
+    setSelectedProjectId(null);
+  }
+
+  function handleCategoryDeselect() {
+    setSelectedCategory(null);
+  }
+
+  // Filter assets by selected category
+  const displayAssets = selectedCategory
+    ? assets.filter(a => getAssetCategories(a).includes(selectedCategory))
+    : assets;
 
   const handleUploaded = useCallback((newAssets: AssetOut[]) => {
     addAssets(newAssets);
@@ -175,6 +216,8 @@ export function App() {
         selectedProjectId={selectedProjectId}
         onProjectSelect={handleProjectSelect}
         onProjectCreate={() => setNewProjectOpen(true)}
+        selectedCategory={selectedCategory}
+        onCategorySelect={handleCategorySelect}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -196,13 +239,22 @@ export function App() {
               <UploadZone currentFolderId={selectedFolderId} onUploaded={handleUploaded} />
               <ThemeToggle theme={theme} onCycle={cycleTheme} />
               {authRequired && (
-                <button
-                  onClick={logout}
-                  title="Sign out"
-                  className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                >
-                  <LogOut size={16} />
-                </button>
+                <>
+                  <button
+                    onClick={() => setAdminSettingsOpen(true)}
+                    title="Admin settings"
+                    className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                  >
+                    <Settings size={16} />
+                  </button>
+                  <button
+                    onClick={logout}
+                    title="Sign out"
+                    className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                  >
+                    <LogOut size={16} />
+                  </button>
+                </>
               )}
             </header>
 
@@ -210,10 +262,18 @@ export function App() {
             <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
               <span
                 className="hover:text-gray-700 dark:hover:text-gray-200 cursor-pointer"
-                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); }}
+                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); }}
               >
                 All Files
               </span>
+              {selectedCategory && (
+                <>
+                  <span>/</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-medium">
+                    {selectedCategory === '3dprint' ? '3D Print' : selectedCategory.charAt(0).toUpperCase() + selectedCategory.slice(1)}
+                  </span>
+                </>
+              )}
               {selectedFolderId && (
                 <>
                   <span>/</span>
@@ -239,13 +299,13 @@ export function App() {
                 </>
               )}
               <div className="flex-1" />
-              <span className="text-xs">{assets.length} {assets.length === 1 ? 'file' : 'files'}</span>
+              <span className="text-xs">{displayAssets.length} {displayAssets.length === 1 ? 'file' : 'files'}</span>
             </div>
 
             {/* Main content */}
             <div className="flex-1 overflow-y-auto p-5">
               <AssetGrid
-                assets={assets}
+                assets={displayAssets}
                 folders={folders}
                 loading={loading}
                 onUpdate={updateAsset}
@@ -291,6 +351,9 @@ export function App() {
           </div>
         </Modal>
       )}
+
+      {/* Admin settings modal */}
+      <AdminSettings isOpen={adminSettingsOpen} onClose={() => setAdminSettingsOpen(false)} />
     </div>
   );
 }

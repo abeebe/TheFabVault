@@ -58,6 +58,14 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_project_assets_proj ON project_assets(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_assets_asset ON project_assets(asset_id);
   `,
+  // v2: add system config table for runtime configuration
+  `
+  CREATE TABLE IF NOT EXISTS system_config (
+    key       TEXT    PRIMARY KEY,
+    value     TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  `,
 ];
 
 function runMigrations(db: Database.Database): void {

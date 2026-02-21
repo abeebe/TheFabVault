@@ -13,6 +13,7 @@ import assetsRouter from './routes/assets.js';
 import foldersRouter from './routes/folders.js';
 import thumbsRouter from './routes/thumbs.js';
 import projectsRouter from './routes/projects.js';
+import adminRouter from './routes/admin.js';
 import { requeuePendingThumbs, setServerPort } from './services/thumbGen.js';
 import { scanMountImports } from './services/mountImport.js';
 
@@ -50,6 +51,7 @@ app.use('/', assetsRouter);
 app.use('/', foldersRouter);
 app.use('/', thumbsRouter);
 app.use('/', projectsRouter);
+app.use('/', adminRouter);
 
 // Import scan endpoint
 app.post('/import/scan', requireAuth, async (_req, res) => {
