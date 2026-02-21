@@ -31,18 +31,17 @@ async function getBrowser(): Promise<Browser> {
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-accelerated-2d-canvas',
+          '--use-gl=angle',                // Use ANGLE for WebGL
+          '--use-angle=swiftshader-webgl',  // SwiftShader software renderer
           '--no-first-run',
           '--no-zygote',
-          // Note: --single-process removed as it can cause issues in Docker
         ],
       });
       browser.on('disconnected', () => { browser = null; });
-      console.log('[thumbGen] Browser launched successfully at', execPath || 'default path');
+      console.log('[thumbGen] Browser launched successfully',
+        execPath ? `at ${execPath}` : '(bundled Chromium)');
     } catch (err) {
       console.error('[thumbGen] Failed to launch browser:', err);
-      console.error('[thumbGen] Executable path:', execPath);
       throw err;
     }
   }

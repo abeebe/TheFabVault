@@ -330,7 +330,7 @@ export function AssetCard({
                   <Tag size={14} /> Edit tags
                 </button>
                 {!projectMode && (
-                  <div className="relative">
+                  <div>
                     <button
                       onClick={() => setShowMoveMenu((v) => !v)}
                       className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
@@ -338,10 +338,10 @@ export function AssetCard({
                       <FolderInput size={14} /> Move to folder
                     </button>
                     {showMoveMenu && (
-                      <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
+                      <div className="border-l-2 border-accent/30 ml-4 py-1 max-h-48 overflow-y-auto animate-fade-in">
                         <button
                           onClick={() => handleMove(null)}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
+                          className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
                         >
                           No folder
                         </button>
@@ -349,7 +349,7 @@ export function AssetCard({
                           <button
                             key={f.id}
                             onClick={() => handleMove(f.id)}
-                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${
+                            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 ${
                               f.id === asset.folderId
                                 ? 'text-accent font-medium'
                                 : 'text-gray-700 dark:text-gray-200'
@@ -363,7 +363,7 @@ export function AssetCard({
                   </div>
                 )}
                 {!projectMode && onAddToProject && projects && projects.length > 0 && (
-                  <div className="relative">
+                  <div>
                     <button
                       onClick={() => setShowProjectMenu((v) => !v)}
                       className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
@@ -371,12 +371,12 @@ export function AssetCard({
                       <FolderPlus size={14} /> Add to project
                     </button>
                     {showProjectMenu && (
-                      <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
+                      <div className="border-l-2 border-accent/30 ml-4 py-1 max-h-48 overflow-y-auto animate-fade-in">
                         {projects.map((p) => (
                           <button
                             key={p.id}
                             onClick={() => { onAddToProject(p.id); setShowProjectMenu(false); setMenuOpen(false); }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
                           >
                             {p.name}
                           </button>
