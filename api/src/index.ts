@@ -31,19 +31,9 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static assets for thumbnail renderer (Three.js etc.)
+// Serve static assets for thumbnail renderer (Three.js, thumb-renderer.html, etc.)
 const staticDir = path.join(__dirname, 'static');
 app.use('/static', express.static(staticDir));
-
-// Serve Three.js from node_modules for the Puppeteer renderer
-const threeDir = path.join(__dirname, '..', 'node_modules', 'three', 'build');
-if (process.env.NODE_ENV !== 'production') {
-  // In dev (tsx), __dirname is src/
-  app.use('/static/three.min.js', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build', 'three.min.js')));
-} else {
-  // In prod (compiled), dist/ is at root
-  app.use('/static/three.min.js', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build', 'three.min.js')));
-}
 
 // Routes
 app.use('/', authRouter);

@@ -24,6 +24,9 @@ COPY src/ ./src/
 
 RUN npm run build
 
+# Copy static files to dist
+COPY src/static/ ./dist/static/
+
 RUN mkdir -p /app/storage/thumbs /app/data
 
 EXPOSE 3000
