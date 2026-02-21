@@ -308,8 +308,10 @@ router.delete('/asset/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  // delete_file defaults to true — pass ?delete_file=false to keep the file on disk
+  const deleteFile = req.query.delete_file !== 'false';
   db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
-  cleanupAsset(row.id);
+  cleanupAsset(row.id, { deleteFile });
   res.json({ ok: true });
 });
 

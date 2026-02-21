@@ -14,9 +14,13 @@ interface AssetCardProps {
   selected: boolean;
   onSelect: () => void;
   onUpdate: (updated: AssetOut) => void;
-  onDelete: () => void;
   onPreview: () => void;
-  // Project mode
+  // Delete options:
+  //   onDelete       — project mode: remove from project (no disk option)
+  //   onDeleteWithFile — normal mode: two-choice delete (keep / delete file)
+  onDelete?: () => void;
+  onDeleteWithFile?: (deleteFile: boolean) => void;
+  // Project mode extras
   projectMode?: boolean;
   hasOverrides?: boolean;
   onEditOverrides?: () => void;
@@ -38,7 +42,8 @@ function formatSize(bytes: number): string {
 }
 
 export function AssetCard({
-  asset, folders, selected, onSelect, onUpdate, onDelete, onPreview,
+  asset, folders, selected, onSelect, onUpdate, onPreview,
+  onDelete, onDeleteWithFile,
   projectMode, hasOverrides, onEditOverrides,
   projects, onAddToProject,
 }: AssetCardProps) {
@@ -49,6 +54,7 @@ export function AssetCard({
   const [tags, setTags] = useState(asset.tags);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [saving, setSaving] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -256,103 +262,147 @@ export function AssetCard({
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-7 z-20 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 text-sm animate-fade-in">
-            {projectMode && onEditOverrides && (
-              <>
+          <div className="absolute right-0 top-7 z-20 w-52 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 text-sm animate-fade-in">
+            {confirmDelete ? (
+              /* ── Inline delete confirmation ── */
+              <div className="px-3 py-2">
+                <p className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-2">
+                  {projectMode ? 'Remove from project?' : 'Remove from vault?'}
+                </p>
+                {!projectMode && (
+                  <div className="flex flex-col gap-1 mb-2">
+                    <button
+                      onClick={() => { onDeleteWithFile?.(false); setConfirmDelete(false); setMenuOpen(false); }}
+                      className="w-full text-left px-2 py-1.5 rounded text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      Keep file on disk
+                    </button>
+                    <button
+                      onClick={() => { onDeleteWithFile?.(true); setConfirmDelete(false); setMenuOpen(false); }}
+                      className="w-full text-left px-2 py-1.5 rounded text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                    >
+                      Delete file from disk
+                    </button>
+                  </div>
+                )}
+                {projectMode && (
+                  <button
+                    onClick={() => { onDelete?.(); setConfirmDelete(false); setMenuOpen(false); }}
+                    className="w-full text-left px-2 py-1.5 rounded text-xs text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 mb-2"
+                  >
+                    Confirm remove
+                  </button>
+                )}
                 <button
-                  onClick={() => { onEditOverrides(); setMenuOpen(false); }}
+                  onClick={() => setConfirmDelete(false)}
+                  className="w-full text-left px-2 py-1 rounded text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              /* ── Normal menu ── */
+              <>
+                {projectMode && onEditOverrides && (
+                  <>
+                    <button
+                      onClick={() => { onEditOverrides(); setMenuOpen(false); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                    >
+                      <Sliders size={14} /> Edit overrides
+                    </button>
+                    <hr className="my-1 border-gray-200 dark:border-gray-700" />
+                  </>
+                )}
+                <button
+                  onClick={() => { setEditingName(true); setMenuOpen(false); }}
                   className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
                 >
-                  <Sliders size={14} /> Edit overrides
+                  <Edit2 size={14} /> Rename
                 </button>
+                <button
+                  onClick={() => { setEditingTags(true); setMenuOpen(false); }}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                >
+                  <Tag size={14} /> Edit tags
+                </button>
+                {!projectMode && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowMoveMenu((v) => !v)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                    >
+                      <FolderInput size={14} /> Move to folder
+                    </button>
+                    {showMoveMenu && (
+                      <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
+                        <button
+                          onClick={() => handleMove(null)}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
+                        >
+                          No folder
+                        </button>
+                        {folders.map((f) => (
+                          <button
+                            key={f.id}
+                            onClick={() => handleMove(f.id)}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${
+                              f.id === asset.folderId
+                                ? 'text-accent font-medium'
+                                : 'text-gray-700 dark:text-gray-200'
+                            }`}
+                          >
+                            {f.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!projectMode && onAddToProject && projects && projects.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowProjectMenu((v) => !v)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                    >
+                      <FolderPlus size={14} /> Add to project
+                    </button>
+                    {showProjectMenu && (
+                      <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
+                        {projects.map((p) => (
+                          <button
+                            key={p.id}
+                            onClick={() => { onAddToProject(p.id); setShowProjectMenu(false); setMenuOpen(false); }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                          >
+                            {p.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <hr className="my-1 border-gray-200 dark:border-gray-700" />
+                <button
+                  onClick={handleDownload}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                >
+                  <Download size={14} /> Download
+                </button>
+                {(onDelete || onDeleteWithFile) && (
+                  <button
+                    onClick={() => setConfirmDelete(true)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 ${
+                      projectMode
+                        ? 'hover:bg-orange-50 dark:hover:bg-orange-900/20 text-orange-600 dark:text-orange-400'
+                        : 'hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400'
+                    }`}
+                  >
+                    <Trash2 size={14} /> {projectMode ? 'Remove from project' : 'Delete'}
+                  </button>
+                )}
               </>
             )}
-            <button
-              onClick={() => { setEditingName(true); setMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-            >
-              <Edit2 size={14} /> Rename
-            </button>
-            <button
-              onClick={() => { setEditingTags(true); setMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-            >
-              <Tag size={14} /> Edit tags
-            </button>
-            {!projectMode && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowMoveMenu((v) => !v)}
-                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-                >
-                  <FolderInput size={14} /> Move to folder
-                </button>
-                {showMoveMenu && (
-                  <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
-                    <button
-                      onClick={() => handleMove(null)}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-                    >
-                      No folder
-                    </button>
-                    {folders.map((f) => (
-                      <button
-                        key={f.id}
-                        onClick={() => handleMove(f.id)}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${
-                          f.id === asset.folderId
-                            ? 'text-accent font-medium'
-                            : 'text-gray-700 dark:text-gray-200'
-                        }`}
-                      >
-                        {f.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {!projectMode && onAddToProject && projects && projects.length > 0 && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowProjectMenu((v) => !v)}
-                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-                >
-                  <FolderPlus size={14} /> Add to project
-                </button>
-                {showProjectMenu && (
-                  <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
-                    {projects.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => { onAddToProject(p.id); setShowProjectMenu(false); setMenuOpen(false); }}
-                        className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-                      >
-                        {p.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            <hr className="my-1 border-gray-200 dark:border-gray-700" />
-            <button
-              onClick={handleDownload}
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-            >
-              <Download size={14} /> Download
-            </button>
-            <button
-              onClick={() => { onDelete(); setMenuOpen(false); }}
-              className={`w-full flex items-center gap-2 px-3 py-2 ${
-                projectMode
-                  ? 'hover:bg-orange-50 dark:hover:bg-orange-900/20 text-orange-600 dark:text-orange-400'
-                  : 'hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400'
-              }`}
-            >
-              <Trash2 size={14} /> {projectMode ? 'Remove from project' : 'Delete'}
-            </button>
           </div>
         )}
       </div>

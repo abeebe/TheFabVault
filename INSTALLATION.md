@@ -103,21 +103,79 @@ Your data in `./data/` is persisted via volume mounts and is not affected by reb
 | `WEB_PORT` | `80` | Host port for the web container. |
 | `VITE_API_URL` | `http://localhost:3000` | URL the **browser** uses to reach the API. Baked into the frontend at build time. |
 | `CORS_ORIGINS` | `http://localhost` | Comma-separated origins the API allows. Must match how the browser loads the UI. |
-| `IMPORT_MOUNT_PATH_HOST` | _(empty)_ | Host path of your NAS or external mount to import from (see NAS Import below). |
-| `IMPORT_MOUNT_PATH` | `/imports` | Container-internal path — do not change. |
-| `IMPORT_MOUNT_ON_STARTUP` | `true` | Automatically scan the mount when the API starts. |
-| `IMPORT_MOUNT_EXTS` | _(empty = defaults)_ | Comma-separated extensions to import. Empty = `stl,obj,3mf,svg,dxf,png,jpg,jpeg,webp`. Use `*` for all. |
+| `STORAGE_DIR` | `./data/storage` | Where asset files and thumbnails are stored. Can be any path — including a NAS mount (see [NAS Storage](#nas-storage) below). |
+| `DATA_DIR` | `./data/db` | Directory for the SQLite database file. |
+| `IMPORT_MOUNT_PATH_HOST` | _(empty)_ | Host path to scan for files to import (see [NAS Import](#nas--mount-import) below). |
+| `IMPORT_MOUNT_PATH` | `/imports` | Container-internal path the host import path is mounted to — do not change. |
+| `IMPORT_MOUNT_ON_STARTUP` | `true` | Automatically scan the import path when the API starts. |
+| `IMPORT_MOUNT_EXTS` | _(empty = defaults)_ | Comma-separated extensions to import. Empty = `stl,obj,3mf,gcode,gc,g,svg,dxf,png,jpg,jpeg,webp`. Use `*` for all. |
 | `IMPORT_MAX_MB` | `512` | Maximum file size to import (in MB). Larger files are skipped. |
+
+---
+
+## Storage
+
+TheFabricatorsVault stores all asset files in a single configurable root directory: `STORAGE_DIR`. Each asset is placed in its own UUID-named subdirectory to prevent filename collisions:
+
+```
+STORAGE_DIR/
+├── a1b2c3d4-.../
+│   └── dragon.stl
+├── e5f6g7h8-.../
+│   └── my_print.gcode
+└── thumbs/
+    ├── a1b2c3d4-....jpg
+    └── e5f6g7h8-....jpg
+```
+
+### Local Storage (Default)
+
+By default `STORAGE_DIR` points to `./data/storage` inside the project. For Docker, this is volume-mounted from the host, so files persist across container rebuilds.
+
+### NAS Storage
+
+To store files directly on a NAS, point `STORAGE_DIR` at the mounted share. All uploads and imports will then write straight to the NAS — no copying between locations:
+
+```bash
+# Mount your NAS share on the host first
+sudo mount -t nfs 192.168.1.50:/volume1/vault /mnt/nas/vault
+# or
+sudo mount -t cifs //192.168.1.50/vault /mnt/nas/vault -o username=user,password=pass
+```
+
+Then in `docker-compose.yml`, add a volume mount so the container can reach it, and set `STORAGE_DIR` to the container-internal path:
+
+```yaml
+services:
+  api:
+    volumes:
+      - ./data/db:/app/data/db
+      - /mnt/nas/vault:/vault   # mount NAS into container
+    environment:
+      - STORAGE_DIR=/vault      # use NAS as storage root
+      - DATA_DIR=/app/data/db
+```
+
+With this setup:
+- Files you upload through the web UI go directly to `/mnt/nas/vault/<uuid>/filename`
+- Files imported via mount scan are **moved** into this structure (zero-copy rename if on the same filesystem)
+- No duplication — there is one copy of every file, on the NAS
 
 ---
 
 ## NAS / Mount Import
 
-TheFabricatorsVault can scan a mounted network share and automatically import files into the vault while preserving directory structure as folders.
+In addition to uploads, TheFabricatorsVault can scan a directory for existing files and import them into the vault while preserving directory structure as folders.
+
+**How import works:**
+- Files are **moved** into `STORAGE_DIR/<uuid>/filename`, not copied
+- On the same filesystem, this is an instant rename — zero data duplication
+- Across different filesystems (e.g., scanning a separate NAS share into local storage), the file is copied then the source is deleted
+- Files already imported are tracked by their original absolute path and are never imported twice
 
 ### Setup
 
-1. Mount your NAS share on the host:
+1. Mount the directory you want to scan on the host:
 
 ```bash
 # Example: NFS
@@ -131,7 +189,6 @@ sudo mount -t cifs //192.168.1.50/3dprints /mnt/nas/3dprints -o username=user,pa
 
 ```env
 IMPORT_MOUNT_PATH_HOST=/mnt/nas/3dprints
-IMPORT_MOUNT_PATH=/imports
 IMPORT_MOUNT_ON_STARTUP=true
 ```
 
@@ -141,16 +198,29 @@ IMPORT_MOUNT_ON_STARTUP=true
 docker compose up -d --build
 ```
 
-On startup the API will scan the mount, copy matching files into storage, and queue thumbnails for generation. Files already imported (tracked by source path) are skipped on subsequent scans.
+On startup the API will scan the import path, move matching files into `STORAGE_DIR`, create matching vault folders, and queue thumbnails for generation.
+
+> **Tip:** If you want both storage and imports on the same NAS with no data movement at all, set `STORAGE_DIR` to the NAS path (see [NAS Storage](#nas-storage)) and set `IMPORT_MOUNT_PATH_HOST` to a subdirectory or separate folder on that same share. Files will be renamed (not copied) within the NAS.
 
 ### Manual Re-scan
 
-Trigger a scan at any time from the sidebar's import button in the UI, or via the API:
+Trigger a scan at any time from the **"Scan NAS mount"** button in the sidebar, or via the API:
 
 ```bash
 curl -X POST http://localhost:3000/import/scan \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
+
+---
+
+## Deleting Assets
+
+When you delete an asset from the vault, you have two options:
+
+- **Remove from vault** — removes the database record and generated thumbnail, but leaves the original file on disk untouched. Useful when storage is on a NAS and you want to keep the file.
+- **Delete file from disk** — removes the database record, thumbnail, and the actual file. This is permanent.
+
+Both options are available in the asset card's context menu (single asset) and in the batch action bar when multiple assets are selected.
 
 ---
 
@@ -217,13 +287,17 @@ npm run dev
 
 ## Data Storage
 
-All persistent data is written to `./data/` on the host:
+All persistent data lives under `STORAGE_DIR` (files) and `DATA_DIR` (database):
 
 ```
-data/
-├── storage/          # Uploaded files and generated thumbnails
+data/                         # default locations
+├── storage/
+│   ├── <uuid>/               # one directory per asset
+│   │   └── filename.stl
+│   └── thumbs/
+│       └── <uuid>.jpg
 └── db/
-    └── thefabricatorsvault.db   # SQLite database
+    └── thefabricatorsvault.db
 ```
 
-Back up the entire `./data/` directory to preserve your vault. Restoring is as simple as copying it back and running `docker compose up`.
+To back up your vault, copy both `STORAGE_DIR` and `DATA_DIR`. Restoring is as simple as copying them back and running `docker compose up`.

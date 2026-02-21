@@ -4,6 +4,7 @@ import { AssetCard } from './AssetCard.js';
 import { TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
 import { ModelViewer } from './ModelViewer.js';
+import { Modal } from './Modal.js';
 import { api } from '../lib/api.js';
 import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides } from '../types/index.js';
 
@@ -30,6 +31,8 @@ export function AssetGrid({
   const [previewAsset, setPreviewAsset] = useState<AssetOut | null>(null);
   const [batchTagMode, setBatchTagMode] = useState(false);
   const [batchTags, setBatchTags] = useState<string[]>([]);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   function toggleSelect(id: string) {
     setSelected((prev) => {
@@ -40,14 +43,24 @@ export function AssetGrid({
     });
   }
 
-  async function handleBatchDelete() {
-    if (!window.confirm(`Delete ${selected.size} file(s)? This cannot be undone.`)) return;
+  // Single-asset delete — fixes bug where card never called the API
+  async function handleAssetDelete(id: string, deleteFile: boolean) {
+    try {
+      await api.assets.delete(id, { deleteFile });
+      onDelete(id);
+    } catch {}
+  }
+
+  async function executeBatchDelete(deleteFile: boolean) {
+    setBatchDeleting(true);
     for (const id of selected) {
       try {
-        await api.assets.delete(id);
+        await api.assets.delete(id, { deleteFile });
         onDelete(id);
       } catch {}
     }
+    setBatchDeleting(false);
+    setBatchDeleteOpen(false);
     setSelected(new Set());
   }
 
@@ -127,33 +140,39 @@ export function AssetGrid({
               >
                 <Tag size={14} /> Add tags
               </button>
-              <div className="relative group">
-                <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
-                  <FolderInput size={14} /> Move to...
-                </button>
-                <div className="absolute right-0 top-full mt-1 hidden group-hover:block w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 z-20 animate-fade-in">
-                  <button
-                    onClick={() => handleBatchMove(null)}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-                  >
-                    No folder
+              {!projectMode && (
+                <div className="relative group">
+                  <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <FolderInput size={14} /> Move to...
                   </button>
-                  {folders.map((f) => (
+                  <div className="absolute right-0 top-full mt-1 hidden group-hover:block w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 z-20 animate-fade-in">
                     <button
-                      key={f.id}
-                      onClick={() => handleBatchMove(f.id)}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                      onClick={() => handleBatchMove(null)}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
                     >
-                      {f.name}
+                      No folder
                     </button>
-                  ))}
+                    {folders.map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => handleBatchMove(f.id)}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                      >
+                        {f.name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
               <button
-                onClick={handleBatchDelete}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                onClick={() => setBatchDeleteOpen(true)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border ${
+                  projectMode
+                    ? 'border-orange-300 dark:border-orange-700 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20'
+                    : 'border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'
+                }`}
               >
-                <Trash2 size={14} /> Delete
+                <Trash2 size={14} /> {projectMode ? 'Remove' : 'Delete'}
               </button>
               <button
                 onClick={() => setSelected(new Set())}
@@ -176,7 +195,6 @@ export function AssetGrid({
             selected={selected.has(asset.id)}
             onSelect={() => toggleSelect(asset.id)}
             onUpdate={onUpdate}
-            onDelete={() => onDelete(asset.id)}
             onPreview={() => setPreviewAsset(asset)}
             projectMode={projectMode}
             hasOverrides={!!(projectAssetOverrides?.[asset.id] && (
@@ -187,6 +205,9 @@ export function AssetGrid({
             onEditOverrides={onEditOverrides ? () => onEditOverrides(asset) : undefined}
             projects={projects}
             onAddToProject={onAddToProject ? (projectId) => onAddToProject(asset.id, projectId) : undefined}
+            // project mode: parent handles remove-from-project API call; normal mode: we handle delete here
+            onDelete={projectMode ? () => onDelete(asset.id) : undefined}
+            onDeleteWithFile={!projectMode ? (deleteFile) => handleAssetDelete(asset.id, deleteFile) : undefined}
           />
         ))}
       </div>
@@ -197,6 +218,71 @@ export function AssetGrid({
           onClose={() => setPreviewAsset(null)}
           onUpdate={(updated) => { onUpdate(updated); setPreviewAsset(updated); }}
         />
+      )}
+
+      {/* Batch delete modal */}
+      {batchDeleteOpen && (
+        <Modal
+          title={projectMode ? `Remove ${selected.size} file${selected.size !== 1 ? 's' : ''} from project?` : `Delete ${selected.size} file${selected.size !== 1 ? 's' : ''}?`}
+          onClose={() => setBatchDeleteOpen(false)}
+        >
+          <div className="p-1 space-y-4">
+            {projectMode ? (
+              <>
+                <p className="text-sm text-gray-600 dark:text-gray-300">
+                  The selected files will be removed from this project. They will remain in your vault.
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setBatchDeleteOpen(false)}
+                    className="px-3 py-1.5 text-sm rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => executeBatchDelete(false)}
+                    disabled={batchDeleting}
+                    className="px-4 py-1.5 text-sm rounded bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-60"
+                  >
+                    {batchDeleting ? 'Removing…' : 'Remove from project'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-600 dark:text-gray-300">
+                  Choose how to remove the selected {selected.size} file{selected.size !== 1 ? 's' : ''}:
+                </p>
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() => executeBatchDelete(false)}
+                    disabled={batchDeleting}
+                    className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60 text-left"
+                  >
+                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Remove from vault</span>
+                    <span className="text-xs text-gray-400 mt-0.5">Files remain on disk — only the vault records are removed</span>
+                  </button>
+                  <button
+                    onClick={() => executeBatchDelete(true)}
+                    disabled={batchDeleting}
+                    className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 text-left"
+                  >
+                    <span className="text-sm font-medium text-red-600 dark:text-red-400">Delete files from disk</span>
+                    <span className="text-xs text-gray-400 mt-0.5">Permanently removes vault records and deletes the files</span>
+                  </button>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setBatchDeleteOpen(false)}
+                    className="px-3 py-1.5 text-sm rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
       )}
     </>
   );

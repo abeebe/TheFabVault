@@ -1,6 +1,6 @@
 # TheFabricatorsVault
 
-A self-hosted digital asset vault for makers, hackers, and hobbyists. Organize your 3D print files, laser cut designs, SVGs, DXF patterns, and reference images in one place — with thumbnails, folders, tags, and full-text search.
+A self-hosted digital asset vault for makers, hackers, and hobbyists. Organize your 3D print files, GCode, laser cut designs, SVGs, DXF patterns, and reference images in one place — with thumbnails, metadata extraction, folders, tags, and full-text search.
 
 ---
 
@@ -10,11 +10,16 @@ A self-hosted digital asset vault for makers, hackers, and hobbyists. Organize y
 - **Folder tree** — nested folders with drag-and-drop-friendly hierarchy
 - **Tag system** — apply multiple tags per asset; filter by any combination
 - **Full-text search** — search across filenames, tags, and notes
-- **Thumbnail generation** — automatic previews for 3D models (STL, OBJ, 3MF), images (PNG, JPG, WEBP), SVG, and DXF files
+- **Metadata extraction** — automatic extraction of useful info from every file type: dimensions and color space from images, triangle count and bounding box from 3D models, slicer settings and print stats from GCode
+- **Thumbnail generation** — automatic previews for 3D models (STL, OBJ, 3MF), images (PNG, JPG, WEBP), SVG, DXF, and GCode (uses embedded slicer thumbnail if present)
 - **3D model viewer** — interactive Three.js viewer for STL, OBJ, and 3MF files directly in the browser
-- **DXF viewer** — lightweight 2D preview for CNC and laser cut DXF files
+- **GCode viewer** — syntax-highlighted code viewer with slicer stats panel (print time, filament, temps, layer info)
+- **DXF/SVG viewer** — lightweight 2D preview for CNC and laser cut files
+- **Projects** — group assets into named projects with printer, laser, and vinyl settings that cascade to all files; per-file setting overrides supported
 - **Bulk download** — download any selection of assets as a ZIP archive
-- **NAS / mount import** — point the API at a mounted network share and it will scan and import files automatically, preserving folder structure
+- **NAS / mount import** — point the API at a mounted network share; files are **moved** into storage (zero-copy rename on the same filesystem), preserving folder structure. No duplication.
+- **Configurable storage root** — point `STORAGE_DIR` at any path, including a NAS mount, so uploads and imports both land in the same location
+- **Flexible delete** — choose to remove an asset from the vault only (file stays on disk) or delete the file too
 - **JWT authentication** — simple single-user auth; disable it entirely for LAN-only setups
 - **Dark / light / system theme** — persisted per browser
 - **Docker-first** — ships as two containers (API + web) wired together with Docker Compose
@@ -24,10 +29,11 @@ A self-hosted digital asset vault for makers, hackers, and hobbyists. Organize y
 | Category | Extensions |
 |---|---|
 | 3D Models | `.stl` `.obj` `.3mf` |
+| GCode | `.gcode` `.gc` `.g` |
 | Vector / CAD | `.svg` `.dxf` |
 | Images | `.png` `.jpg` `.jpeg` `.webp` |
 
-Any other file type can be stored and downloaded; thumbnails are generated only for the types listed above.
+Any other file type can be stored and downloaded; thumbnails and metadata are generated only for the types listed above.
 
 ## Architecture
 
@@ -40,13 +46,14 @@ Any other file type can be stored and downloaded; thumbnails are generated only 
                                     ┌────────────┼────────────┐
                                     │            │            │
                                SQLite DB    File Storage  Thumbnails
-                               (SQLite3)    (./data/storage) (Puppeteer
-                                                              + Three.js)
+                               (SQLite3)    (STORAGE_DIR) (Puppeteer
+                                                            + Three.js)
 ```
 
 - **Frontend** — React 18, Vite, TypeScript, Tailwind CSS, Three.js, lucide-react
 - **Backend** — Node.js, Express, TypeScript, better-sqlite3, Puppeteer (headless Chromium for thumbnail rendering), Sharp (image processing), Archiver (ZIP export)
 - **Database** — SQLite, schema-versioned migrations, WAL mode
+- **Storage** — flat filesystem: `STORAGE_DIR/<uuid>/<filename>`. `STORAGE_DIR` defaults to `./data/storage` but can be any path — including a NAS mount.
 
 ## Quick Start
 
@@ -62,7 +69,7 @@ docker compose up -d --build
 # http://YOUR_SERVER_IP:8080
 ```
 
-See [INSTALLATION.md](INSTALLATION.md) for full setup instructions, environment variable reference, NAS import configuration, and local development setup.
+See [INSTALLATION.md](INSTALLATION.md) for full setup instructions, environment variable reference, NAS storage configuration, and local development setup.
 
 ## Project Structure
 
@@ -70,15 +77,15 @@ See [INSTALLATION.md](INSTALLATION.md) for full setup instructions, environment 
 TheFabricatorsVault/
 ├── api/                  # Express API server
 │   └── src/
-│       ├── routes/       # assets, folders, auth, thumbs
-│       ├── services/     # fileStore, thumbGen, mountImport
+│       ├── routes/       # assets, folders, projects, auth, thumbs
+│       ├── services/     # fileStore, thumbGen, mountImport, metaExtract
 │       ├── auth.ts       # JWT middleware
 │       ├── config.ts     # environment config
 │       └── db.ts         # SQLite + migrations
 ├── web/                  # React frontend
 │   └── src/
 │       ├── components/   # UI components
-│       ├── hooks/        # useAssets, useFolders, useAuth, useTheme
+│       ├── hooks/        # useAssets, useFolders, useProjects, useAuth, useTheme
 │       └── lib/          # api client, dxf renderer, theme
 ├── data/                 # Created at runtime (gitignored)
 │   ├── storage/          # Uploaded asset files + thumbnails

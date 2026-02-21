@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api:
     build:
@@ -24,7 +22,12 @@ services:
     volumes:
       - ./data/storage:/app/storage
       - ./data/db:/app/data
-      - "${IMPORT_MOUNT_PATH_HOST:-/dev/null}:/imports:ro"
+      - type: bind
+        source: "${IMPORT_MOUNT_PATH_HOST:-./data/imports-stub}"
+        target: /imports
+        read_only: true
+        bind:
+          create_host_path: true
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 15s

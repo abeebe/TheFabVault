@@ -31,6 +31,24 @@ function parseAllowedExts(raw: string): Set<string> | null {
   return exts.size > 0 ? exts : null;
 }
 
+/**
+ * Move a file from src to dst.
+ * Uses fs.renameSync for zero-copy moves on the same filesystem.
+ * Falls back to copy + delete when src and dst are on different devices (EXDEV).
+ */
+function moveFile(src: string, dst: string): void {
+  try {
+    fs.renameSync(src, dst);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+      fs.copyFileSync(src, dst);
+      fs.unlinkSync(src);
+    } else {
+      throw err;
+    }
+  }
+}
+
 export async function scanMountImports(): Promise<ScanResult> {
   const mountPath = config.importMountPath;
   if (!mountPath) {
@@ -126,9 +144,9 @@ export async function scanMountImports(): Promise<ScanResult> {
     );
 
     try {
-      // Copy file to storage
+      // Move file into storage (rename on same FS, copy+delete across devices)
       const dest = assetFilePath(id, filename);
-      fs.copyFileSync(absPath, dest);
+      moveFile(absPath, dest);
 
       // Extract metadata asynchronously (fire and forget — errors are logged)
       extractMeta(dest).then((meta) => {

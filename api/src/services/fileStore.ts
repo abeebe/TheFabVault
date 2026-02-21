@@ -27,15 +27,18 @@ export function thumbExists(assetId: string): boolean {
   return fs.existsSync(thumbFilePath(assetId));
 }
 
-export function cleanupAsset(assetId: string): void {
-  try {
-    const dir = path.join(STORAGE_DIR, assetId);
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
+export function cleanupAsset(assetId: string, { deleteFile = true }: { deleteFile?: boolean } = {}): void {
+  if (deleteFile) {
+    try {
+      const dir = path.join(STORAGE_DIR, assetId);
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      console.error(`[fileStore] Failed to cleanup asset dir ${assetId}:`, err);
     }
-  } catch (err) {
-    console.error(`[fileStore] Failed to cleanup asset dir ${assetId}:`, err);
   }
+  // Always remove the generated thumbnail regardless of deleteFile
   try {
     const thumb = thumbFilePath(assetId);
     if (fs.existsSync(thumb)) {

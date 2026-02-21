@@ -100,8 +100,8 @@ export const api = {
     moveToFolder: (id: string, folderId: string | null): Promise<AssetOut> =>
       apiFetch(`/asset/${id}/folder`, { method: 'PATCH', body: JSON.stringify({ folder_id: folderId }) }),
 
-    delete: (id: string): Promise<void> =>
-      apiFetch(`/asset/${id}`, { method: 'DELETE' }),
+    delete: (id: string, opts?: { deleteFile?: boolean }): Promise<void> =>
+      apiFetch(`/asset/${id}?delete_file=${opts?.deleteFile ?? true}`, { method: 'DELETE' }),
 
     extractMeta: (id: string): Promise<AssetOut> =>
       apiFetch(`/asset/${id}/extract-meta`, { method: 'POST' }),
