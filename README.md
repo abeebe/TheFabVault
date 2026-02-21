@@ -57,6 +57,7 @@ Any other file type can be stored and downloaded; thumbnails and metadata are ge
 
 ## Quick Start
 
+### Docker (Recommended)
 ```bash
 # 1. Copy and configure environment
 cp .env.example .env
@@ -69,7 +70,15 @@ docker compose up -d --build
 # http://YOUR_SERVER_IP:8080
 ```
 
-See [INSTALLATION.md](INSTALLATION.md) for full setup instructions, environment variable reference, NAS storage configuration, and local development setup.
+### Local / Non-Docker
+```bash
+cp .env.example .env
+# Edit .env with your settings
+./start.sh
+# Open http://localhost:8080
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for full setup instructions, environment variable reference, NAS storage configuration, local development, and troubleshooting.
 
 ## Project Structure
 
