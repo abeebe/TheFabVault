@@ -1,4 +1,8 @@
-import type { AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult } from '../types/index.js';
+import type {
+  AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult,
+  ProjectOut, ProjectDetailOut, ProjectOverrides,
+  PrinterSettings, LaserSettings, VinylSettings,
+} from '../types/index.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
 
@@ -99,6 +103,9 @@ export const api = {
     delete: (id: string): Promise<void> =>
       apiFetch(`/asset/${id}`, { method: 'DELETE' }),
 
+    extractMeta: (id: string): Promise<AssetOut> =>
+      apiFetch(`/asset/${id}/extract-meta`, { method: 'POST' }),
+
     fileUrl: (asset: AssetOut): string => {
       const token = getToken();
       const base = `${API_BASE}${asset.url}`;
@@ -136,6 +143,46 @@ export const api = {
       const base = `${API_BASE}/folder/${id}/download`;
       return token ? `${base}?token=${encodeURIComponent(token)}` : base;
     },
+  },
+
+  projects: {
+    list: (): Promise<ProjectOut[]> => apiFetch('/projects'),
+
+    get: (id: string): Promise<ProjectDetailOut> => apiFetch(`/project/${id}`),
+
+    create: (body: {
+      name: string;
+      description?: string;
+      folderId?: string | null;
+      tags?: string[];
+      printerSettings?: PrinterSettings;
+      laserSettings?: LaserSettings;
+      vinylSettings?: VinylSettings;
+    }): Promise<ProjectOut> =>
+      apiFetch('/projects', { method: 'POST', body: JSON.stringify(body) }),
+
+    update: (id: string, body: {
+      name?: string;
+      description?: string;
+      folderId?: string | null;
+      tags?: string[];
+      printerSettings?: PrinterSettings;
+      laserSettings?: LaserSettings;
+      vinylSettings?: VinylSettings;
+    }): Promise<ProjectOut> =>
+      apiFetch(`/project/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    delete: (id: string): Promise<void> =>
+      apiFetch(`/project/${id}`, { method: 'DELETE' }),
+
+    addAssets: (id: string, assetIds: string[]): Promise<void> =>
+      apiFetch(`/project/${id}/assets`, { method: 'POST', body: JSON.stringify({ assetIds }) }),
+
+    removeAsset: (id: string, assetId: string): Promise<void> =>
+      apiFetch(`/project/${id}/asset/${assetId}`, { method: 'DELETE' }),
+
+    updateOverrides: (id: string, assetId: string, overrides: ProjectOverrides): Promise<void> =>
+      apiFetch(`/project/${id}/asset/${assetId}/overrides`, { method: 'PATCH', body: JSON.stringify(overrides) }),
   },
 
   download: {

@@ -6,6 +6,7 @@ import mime from 'mime-types';
 import { getDb } from '../db.js';
 import { assetFilePath, assetDir, cleanupAsset } from './fileStore.js';
 import { enqueueThumb } from './thumbGen.js';
+import { extractMeta } from './metaExtract.js';
 import { config } from '../config.js';
 import type { ScanResult, AssetRow } from '../types/index.js';
 
@@ -13,9 +14,10 @@ const DEFAULT_EXTS = new Set([
   '.stl', '.obj', '.3mf',
   '.svg', '.dxf',
   '.png', '.jpg', '.jpeg', '.webp',
+  '.gcode', '.gc', '.g',
 ]);
 
-const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.png', '.jpg', '.jpeg', '.webp']);
+const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
 
 function parseAllowedExts(raw: string): Set<string> | null {
   if (!raw.trim()) return null; // null = use defaults
@@ -110,8 +112,8 @@ export async function scanMountImports(): Promise<ScanResult> {
     const id = uuidv4();
 
     db.prepare(
-      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status)
-       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)`
+      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status, meta_json)
+       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '{}')`
     ).run(
       id,
       filename,
@@ -127,6 +129,12 @@ export async function scanMountImports(): Promise<ScanResult> {
       // Copy file to storage
       const dest = assetFilePath(id, filename);
       fs.copyFileSync(absPath, dest);
+
+      // Extract metadata asynchronously (fire and forget — errors are logged)
+      extractMeta(dest).then((meta) => {
+        db.prepare('UPDATE assets SET meta_json = ? WHERE id = ?')
+          .run(JSON.stringify(meta), id);
+      }).catch((err) => console.warn(`[mountImport] Meta extraction failed for ${id}:`, err));
 
       if (THUMB_EXTS.has(ext)) {
         enqueueThumb(id);

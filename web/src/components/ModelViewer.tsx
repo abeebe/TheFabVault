@@ -4,6 +4,8 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
+import { GCodeViewer } from './GCodeViewer.js';
+import { MetaPanel } from './MetaPanel.js';
 import { dxfToSvg } from '../lib/dxf.js';
 import { api } from '../lib/api.js';
 import type { AssetOut } from '../types/index.js';
@@ -11,12 +13,14 @@ import type { AssetOut } from '../types/index.js';
 interface ModelViewerProps {
   asset: AssetOut;
   onClose: () => void;
+  onUpdate?: (updated: AssetOut) => void;
 }
 
 const STL_EXTS = new Set(['.stl', '.obj', '.3mf']);
 const SVG_EXTS = new Set(['.svg']);
 const DXF_EXTS = new Set(['.dxf']);
 const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
+const GCODE_EXTS = new Set(['.gcode', '.gc', '.g']);
 
 function getExt(filename: string): string {
   return filename.slice(filename.lastIndexOf('.')).toLowerCase();
@@ -205,25 +209,45 @@ function ImageViewer({ asset }: { asset: AssetOut }) {
   );
 }
 
-export function ModelViewer({ asset, onClose }: ModelViewerProps) {
-  const ext = getExt(asset.filename);
+export function ModelViewer({ asset, onClose, onUpdate }: ModelViewerProps) {
+  const [currentAsset, setCurrentAsset] = useState(asset);
+  const ext = getExt(currentAsset.filename);
+
+  function handleMetaRefresh(updated: AssetOut) {
+    setCurrentAsset(updated);
+    onUpdate?.(updated);
+  }
+
+  const isGCode = GCODE_EXTS.has(ext);
+  const hasGraphicViewer = STL_EXTS.has(ext) || SVG_EXTS.has(ext) || DXF_EXTS.has(ext) || IMG_EXTS.has(ext);
 
   return (
     <Modal
-      title={asset.originalName || asset.filename}
+      title={currentAsset.originalName || currentAsset.filename}
       onClose={onClose}
       wide
     >
-      <div className="h-[75vh]">
-        {STL_EXTS.has(ext) && <ThreeViewer asset={asset} />}
-        {(SVG_EXTS.has(ext) || DXF_EXTS.has(ext)) && <SvgViewer asset={asset} />}
-        {IMG_EXTS.has(ext) && <ImageViewer asset={asset} />}
-        {!STL_EXTS.has(ext) && !SVG_EXTS.has(ext) && !DXF_EXTS.has(ext) && !IMG_EXTS.has(ext) && (
-          <div className="flex items-center justify-center h-full text-gray-500">
+      {isGCode && (
+        <GCodeViewer asset={currentAsset} />
+      )}
+      {hasGraphicViewer && (
+        <>
+          <div className="h-[55vh]">
+            {STL_EXTS.has(ext) && <ThreeViewer asset={currentAsset} />}
+            {(SVG_EXTS.has(ext) || DXF_EXTS.has(ext)) && <SvgViewer asset={currentAsset} />}
+            {IMG_EXTS.has(ext) && <ImageViewer asset={currentAsset} />}
+          </div>
+          <MetaPanel asset={currentAsset} onRefresh={handleMetaRefresh} />
+        </>
+      )}
+      {!hasGraphicViewer && !isGCode && (
+        <>
+          <div className="flex items-center justify-center py-10 text-gray-500">
             No preview available for this file type
           </div>
-        )}
-      </div>
+          <MetaPanel asset={currentAsset} onRefresh={handleMetaRefresh} />
+        </>
+      )}
     </Modal>
   );
 }

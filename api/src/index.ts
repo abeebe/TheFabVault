@@ -9,6 +9,7 @@ import authRouter from './routes/auth.js';
 import assetsRouter from './routes/assets.js';
 import foldersRouter from './routes/folders.js';
 import thumbsRouter from './routes/thumbs.js';
+import projectsRouter from './routes/projects.js';
 import { requeuePendingThumbs, setServerPort } from './services/thumbGen.js';
 import { scanMountImports } from './services/mountImport.js';
 
@@ -45,6 +46,7 @@ app.use('/', authRouter);
 app.use('/', assetsRouter);
 app.use('/', foldersRouter);
 app.use('/', thumbsRouter);
+app.use('/', projectsRouter);
 
 // Import scan endpoint
 app.post('/import/scan', requireAuth, async (_req, res) => {
@@ -64,7 +66,7 @@ app.use((_req, res) => {
 
 // Start server
 const server = app.listen(config.port, () => {
-  console.log(`[api] MakerVault API listening on port ${config.port}`);
+  console.log(`[api] TheFabricatorsVault API listening on port ${config.port}`);
   console.log(`[api] Auth: ${config.authEnabled ? 'enabled' : 'DISABLED'}`);
   console.log(`[api] Storage: ${config.storageDir}`);
 

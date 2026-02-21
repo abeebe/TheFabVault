@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import PQueue from 'p-queue';
 import { getDb } from '../db.js';
 import { assetFilePath, thumbFilePath } from './fileStore.js';
+import { extractGCodeThumbnail } from './metaExtract.js';
 import type { AssetRow } from '../types/index.js';
 
 const queue = new PQueue({ concurrency: 2 });
@@ -13,6 +14,7 @@ let serverPort = 3000;
 
 const STL_EXTS = new Set(['.stl', '.obj', '.3mf']);
 const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.svg']);
+const GCODE_EXTS = new Set(['.gcode', '.gc', '.g']);
 
 export function setServerPort(port: number): void {
   serverPort = port;
@@ -133,6 +135,13 @@ export async function generateThumb(assetId: string): Promise<void> {
       } finally {
         await page.close().catch(() => {});
       }
+      return;
+    }
+
+    if (GCODE_EXTS.has(ext)) {
+      const found = await extractGCodeThumbnail(filePath, assetId);
+      db.prepare(`UPDATE assets SET thumb_status = ? WHERE id = ?`)
+        .run(found ? 'done' : 'none', assetId);
       return;
     }
 

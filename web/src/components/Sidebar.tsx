@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { RefreshCw, Download, Tag, X } from 'lucide-react';
+import { RefreshCw, Download, Tag, X, Plus, Layers, ChevronDown, ChevronRight } from 'lucide-react';
 import { FolderTree } from './FolderTree.js';
 import { TagBadge } from './TagInput.js';
 import { api } from '../lib/api.js';
-import type { AssetOut, FolderOut } from '../types/index.js';
+import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
 
 interface SidebarProps {
   folders: FolderOut[];
@@ -16,6 +16,11 @@ interface SidebarProps {
   onFolderRename: (id: string, name: string) => void;
   onFolderDelete: (id: string) => void;
   onImportScan: () => void;
+  // Projects
+  projects?: ProjectOut[];
+  selectedProjectId?: string | null;
+  onProjectSelect?: (id: string) => void;
+  onProjectCreate?: () => void;
 }
 
 export function Sidebar({
@@ -29,9 +34,14 @@ export function Sidebar({
   onFolderRename,
   onFolderDelete,
   onImportScan,
+  projects,
+  selectedProjectId,
+  onProjectSelect,
+  onProjectCreate,
 }: SidebarProps) {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [projectsExpanded, setProjectsExpanded] = useState(true);
 
   async function handleScan() {
     setScanning(true);
@@ -53,10 +63,10 @@ export function Sidebar({
       <div className="px-4 py-4 border-b border-gray-200 dark:border-gray-700">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center flex-shrink-0">
-            <span className="text-white text-xs font-bold">MV</span>
+            <span className="text-white text-xs font-bold">TFV</span>
           </div>
           <div className="min-w-0">
-            <p className="font-semibold text-gray-900 dark:text-gray-100 text-sm leading-tight">MakerVault</p>
+            <p className="font-semibold text-gray-900 dark:text-gray-100 text-sm leading-tight">TheFabricatorsVault</p>
             <p className="text-[10px] text-gray-400 italic leading-tight truncate">Light it up · Stick it on · Print it out</p>
           </div>
         </div>
@@ -75,6 +85,54 @@ export function Sidebar({
             onDelete={onFolderDelete}
           />
         </div>
+
+        {/* Projects section */}
+        {projects !== undefined && (
+          <div>
+            <div className="flex items-center justify-between px-2 mb-1">
+              <button
+                onClick={() => setProjectsExpanded((v) => !v)}
+                className="flex items-center gap-1 text-xs font-semibold text-gray-400 uppercase tracking-wider hover:text-gray-600 dark:hover:text-gray-200"
+              >
+                {projectsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                Projects
+              </button>
+              {onProjectCreate && (
+                <button
+                  onClick={onProjectCreate}
+                  title="New project"
+                  className="p-0.5 rounded text-gray-400 hover:text-accent hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <Plus size={13} />
+                </button>
+              )}
+            </div>
+
+            {projectsExpanded && (
+              <div className="flex flex-col gap-0.5">
+                {projects.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-gray-400 italic">No projects yet</p>
+                ) : (
+                  projects.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => onProjectSelect?.(p.id)}
+                      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+                        selectedProjectId === p.id
+                          ? 'bg-accent/10 text-accent font-medium'
+                          : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      <Layers size={13} className="flex-shrink-0 text-gray-400" />
+                      <span className="truncate">{p.name}</span>
+                      <span className="ml-auto text-[10px] text-gray-400">{p.assetCount}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Tags section */}
         {allTags.length > 0 && (

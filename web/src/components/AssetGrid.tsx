@@ -5,7 +5,7 @@ import { TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
 import { ModelViewer } from './ModelViewer.js';
 import { api } from '../lib/api.js';
-import type { AssetOut, FolderOut } from '../types/index.js';
+import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides } from '../types/index.js';
 
 interface AssetGridProps {
   assets: AssetOut[];
@@ -13,9 +13,19 @@ interface AssetGridProps {
   loading: boolean;
   onUpdate: (updated: AssetOut) => void;
   onDelete: (id: string) => void;
+  // Project mode
+  projectMode?: boolean;
+  onEditOverrides?: (asset: AssetOut) => void;
+  projectAssetOverrides?: Record<string, ProjectOverrides>;
+  projects?: ProjectOut[];
+  onAddToProject?: (assetId: string, projectId: string) => void;
 }
 
-export function AssetGrid({ assets, folders, loading, onUpdate, onDelete }: AssetGridProps) {
+export function AssetGrid({
+  assets, folders, loading, onUpdate, onDelete,
+  projectMode, onEditOverrides, projectAssetOverrides,
+  projects, onAddToProject,
+}: AssetGridProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewAsset, setPreviewAsset] = useState<AssetOut | null>(null);
   const [batchTagMode, setBatchTagMode] = useState(false);
@@ -168,6 +178,15 @@ export function AssetGrid({ assets, folders, loading, onUpdate, onDelete }: Asse
             onUpdate={onUpdate}
             onDelete={() => onDelete(asset.id)}
             onPreview={() => setPreviewAsset(asset)}
+            projectMode={projectMode}
+            hasOverrides={!!(projectAssetOverrides?.[asset.id] && (
+              Object.keys(projectAssetOverrides[asset.id].printer ?? {}).length > 0 ||
+              Object.keys(projectAssetOverrides[asset.id].laser ?? {}).length > 0 ||
+              Object.keys(projectAssetOverrides[asset.id].vinyl ?? {}).length > 0
+            ))}
+            onEditOverrides={onEditOverrides ? () => onEditOverrides(asset) : undefined}
+            projects={projects}
+            onAddToProject={onAddToProject ? (projectId) => onAddToProject(asset.id, projectId) : undefined}
           />
         ))}
       </div>
@@ -176,6 +195,7 @@ export function AssetGrid({ assets, folders, loading, onUpdate, onDelete }: Asse
         <ModelViewer
           asset={previewAsset}
           onClose={() => setPreviewAsset(null)}
+          onUpdate={(updated) => { onUpdate(updated); setPreviewAsset(updated); }}
         />
       )}
     </>

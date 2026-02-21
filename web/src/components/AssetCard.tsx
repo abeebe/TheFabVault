@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Download, Trash2, Tag, FolderInput, Edit2, FileBox,
-  Image, File, MoreVertical, CheckSquare, Square,
+  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { TagBadge, TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
-import type { AssetOut, FolderOut } from '../types/index.js';
+import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
 
 interface AssetCardProps {
   asset: AssetOut;
@@ -16,6 +16,12 @@ interface AssetCardProps {
   onUpdate: (updated: AssetOut) => void;
   onDelete: () => void;
   onPreview: () => void;
+  // Project mode
+  projectMode?: boolean;
+  hasOverrides?: boolean;
+  onEditOverrides?: () => void;
+  projects?: ProjectOut[];
+  onAddToProject?: (projectId: string) => void;
 }
 
 function getFileIcon(mime: string, filename: string) {
@@ -31,13 +37,18 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function AssetCard({ asset, folders, selected, onSelect, onUpdate, onDelete, onPreview }: AssetCardProps) {
+export function AssetCard({
+  asset, folders, selected, onSelect, onUpdate, onDelete, onPreview,
+  projectMode, hasOverrides, onEditOverrides,
+  projects, onAddToProject,
+}: AssetCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameVal, setNameVal] = useState(asset.originalName || asset.filename);
   const [editingTags, setEditingTags] = useState(false);
   const [tags, setTags] = useState(asset.tags);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
+  const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [saving, setSaving] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -129,6 +140,15 @@ export function AssetCard({ asset, folders, selected, onSelect, onUpdate, onDele
           : <Square size={18} className="text-gray-400" />
         }
       </button>
+
+      {/* Override badge */}
+      {projectMode && hasOverrides && (
+        <div className="absolute top-2 left-8 z-10">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-400/90 text-amber-900">
+            overrides
+          </span>
+        </div>
+      )}
 
       {/* Thumbnail area */}
       <div
@@ -236,7 +256,18 @@ export function AssetCard({ asset, folders, selected, onSelect, onUpdate, onDele
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-7 z-20 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 text-sm animate-fade-in">
+          <div className="absolute right-0 top-7 z-20 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 text-sm animate-fade-in">
+            {projectMode && onEditOverrides && (
+              <>
+                <button
+                  onClick={() => { onEditOverrides(); setMenuOpen(false); }}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                >
+                  <Sliders size={14} /> Edit overrides
+                </button>
+                <hr className="my-1 border-gray-200 dark:border-gray-700" />
+              </>
+            )}
             <button
               onClick={() => { setEditingName(true); setMenuOpen(false); }}
               className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
@@ -249,37 +280,62 @@ export function AssetCard({ asset, folders, selected, onSelect, onUpdate, onDele
             >
               <Tag size={14} /> Edit tags
             </button>
-            <div className="relative">
-              <button
-                onClick={() => setShowMoveMenu((v) => !v)}
-                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-              >
-                <FolderInput size={14} /> Move to folder
-              </button>
-              {showMoveMenu && (
-                <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
-                  <button
-                    onClick={() => handleMove(null)}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-                  >
-                    No folder
-                  </button>
-                  {folders.map((f) => (
+            {!projectMode && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowMoveMenu((v) => !v)}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                >
+                  <FolderInput size={14} /> Move to folder
+                </button>
+                {showMoveMenu && (
+                  <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
                     <button
-                      key={f.id}
-                      onClick={() => handleMove(f.id)}
-                      className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${
-                        f.id === asset.folderId
-                          ? 'text-accent font-medium'
-                          : 'text-gray-700 dark:text-gray-200'
-                      }`}
+                      onClick={() => handleMove(null)}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
                     >
-                      {f.name}
+                      No folder
                     </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                    {folders.map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => handleMove(f.id)}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${
+                          f.id === asset.folderId
+                            ? 'text-accent font-medium'
+                            : 'text-gray-700 dark:text-gray-200'
+                        }`}
+                      >
+                        {f.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {!projectMode && onAddToProject && projects && projects.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowProjectMenu((v) => !v)}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                >
+                  <FolderPlus size={14} /> Add to project
+                </button>
+                {showProjectMenu && (
+                  <div className="absolute right-full top-0 w-44 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 max-h-48 overflow-y-auto animate-fade-in">
+                    {projects.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => { onAddToProject(p.id); setShowProjectMenu(false); setMenuOpen(false); }}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                      >
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <hr className="my-1 border-gray-200 dark:border-gray-700" />
             <button
               onClick={handleDownload}
@@ -289,9 +345,13 @@ export function AssetCard({ asset, folders, selected, onSelect, onUpdate, onDele
             </button>
             <button
               onClick={() => { onDelete(); setMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
+              className={`w-full flex items-center gap-2 px-3 py-2 ${
+                projectMode
+                  ? 'hover:bg-orange-50 dark:hover:bg-orange-900/20 text-orange-600 dark:text-orange-400'
+                  : 'hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400'
+              }`}
             >
-              <Trash2 size={14} /> Delete
+              <Trash2 size={14} /> {projectMode ? 'Remove from project' : 'Delete'}
             </button>
           </div>
         )}

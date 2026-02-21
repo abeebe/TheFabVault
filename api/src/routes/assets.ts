@@ -15,20 +15,21 @@ import {
   sanitizeFilename,
 } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
+import { extractMeta } from '../services/metaExtract.js';
 import type { AssetOut, AssetRow, FolderRow } from '../types/index.js';
 
 const router = Router();
 
-// Multer — store in memory temporarily, we move to final path manually
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB max per file
+  limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
 });
 
 const THUMB_ELIGIBLE_EXTS = new Set([
   '.stl', '.obj', '.3mf',
   '.svg',
   '.png', '.jpg', '.jpeg', '.webp',
+  '.gcode', '.gc', '.g',
 ]);
 
 function needsThumbnail(filename: string): boolean {
@@ -38,6 +39,8 @@ function needsThumbnail(filename: string): boolean {
 function toOut(row: AssetRow): AssetOut {
   const tags: string[] = JSON.parse(row.tags_json || '[]');
   const encodedName = encodeURIComponent(row.filename);
+  let thumbStatus = row.thumb_status;
+  if (thumbStatus === 'done' && !thumbExists(row.id)) thumbStatus = 'failed';
   return {
     id: row.id,
     filename: row.filename,
@@ -47,14 +50,15 @@ function toOut(row: AssetRow): AssetOut {
     folderId: row.folder_id,
     tags,
     notes: row.notes,
-    thumbStatus: row.thumb_status,
-    thumbUrl: row.thumb_status === 'done' ? `/thumb/${row.id}.jpg` : null,
+    thumbStatus,
+    thumbUrl: thumbStatus === 'done' ? `/thumb/${row.id}.jpg` : null,
     url: `/file/${row.id}/${encodedName}`,
+    meta: JSON.parse(row.meta_json || '{}'),
     createdAt: row.created_at,
   };
 }
 
-function saveUploadedFile(
+async function saveUploadedFile(
   buffer: Buffer,
   assetId: string,
   filename: string,
@@ -64,50 +68,42 @@ function saveUploadedFile(
   notes: string | null,
   originalName: string | null,
   sourcePath: string | null = null,
-): AssetRow {
+): Promise<AssetRow> {
   const db = getDb();
-  const id = assetId;
 
   db.prepare(
-    `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, notes, source_path, thumb_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, notes, source_path, thumb_status, meta_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    id,
-    filename,
-    originalName,
-    mimeType,
-    buffer.length,
-    folderId ?? null,
-    JSON.stringify(tags),
-    notes ?? null,
-    sourcePath,
-    needsThumbnail(filename) ? 'pending' : 'none',
+    assetId, filename, originalName, mimeType, buffer.length,
+    folderId ?? null, JSON.stringify(tags), notes ?? null, sourcePath,
+    needsThumbnail(filename) ? 'pending' : 'none', '{}',
   );
 
-  const dest = assetFilePath(id, filename);
+  const dest = assetFilePath(assetId, filename);
   fs.writeFileSync(dest, buffer);
 
-  // Update real size after write
   const size = fs.statSync(dest).size;
-  db.prepare('UPDATE assets SET size = ? WHERE id = ?').run(size, id);
+  db.prepare('UPDATE assets SET size = ? WHERE id = ?').run(size, assetId);
 
-  const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(id) as AssetRow;
-  return row;
+  try {
+    const meta = await extractMeta(dest);
+    db.prepare('UPDATE assets SET meta_json = ? WHERE id = ?').run(JSON.stringify(meta), assetId);
+  } catch (err) {
+    console.warn(`[assets] Meta extraction failed for ${assetId}:`, err);
+  }
+
+  return db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow;
 }
 
-// POST /upload — single file
-router.post('/upload', requireAuth, upload.single('file'), (req: Request, res: Response) => {
-  if (!req.file) {
-    res.status(400).json({ error: 'No file provided' });
-    return;
-  }
+// ─── POST /upload ─────────────────────────────────────────────────────────────
+
+router.post('/upload', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
 
   const originalName = req.file.originalname || 'upload';
   const filename = sanitizeFilename(originalName);
-  const mimeType =
-    req.file.mimetype ||
-    mime.lookup(filename) ||
-    'application/octet-stream';
+  const mimeType = req.file.mimetype || mime.lookup(filename) || 'application/octet-stream';
   const folderId = (req.body.folder_id as string | undefined) ?? null;
   const tags = (req.body.tags as string | undefined)
     ? (req.body.tags as string).split(',').map((t) => t.trim()).filter(Boolean)
@@ -115,22 +111,18 @@ router.post('/upload', requireAuth, upload.single('file'), (req: Request, res: R
   const notes = (req.body.notes as string | undefined) ?? null;
 
   const id = uuidv4();
-  const row = saveUploadedFile(req.file.buffer, id, filename, mimeType, folderId, tags, notes, originalName);
+  const row = await saveUploadedFile(req.file.buffer, id, filename, mimeType, folderId, tags, notes, originalName);
 
-  if (needsThumbnail(filename)) {
-    enqueueThumb(id);
-  }
+  if (needsThumbnail(filename)) enqueueThumb(id);
 
   res.status(201).json(toOut(row));
 });
 
-// POST /upload/batch — multiple files
-router.post('/upload/batch', requireAuth, upload.array('files'), (req: Request, res: Response) => {
+// ─── POST /upload/batch ───────────────────────────────────────────────────────
+
+router.post('/upload/batch', requireAuth, upload.array('files'), async (req: Request, res: Response) => {
   const files = req.files as Express.Multer.File[] | undefined;
-  if (!files || files.length === 0) {
-    res.status(400).json({ error: 'No files provided' });
-    return;
-  }
+  if (!files || files.length === 0) { res.status(400).json({ error: 'No files provided' }); return; }
 
   const folderId = (req.body.folder_id as string | undefined) ?? null;
   const results: AssetOut[] = [];
@@ -140,18 +132,16 @@ router.post('/upload/batch', requireAuth, upload.array('files'), (req: Request, 
     const filename = sanitizeFilename(originalName);
     const mimeType = file.mimetype || mime.lookup(filename) || 'application/octet-stream';
     const id = uuidv4();
-    const row = saveUploadedFile(file.buffer, id, filename, mimeType, folderId, [], null, originalName);
-
-    if (needsThumbnail(filename)) {
-      enqueueThumb(id);
-    }
+    const row = await saveUploadedFile(file.buffer, id, filename, mimeType, folderId, [], null, originalName);
+    if (needsThumbnail(filename)) enqueueThumb(id);
     results.push(toOut(row));
   }
 
   res.status(201).json(results);
 });
 
-// GET /assets — list/search
+// ─── GET /assets ──────────────────────────────────────────────────────────────
+
 router.get('/assets', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const { q, tags: tagsParam, folder_id, limit = '100', offset = '0' } = req.query as Record<string, string>;
@@ -177,7 +167,6 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
 
   let rows = db.prepare(sql).all(...params) as AssetRow[];
 
-  // Tag filtering in JS (SQLite json_each requires additional setup)
   if (tagsParam) {
     const filterTags = tagsParam.split(',').map((t) => t.trim()).filter(Boolean);
     rows = rows.filter((row) => {
@@ -189,63 +178,68 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
   res.json(rows.map(toOut));
 });
 
-// GET /asset/:id — single asset
+// ─── GET /asset/:id ───────────────────────────────────────────────────────────
+
 router.get('/asset/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
-  if (!row) {
-    res.status(404).json({ error: 'Not found' });
-    return;
-  }
-  // Refresh thumb_url if file now exists
-  if (row.thumb_status === 'done' && !thumbExists(row.id)) {
-    db.prepare("UPDATE assets SET thumb_status = 'failed' WHERE id = ?").run(row.id);
-    row.thumb_status = 'failed';
-  }
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
   res.json(toOut(row));
 });
 
-// GET /file/:id/:name — stream raw file
+// ─── GET /file/:id/:name ──────────────────────────────────────────────────────
+
 router.get('/file/:id/:name', requireAuth, (req: Request, res: Response) => {
-  const { id, name } = req.params;
-  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-    res.status(400).json({ error: 'Invalid id' });
-    return;
-  }
+  const { id } = req.params;
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(id) as AssetRow | undefined;
-  if (!row) {
-    res.status(404).json({ error: 'Not found' });
-    return;
-  }
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
   const filePath = assetFilePath(id, row.filename);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'File not found on disk' });
-    return;
-  }
+  if (!fs.existsSync(filePath)) { res.status(404).json({ error: 'File not found on disk' }); return; }
   res.setHeader('Content-Type', row.mime || 'application/octet-stream');
   res.setHeader('Content-Disposition', `inline; filename="${row.filename}"`);
   fs.createReadStream(filePath).pipe(res);
 });
 
-// PATCH /asset/:id/meta
+// ─── POST /asset/:id/extract-meta ─────────────────────────────────────────────
+
+router.post('/asset/:id/extract-meta', requireAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const filePath = assetFilePath(row.id, row.filename);
+  if (!fs.existsSync(filePath)) { res.status(404).json({ error: 'File not found on disk' }); return; }
+
+  try {
+    const meta = await extractMeta(filePath);
+    db.prepare('UPDATE assets SET meta_json = ? WHERE id = ?').run(JSON.stringify(meta), row.id);
+    const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
+    res.json(toOut(updated));
+  } catch (err) {
+    console.error('[assets] extract-meta error:', err);
+    res.status(500).json({ error: 'Extraction failed' });
+  }
+});
+
+// ─── PATCH /asset/:id/meta ────────────────────────────────────────────────────
+
 router.patch('/asset/:id/meta', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { title, notes } = req.body as { title?: string; notes?: string };
-  if (title !== undefined) {
-    db.prepare('UPDATE assets SET original_name = ? WHERE id = ?').run(title.trim(), row.id);
-  }
-  if (notes !== undefined) {
-    db.prepare('UPDATE assets SET notes = ? WHERE id = ?').run(notes, row.id);
-  }
+  if (title !== undefined) db.prepare('UPDATE assets SET original_name = ? WHERE id = ?').run(title.trim(), row.id);
+  if (notes !== undefined) db.prepare('UPDATE assets SET notes = ? WHERE id = ?').run(notes, row.id);
+
   const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
   res.json(toOut(updated));
 });
 
-// PATCH /asset/:id/tags
+// ─── PATCH /asset/:id/tags ────────────────────────────────────────────────────
+
 router.patch('/asset/:id/tags', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
@@ -259,7 +253,8 @@ router.patch('/asset/:id/tags', requireAuth, (req: Request, res: Response) => {
   res.json(toOut(updated));
 });
 
-// PATCH /asset/:id/rename
+// ─── PATCH /asset/:id/rename ──────────────────────────────────────────────────
+
 router.patch('/asset/:id/rename', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
@@ -273,22 +268,13 @@ router.patch('/asset/:id/rename', requireAuth, (req: Request, res: Response) => 
   const newExt = path.extname(sanitized).toLowerCase();
   const finalName = newExt ? sanitized : sanitized + oldExt;
 
-  if (finalName === row.filename) {
-    res.json(toOut(row));
-    return;
-  }
+  if (finalName === row.filename) { res.json(toOut(row)); return; }
 
   const oldPath = assetFilePath(row.id, row.filename);
   const newPath = assetFilePath(row.id, finalName);
 
-  if (!fs.existsSync(oldPath)) {
-    res.status(404).json({ error: 'File not found on disk' });
-    return;
-  }
-  if (fs.existsSync(newPath)) {
-    res.status(409).json({ error: 'A file with that name already exists' });
-    return;
-  }
+  if (!fs.existsSync(oldPath)) { res.status(404).json({ error: 'File not found on disk' }); return; }
+  if (fs.existsSync(newPath)) { res.status(409).json({ error: 'A file with that name already exists' }); return; }
 
   fs.renameSync(oldPath, newPath);
   db.prepare('UPDATE assets SET filename = ? WHERE id = ?').run(finalName, row.id);
@@ -296,7 +282,8 @@ router.patch('/asset/:id/rename', requireAuth, (req: Request, res: Response) => 
   res.json(toOut(updated));
 });
 
-// PATCH /asset/:id/folder
+// ─── PATCH /asset/:id/folder ──────────────────────────────────────────────────
+
 router.patch('/asset/:id/folder', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
@@ -315,18 +302,19 @@ router.patch('/asset/:id/folder', requireAuth, (req: Request, res: Response) => 
   res.json(toOut(updated));
 });
 
-// DELETE /asset/:id
+// ─── DELETE /asset/:id ────────────────────────────────────────────────────────
+
 router.delete('/asset/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-
   db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
   cleanupAsset(row.id);
   res.json({ ok: true });
 });
 
-// GET /folder/:id/download — zip of folder contents
+// ─── GET /folder/:id/download ─────────────────────────────────────────────────
+
 router.get('/folder/:id/download', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const folder = db.prepare('SELECT * FROM folders WHERE id = ?').get(req.params.id) as FolderRow | undefined;
@@ -344,15 +332,14 @@ router.get('/folder/:id/download', requireAuth, (req: Request, res: Response) =>
 
   for (const asset of assets) {
     const filePath = assetFilePath(asset.id, asset.filename);
-    if (fs.existsSync(filePath)) {
-      archive.file(filePath, { name: asset.filename });
-    }
+    if (fs.existsSync(filePath)) archive.file(filePath, { name: asset.filename });
   }
 
   archive.finalize();
 });
 
-// POST /download/zip — flexible zip by asset_ids / folder_id / tag
+// ─── POST /download/zip ───────────────────────────────────────────────────────
+
 router.post('/download/zip', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const { asset_ids, folder_id, tag, filename: zipFilename } = req.body as {
@@ -368,7 +355,6 @@ router.post('/download/zip', requireAuth, (req: Request, res: Response) => {
   }
 
   let assets: AssetRow[] = [];
-
   if (asset_ids?.length) {
     const placeholders = asset_ids.map(() => '?').join(',');
     assets = db.prepare(`SELECT * FROM assets WHERE id IN (${placeholders})`).all(...asset_ids) as AssetRow[];
@@ -378,11 +364,11 @@ router.post('/download/zip', requireAuth, (req: Request, res: Response) => {
     const all = db.prepare('SELECT * FROM assets').all() as AssetRow[];
     assets = all.filter((a) => {
       const tags: string[] = JSON.parse(a.tags_json || '[]');
-      return tags.includes(tag);
+      return tags.includes(tag!);
     });
   }
 
-  const zipName = zipFilename || 'makervault.zip';
+  const zipName = zipFilename || 'thefabricatorsvault.zip';
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
 
