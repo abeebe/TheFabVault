@@ -1,6 +1,9 @@
 node_modules/
 dist/
 data/
+# Keep the empty stub dir so the imports volume mount always has a valid source
+!data/imports-stub/
+!data/imports-stub/.gitkeep
 .env
 *.db
 *.db-shm

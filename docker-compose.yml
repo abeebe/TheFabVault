@@ -22,12 +22,7 @@ services:
     volumes:
       - ./data/storage:/app/storage
       - ./data/db:/app/data
-      - type: bind
-        source: "${IMPORT_MOUNT_PATH_HOST:-./data/imports-stub}"
-        target: /imports
-        read_only: true
-        bind:
-          create_host_path: true
+      - "${IMPORT_MOUNT_PATH_HOST:-./data/imports-stub}:/imports:ro"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 15s
