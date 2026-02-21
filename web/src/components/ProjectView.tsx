@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   ChevronDown, ChevronRight, Pencil, Trash2, Plus, FolderOpen, X,
+  Check, Search, FileBox, Image, File,
 } from 'lucide-react';
 import { useProjectDetail } from '../hooks/useProjects.js';
 import { AssetGrid } from './AssetGrid.js';
@@ -10,7 +11,7 @@ import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
 import { PrinterSettingsForm, LaserSettingsForm, VinylSettingsForm } from './SettingsForm.js';
 import type {
-  FolderOut, ProjectAssetOut, ProjectOverrides,
+  AssetOut, FolderOut, ProjectAssetOut, ProjectOverrides,
   PrinterSettings, LaserSettings, VinylSettings,
 } from '../types/index.js';
 import { api } from '../lib/api.js';
@@ -323,6 +324,198 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
           </div>
         </Modal>
       )}
+
+      {/* Add assets picker */}
+      {addAssetMode && project && (
+        <AssetPicker
+          projectId={project.id}
+          existingAssetIds={new Set(project.assets.map((a) => a.id))}
+          onDone={() => { setAddAssetMode(false); refresh(); }}
+          onClose={() => setAddAssetMode(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Asset Picker Modal ── */
+
+function getFileIcon(filename: string) {
+  const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+  if (['.stl', '.obj', '.3mf', '.step', '.stp'].includes(ext)) return <FileBox size={20} className="text-blue-400" />;
+  if (['.png', '.jpg', '.jpeg', '.webp', '.svg', '.dxf'].includes(ext)) return <Image size={20} className="text-green-400" />;
+  return <File size={20} className="text-gray-400" />;
+}
+
+function AssetPicker({
+  projectId,
+  existingAssetIds,
+  onDone,
+  onClose,
+}: {
+  projectId: string;
+  existingAssetIds: Set<string>;
+  onDone: () => void;
+  onClose: () => void;
+}) {
+  const [allAssets, setAllAssets] = useState<AssetOut[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [adding, setAdding] = useState(false);
+  const [searchFilter, setSearchFilter] = useState('');
+
+  useEffect(() => {
+    api.assets.list({ limit: 500 }).then((assets) => {
+      setAllAssets(assets);
+    }).catch((err) => {
+      console.error('[AssetPicker] Failed to load assets:', err);
+    }).finally(() => setLoading(false));
+  }, []);
+
+  function toggleAsset(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleAdd() {
+    if (selected.size === 0) return;
+    setAdding(true);
+    try {
+      await api.projects.addAssets(projectId, Array.from(selected));
+      onDone();
+    } catch (err) {
+      console.error('[AssetPicker] Failed to add assets:', err);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const available = allAssets.filter((a) => !existingAssetIds.has(a.id));
+  const filtered = searchFilter
+    ? available.filter((a) =>
+        a.filename.toLowerCase().includes(searchFilter.toLowerCase()) ||
+        (a.originalName && a.originalName.toLowerCase().includes(searchFilter.toLowerCase())) ||
+        a.tags.some((t) => t.toLowerCase().includes(searchFilter.toLowerCase()))
+      )
+    : available;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <h3 className="font-semibold text-gray-900 dark:text-white">Add files to project</h3>
+          <button
+            onClick={onClose}
+            className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+          >
+            <X size={18} className="text-gray-500" />
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search files..."
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/40"
+            />
+          </div>
+        </div>
+
+        {/* Asset list */}
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {loading ? (
+            <div className="flex justify-center py-8">
+              <Spinner size="md" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 text-sm">
+              {available.length === 0 ? 'All vault files are already in this project.' : 'No matching files found.'}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {filtered.map((asset) => {
+                const isSelected = selected.has(asset.id);
+                const thumbUrl = api.assets.thumbUrl(asset);
+                return (
+                  <button
+                    key={asset.id}
+                    onClick={() => toggleAsset(asset.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
+                      isSelected
+                        ? 'bg-accent/10 border border-accent/30'
+                        : 'hover:bg-gray-50 dark:hover:bg-gray-700 border border-transparent'
+                    }`}
+                  >
+                    {/* Thumbnail or icon */}
+                    <div className="w-10 h-10 rounded bg-gray-100 dark:bg-gray-700 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                      {asset.thumbStatus === 'done' && thumbUrl ? (
+                        <img src={thumbUrl} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        getFileIcon(asset.filename)
+                      )}
+                    </div>
+
+                    {/* Info */}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                        {asset.originalName || asset.filename}
+                      </p>
+                      <div className="flex gap-1 mt-0.5">
+                        {asset.tags.slice(0, 3).map((t) => (
+                          <span key={t} className="px-1.5 py-0 rounded text-[10px] bg-gray-100 dark:bg-gray-600 text-gray-500 dark:text-gray-300">
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Checkmark */}
+                    <div className={`w-5 h-5 rounded border flex items-center justify-center flex-shrink-0 ${
+                      isSelected
+                        ? 'bg-accent border-accent text-white'
+                        : 'border-gray-300 dark:border-gray-600'
+                    }`}>
+                      {isSelected && <Check size={12} />}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <span className="text-xs text-gray-500">
+            {selected.size > 0 ? `${selected.size} file${selected.size !== 1 ? 's' : ''} selected` : `${filtered.length} files available`}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAdd}
+              disabled={selected.size === 0 || adding}
+              className="px-4 py-1.5 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {adding ? 'Adding…' : `Add ${selected.size > 0 ? selected.size : ''} file${selected.size !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
