@@ -10,8 +10,8 @@ export function useProjects() {
     try {
       const data = await api.projects.list();
       setProjects(data);
-    } catch {
-      // silently ignore
+    } catch (err) {
+      console.error('[useProjects] Failed to fetch projects:', err);
     } finally {
       setLoading(false);
     }

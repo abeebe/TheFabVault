@@ -66,10 +66,13 @@ export function AssetCard({
       try {
         const updated = await api.assets.get(asset.id);
         if (updated.thumbStatus !== 'pending') {
+          console.log(`[AssetCard] Thumbnail generation complete for ${asset.id}: ${updated.thumbStatus}`);
           onUpdate(updated);
           clearInterval(interval);
         }
-      } catch {}
+      } catch (err) {
+        console.error(`[AssetCard] Failed to poll thumbnail for ${asset.id}:`, err);
+      }
     }, 3000);
     return () => clearInterval(interval);
   }, [asset.id, asset.thumbStatus]); // eslint-disable-line react-hooks/exhaustive-deps

@@ -14,7 +14,13 @@ router.get('/thumb/:id.jpg', requireAuth, (req: Request, res: Response) => {
     res.status(404).json({ error: 'Thumbnail not found' });
     return;
   }
-  res.sendFile(thumbFilePath(id), { headers: { 'Cache-Control': 'public, max-age=31536000' } });
+  const filePath = thumbFilePath(id);
+  res.sendFile(filePath, { headers: { 'Cache-Control': 'public, max-age=31536000' } }, (err: any) => {
+    if (err && !res.headersSent) {
+      console.error(`[thumbs] Error sending thumbnail ${id}:`, err);
+      res.status(500).json({ error: 'Failed to send thumbnail' });
+    }
+  });
 });
 
 export default router;

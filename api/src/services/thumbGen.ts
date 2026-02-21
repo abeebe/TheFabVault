@@ -23,22 +23,28 @@ export function setServerPort(port: number): void {
 async function getBrowser(): Promise<Browser> {
   if (!browser || !browser.connected) {
     const execPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    browser = await puppeteer.launch({
-      headless: true,
-      executablePath: execPath || undefined,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-      ],
-    });
-    browser.on('disconnected', () => { browser = null; });
-    console.log('[thumbGen] Browser launched');
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: execPath || undefined,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          // Note: --single-process removed as it can cause issues in Docker
+        ],
+      });
+      browser.on('disconnected', () => { browser = null; });
+      console.log('[thumbGen] Browser launched successfully at', execPath || 'default path');
+    } catch (err) {
+      console.error('[thumbGen] Failed to launch browser:', err);
+      console.error('[thumbGen] Executable path:', execPath);
+      throw err;
+    }
   }
   return browser;
 }

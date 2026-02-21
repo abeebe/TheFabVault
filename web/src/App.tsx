@@ -169,8 +169,11 @@ export function App() {
   async function handleAddToProject(assetId: string, projectId: string) {
     try {
       await api.projects.addAssets(projectId, [assetId]);
+      console.log(`[App] Asset ${assetId} added to project ${projectId}`);
       refreshProjects();
-    } catch {}
+    } catch (err) {
+      console.error('[App] Failed to add asset to project:', err);
+    }
   }
 
   async function handleCreateProject() {
