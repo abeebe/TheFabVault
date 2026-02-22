@@ -4,6 +4,7 @@ services:
       context: ./api
       dockerfile: Dockerfile
     restart: unless-stopped
+    init: true
     ports:
       - "${API_PORT:-3000}:3000"
     environment:
@@ -23,6 +24,7 @@ services:
       - ./data/storage:/app/storage
       - ./data/db:/app/data
       - "${IMPORT_MOUNT_PATH_HOST:-./data/imports-stub}:/imports:ro"
+    stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 15s

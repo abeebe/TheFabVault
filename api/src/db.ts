@@ -89,3 +89,17 @@ export function getDb(): Database.Database {
   }
   return _db;
 }
+
+export function closeDb(): void {
+  if (_db) {
+    try {
+      // Checkpoint WAL to ensure all data is flushed to main db file
+      _db.pragma('wal_checkpoint(TRUNCATE)');
+      _db.close();
+      console.log('[db] Database closed and WAL checkpointed');
+    } catch (err) {
+      console.error('[db] Error closing database:', err);
+    }
+    _db = null;
+  }
+}

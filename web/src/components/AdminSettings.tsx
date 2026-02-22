@@ -132,10 +132,26 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                 {/* Current Path */}
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Current Storage Path
+                    Container Storage Path
                   </label>
                   <p className="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg font-mono break-all">
                     {config.storagePath}
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Maps to <span className="font-mono font-medium text-gray-700 dark:text-gray-300">~/TheFabVault/data/storage</span> on the host via Docker volume mount.
+                  </p>
+                </div>
+
+                {/* Database Path */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Container Database Path
+                  </label>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg font-mono break-all">
+                    {config.dataDirPath}
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Maps to <span className="font-mono font-medium text-gray-700 dark:text-gray-300">~/TheFabVault/data/db</span> on the host via Docker volume mount.
                   </p>
                 </div>
 
@@ -190,7 +206,7 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Enter an absolute path where application has read/write access. The path will be created if it doesn't exist.
+                    This is the path <em>inside the container</em>. To persist data, make sure the path is covered by a Docker volume mount in your <span className="font-mono">docker-compose.yml</span>.
                   </p>
                 </div>
 

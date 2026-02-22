@@ -132,7 +132,7 @@ export function AssetCard({
 
   return (
     <div
-      className={`group relative flex flex-col rounded-xl overflow-hidden border transition-all cursor-pointer
+      className={`group relative flex flex-col rounded-xl border transition-all cursor-pointer
         ${selected
           ? 'border-accent ring-2 ring-accent/30 bg-surface-2'
           : 'border-gray-200 dark:border-gray-700 bg-surface-2 hover:border-gray-300 dark:hover:border-gray-600'
@@ -161,7 +161,7 @@ export function AssetCard({
 
       {/* Thumbnail area */}
       <div
-        className="relative bg-gray-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden"
+        className="relative bg-gray-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden rounded-t-xl"
         style={{ aspectRatio: '1' }}
         onClick={onPreview}
       >
