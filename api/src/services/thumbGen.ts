@@ -9,9 +9,10 @@ import { extractGCodeThumbnail } from './metaExtract.js';
 import { dxfToSvg } from './dxfToSvg.js';
 import type { AssetRow } from '../types/index.js';
 
-const queue = new PQueue({ concurrency: 2 });
+const queue = new PQueue({ concurrency: 1 });
 let browser: Browser | null = null;
 let serverPort = 3000;
+const MAX_RETRIES = 2;
 
 const STL_EXTS = new Set(['.stl', '.obj', '.3mf']);
 const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.svg']);
@@ -96,6 +97,50 @@ async function renderWithPuppeteer(
   fs.writeFileSync(thumbFilePath(assetId), screenshotBuffer);
 }
 
+/**
+ * Attempt Puppeteer render with retries.
+ * On TargetCloseError (browser/page crash), kill the browser and relaunch.
+ */
+async function renderWithRetry(
+  assetId: string,
+  filePath: string,
+  ext: string,
+  _thumbOut: string,
+): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    let page: Page | null = null;
+    try {
+      const b = await getBrowser();
+      page = await b.newPage();
+      await renderWithPuppeteer(page, assetId, filePath, ext);
+      return; // Success
+    } catch (err: any) {
+      const isTargetClosed =
+        err?.constructor?.name === 'TargetCloseError' ||
+        err?.message?.includes('Target closed') ||
+        err?.message?.includes('Session closed') ||
+        err?.message?.includes('Protocol error');
+
+      if (isTargetClosed && attempt <= MAX_RETRIES) {
+        console.warn(
+          `[thumbGen] Browser crashed rendering ${assetId} (attempt ${attempt}/${MAX_RETRIES + 1}), restarting browser...`
+        );
+        // Force-kill the dead browser so getBrowser() launches a fresh one
+        if (browser) {
+          await browser.close().catch(() => {});
+          browser = null;
+        }
+        // Brief pause before retry
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      throw err; // Non-retryable error or out of retries
+    } finally {
+      if (page) await page.close().catch(() => {});
+    }
+  }
+}
+
 export async function generateThumb(assetId: string): Promise<void> {
   const db = getDb();
   const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow | undefined;
@@ -147,14 +192,8 @@ export async function generateThumb(assetId: string): Promise<void> {
     }
 
     if (STL_EXTS.has(ext)) {
-      const b = await getBrowser();
-      const page = await b.newPage();
-      try {
-        await renderWithPuppeteer(page, assetId, filePath, ext);
-        db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
-      } finally {
-        await page.close().catch(() => {});
-      }
+      await renderWithRetry(assetId, filePath, ext, thumbOut);
+      db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
       return;
     }
 
