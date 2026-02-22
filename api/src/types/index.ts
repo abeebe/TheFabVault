@@ -71,6 +71,11 @@ export interface AssetMeta {
   svgWidth?: string;
   svgHeight?: string;
   svgViewBox?: string;
+
+  // DXF
+  dxfEntityCount?: number;
+  dxfEntityTypes?: Record<string, number>;
+  dxfBounds?: { width: number; height: number };
 }
 
 // ─── Output types (sent to client) ────────────────────────────────────────────

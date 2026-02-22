@@ -13,6 +13,7 @@
     "better-sqlite3": "^12.6.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "dxf-parser": "^1.1.2",
     "express": "^4.19.2",
     "glob": "^11.0.0",
     "jsonwebtoken": "^9.0.2",

@@ -3,6 +3,7 @@ import path from 'path';
 import sharp from 'sharp';
 import type { AssetMeta } from '../types/index.js';
 import { thumbFilePath } from './fileStore.js';
+import { dxfToSvg } from './dxfToSvg.js';
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ export async function extractMeta(filePath: string): Promise<AssetMeta> {
   try {
     if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) return await extractImageMeta(filePath);
     if (ext === '.svg') return extractSvgMeta(filePath);
+    if (ext === '.dxf') return extractDxfMeta(filePath);
     if (ext === '.stl') return extractStlMeta(filePath);
     if (ext === '.obj') return extractObjMeta(filePath);
     if (ext === '.3mf') return await extract3mfMeta(filePath);
@@ -70,6 +72,27 @@ function extractSvgMeta(filePath: string): AssetMeta {
   const viewBox  = (tag.match(/\bviewBox\s*=\s*["']([^"']+)["']/i) ?? [])[1];
 
   return { svgWidth: width, svgHeight: height, svgViewBox: viewBox };
+}
+
+// ─── DXF metadata ─────────────────────────────────────────────────────────────
+
+function extractDxfMeta(filePath: string): AssetMeta {
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const { stats } = dxfToSvg(content);
+
+  const meta: AssetMeta = {
+    dxfEntityCount: stats.entityCount,
+    dxfEntityTypes: stats.entityTypes,
+  };
+
+  if (stats.bounds) {
+    meta.dxfBounds = {
+      width: round2(stats.bounds.maxX - stats.bounds.minX),
+      height: round2(stats.bounds.maxY - stats.bounds.minY),
+    };
+  }
+
+  return meta;
 }
 
 // ─── STL metadata ─────────────────────────────────────────────────────────────

@@ -23,14 +23,20 @@ type Category = '3dprint' | 'laser' | 'vinyl';
 function getAssetCategories(asset: AssetOut): Category[] {
   const categories: Category[] = [];
 
-  // 3D files - automatic detection
   const ext = asset.filename.split('.').pop()?.toLowerCase();
+
+  // 3D files - automatic detection by extension
   if (['.stl', '.obj', '.3mf'].includes(`.${ext}`)) {
     categories.push('3dprint');
   }
 
-  // Tags-based - manual assignment
-  if (asset.tags.includes('laser')) categories.push('laser');
+  // Laser files - automatic detection by extension
+  if (['.svg', '.dxf'].includes(`.${ext}`)) {
+    categories.push('laser');
+  }
+
+  // Tags-based - manual assignment (additive, won't duplicate)
+  if (asset.tags.includes('laser') && !categories.includes('laser')) categories.push('laser');
   if (asset.tags.includes('vinyl')) categories.push('vinyl');
 
   return categories;
@@ -138,16 +144,17 @@ export function App() {
     );
   }
 
-  function handleCategorySelect(category: Category) {
-    setSelectedCategory(category);
-    setSelectedFolderId(null);
-    setSelectedTags([]);
-    setSearchQuery('');
-    setSelectedProjectId(null);
-  }
-
-  function handleCategoryDeselect() {
-    setSelectedCategory(null);
+  function handleCategorySelect(category: Category | null) {
+    if (category === selectedCategory) {
+      // Toggle off if clicking the already-selected category
+      setSelectedCategory(null);
+    } else {
+      setSelectedCategory(category);
+      setSelectedFolderId(null);
+      setSelectedTags([]);
+      setSearchQuery('');
+      setSelectedProjectId(null);
+    }
   }
 
   // Filter assets by selected category

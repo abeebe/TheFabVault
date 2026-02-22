@@ -6,6 +6,7 @@ import PQueue from 'p-queue';
 import { getDb } from '../db.js';
 import { assetFilePath, thumbFilePath } from './fileStore.js';
 import { extractGCodeThumbnail } from './metaExtract.js';
+import { dxfToSvg } from './dxfToSvg.js';
 import type { AssetRow } from '../types/index.js';
 
 const queue = new PQueue({ concurrency: 2 });
@@ -113,6 +114,20 @@ export async function generateThumb(assetId: string): Promise<void> {
     if (ext === '.svg') {
       // sharp can rasterize SVG natively
       await sharp(filePath, { density: 144 })
+        .resize(512, 512, { fit: 'inside', background: { r: 249, g: 250, b: 251, alpha: 1 } })
+        .flatten({ background: { r: 249, g: 250, b: 251 } })
+        .jpeg({ quality: 88 })
+        .toFile(thumbOut);
+      db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
+      return;
+    }
+
+    if (ext === '.dxf') {
+      // Parse DXF → SVG string, then rasterize with sharp
+      const dxfText = fs.readFileSync(filePath, 'utf-8');
+      const { svg } = dxfToSvg(dxfText);
+      const svgBuffer = Buffer.from(svg, 'utf-8');
+      await sharp(svgBuffer, { density: 144 })
         .resize(512, 512, { fit: 'inside', background: { r: 249, g: 250, b: 251, alpha: 1 } })
         .flatten({ background: { r: 249, g: 250, b: 251 } })
         .jpeg({ quality: 88 })

@@ -27,7 +27,7 @@ const upload = multer({
 
 const THUMB_ELIGIBLE_EXTS = new Set([
   '.stl', '.obj', '.3mf',
-  '.svg',
+  '.svg', '.dxf',
   '.png', '.jpg', '.jpeg', '.webp',
   '.gcode', '.gc', '.g',
 ]);

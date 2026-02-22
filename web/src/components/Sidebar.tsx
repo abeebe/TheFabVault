@@ -10,10 +10,19 @@ type Category = '3dprint' | 'laser' | 'vinyl';
 function getAssetCategories(asset: AssetOut): Category[] {
   const categories: Category[] = [];
   const ext = asset.filename.split('.').pop()?.toLowerCase();
+
+  // 3D files by extension
   if (['.stl', '.obj', '.3mf'].includes(`.${ext}`)) {
     categories.push('3dprint');
   }
-  if (asset.tags.includes('laser')) categories.push('laser');
+
+  // Laser files by extension
+  if (['.svg', '.dxf'].includes(`.${ext}`)) {
+    categories.push('laser');
+  }
+
+  // Tags-based (additive, won't duplicate)
+  if (asset.tags.includes('laser') && !categories.includes('laser')) categories.push('laser');
   if (asset.tags.includes('vinyl')) categories.push('vinyl');
   return categories;
 }
@@ -36,7 +45,7 @@ interface SidebarProps {
   onProjectCreate?: () => void;
   // Categories
   selectedCategory?: Category | null;
-  onCategorySelect?: (category: Category) => void;
+  onCategorySelect?: (category: Category | null) => void;
 }
 
 export function Sidebar({
@@ -60,11 +69,6 @@ export function Sidebar({
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
-  const [categoriesExpanded, setCategoriesExpanded] = useState({
-    '3dprint': true,
-    'laser': true,
-    'vinyl': true,
-  });
 
   async function handleScan() {
     setScanning(true);
@@ -79,37 +83,6 @@ export function Sidebar({
 
   // Collect all unique tags from assets
   const allTags = Array.from(new Set(assets.flatMap((a) => a.tags))).sort();
-
-  // Helper: Get folders that contain files in a given category
-  function getCategoryFolders(category: Category): FolderOut[] {
-    const assetsInCategory = assets.filter((a) => getAssetCategories(a).includes(category));
-    const folderIds = new Set<string | null>();
-    assetsInCategory.forEach((a) => folderIds.add(a.folderId));
-
-    // Include the folder and all ancestors (for hierarchy)
-    const result: FolderOut[] = [];
-    const seen = new Set<string>();
-
-    function addWithAncestors(folderId: string | null) {
-      if (folderId === null || seen.has(folderId)) return;
-      const folder = folders.find((f) => f.id === folderId);
-      if (folder) {
-        addWithAncestors(folder.parentId);
-        result.push(folder);
-        seen.add(folderId);
-      }
-    }
-
-    folderIds.forEach((id) => {
-      if (id !== null) addWithAncestors(id);
-    });
-
-    return result.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  const threeDFolders = getCategoryFolders('3dprint');
-  const laserFolders = getCategoryFolders('laser');
-  const vinylFolders = getCategoryFolders('vinyl');
 
   return (
     <aside className="flex flex-col h-full bg-surface-2 border-r border-gray-200 dark:border-gray-700 w-56 flex-shrink-0">
@@ -141,109 +114,62 @@ export function Sidebar({
         </div>
 
         {/* Category Sections */}
-        {/* 3D Print Section */}
         <div>
-          <button
-            onClick={() => {
-              if (onCategorySelect) {
-                onCategorySelect('3dprint');
-              }
-              setCategoriesExpanded((v) => ({ ...v, '3dprint': !v['3dprint'] }));
-            }}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-              selectedCategory === '3dprint'
-                ? 'bg-accent/10 text-accent font-medium'
-                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-            }`}
-          >
-            <Box size={14} className="flex-shrink-0" />
-            <span>3D Print</span>
-            <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategories(a).includes('3dprint')).length}
-            </span>
-          </button>
-          {categoriesExpanded['3dprint'] && threeDFolders.length > 0 && (
-            <div className="ml-2 mt-0.5 pl-2 border-l border-gray-300 dark:border-gray-600">
-              <FolderTree
-                folders={threeDFolders}
-                selectedId={selectedFolderId}
-                onSelect={onFolderSelect}
-                onCreate={onFolderCreate}
-                onRename={onFolderRename}
-                onDelete={onFolderDelete}
-              />
-            </div>
-          )}
-        </div>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-2 mb-1.5">Categories</p>
 
-        {/* Laser Section */}
-        <div>
-          <button
-            onClick={() => {
-              if (onCategorySelect) {
-                onCategorySelect('laser');
-              }
-              setCategoriesExpanded((v) => ({ ...v, 'laser': !v['laser'] }));
-            }}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-              selectedCategory === 'laser'
-                ? 'bg-accent/10 text-accent font-medium'
-                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-            }`}
-          >
-            <Zap size={14} className="flex-shrink-0" />
-            <span>Laser</span>
-            <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategories(a).includes('laser')).length}
-            </span>
-          </button>
-          {categoriesExpanded['laser'] && laserFolders.length > 0 && (
-            <div className="ml-2 mt-0.5 pl-2 border-l border-gray-300 dark:border-gray-600">
-              <FolderTree
-                folders={laserFolders}
-                selectedId={selectedFolderId}
-                onSelect={onFolderSelect}
-                onCreate={onFolderCreate}
-                onRename={onFolderRename}
-                onDelete={onFolderDelete}
-              />
-            </div>
-          )}
-        </div>
+          {/* 3D Print */}
+          <div>
+            <button
+              onClick={() => onCategorySelect?.(selectedCategory === '3dprint' ? null : '3dprint')}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+                selectedCategory === '3dprint'
+                  ? 'bg-accent/10 text-accent font-medium'
+                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              <Box size={14} className="flex-shrink-0" />
+              <span>3D Print</span>
+              <span className="ml-auto text-[10px] text-gray-400">
+                {assets.filter((a) => getAssetCategories(a).includes('3dprint')).length}
+              </span>
+            </button>
+          </div>
 
-        {/* Vinyl Section */}
-        <div>
-          <button
-            onClick={() => {
-              if (onCategorySelect) {
-                onCategorySelect('vinyl');
-              }
-              setCategoriesExpanded((v) => ({ ...v, 'vinyl': !v['vinyl'] }));
-            }}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-              selectedCategory === 'vinyl'
-                ? 'bg-accent/10 text-accent font-medium'
-                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-            }`}
-          >
-            <Tag size={14} className="flex-shrink-0" />
-            <span>Vinyl</span>
-            <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategories(a).includes('vinyl')).length}
-            </span>
-          </button>
-          {categoriesExpanded['vinyl'] && vinylFolders.length > 0 && (
-            <div className="ml-2 mt-0.5 pl-2 border-l border-gray-300 dark:border-gray-600">
-              <FolderTree
-                folders={vinylFolders}
-                selectedId={selectedFolderId}
-                onSelect={onFolderSelect}
-                onCreate={onFolderCreate}
-                onRename={onFolderRename}
-                onDelete={onFolderDelete}
-              />
-            </div>
-          )}
+          {/* Laser */}
+          <div>
+            <button
+              onClick={() => onCategorySelect?.(selectedCategory === 'laser' ? null : 'laser')}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+                selectedCategory === 'laser'
+                  ? 'bg-accent/10 text-accent font-medium'
+                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              <Zap size={14} className="flex-shrink-0" />
+              <span>Laser</span>
+              <span className="ml-auto text-[10px] text-gray-400">
+                {assets.filter((a) => getAssetCategories(a).includes('laser')).length}
+              </span>
+            </button>
+          </div>
+
+          {/* Vinyl */}
+          <div>
+            <button
+              onClick={() => onCategorySelect?.(selectedCategory === 'vinyl' ? null : 'vinyl')}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+                selectedCategory === 'vinyl'
+                  ? 'bg-accent/10 text-accent font-medium'
+                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              <Tag size={14} className="flex-shrink-0" />
+              <span>Vinyl</span>
+              <span className="ml-auto text-[10px] text-gray-400">
+                {assets.filter((a) => getAssetCategories(a).includes('vinyl')).length}
+              </span>
+            </button>
+          </div>
         </div>
 
         {/* Projects section */}
