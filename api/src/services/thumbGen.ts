@@ -55,38 +55,37 @@ async function renderWithPuppeteer(
   assetId: string,
   filePath: string,
   ext: string,
+  filename: string,
 ): Promise<void> {
   const rendererUrl = `http://localhost:${serverPort}/static/thumb-renderer.html`;
 
   await page.goto(rendererUrl, { waitUntil: 'networkidle0', timeout: 15000 });
   await page.setViewport({ width: 512, height: 512 });
 
-  const fileBuffer = fs.readFileSync(filePath);
-  const base64 = fileBuffer.toString('base64');
-
-  const mimeMap: Record<string, string> = {
-    '.stl': 'model/stl',
-    '.obj': 'model/obj',
-    '.3mf': 'model/3mf',
-    '.svg': 'image/svg+xml',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.webp': 'image/webp',
-  };
-  const mimeType = mimeMap[ext] || 'application/octet-stream';
-
   if (STL_EXTS.has(ext)) {
-    await page.evaluate((b64: string) => {
-      (window as unknown as Record<string, Function>).__renderSTL(b64);
-    }, base64);
+    // Use URL-based fetch — avoids piping large files through CDP as base64
+    const fileUrl = `http://localhost:${serverPort}/internal/asset-raw/${assetId}/${encodeURIComponent(filename)}`;
+    await page.evaluate((url: string) => {
+      (window as unknown as Record<string, Function>).__renderSTLFromUrl(url);
+    }, fileUrl);
   } else {
+    // For images, base64 is fine (they're small)
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64 = fileBuffer.toString('base64');
+    const mimeMap: Record<string, string> = {
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp',
+    };
+    const mimeType = mimeMap[ext] || 'application/octet-stream';
     await page.evaluate((b64: string, mime: string) => {
       (window as unknown as Record<string, Function>).__renderImage(b64, mime);
     }, base64, mimeType);
   }
 
-  await page.waitForFunction('window.__done === true', { timeout: 30000 });
+  await page.waitForFunction('window.__done === true', { timeout: 60000 });
 
   const errMsg = await page.evaluate(() => (window as unknown as Record<string, unknown>).__error);
   if (errMsg) {
@@ -105,14 +104,14 @@ async function renderWithRetry(
   assetId: string,
   filePath: string,
   ext: string,
-  _thumbOut: string,
+  filename: string,
 ): Promise<void> {
   for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
     let page: Page | null = null;
     try {
       const b = await getBrowser();
       page = await b.newPage();
-      await renderWithPuppeteer(page, assetId, filePath, ext);
+      await renderWithPuppeteer(page, assetId, filePath, ext, filename);
       return; // Success
     } catch (err: any) {
       const isTargetClosed =
@@ -192,7 +191,7 @@ export async function generateThumb(assetId: string): Promise<void> {
     }
 
     if (STL_EXTS.has(ext)) {
-      await renderWithRetry(assetId, filePath, ext, thumbOut);
+      await renderWithRetry(assetId, filePath, ext, asset.filename);
       db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
       return;
     }

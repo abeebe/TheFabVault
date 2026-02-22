@@ -72,71 +72,91 @@ function parseSTL(buffer) {
   return geometry;
 }
 
+function renderSTLBuffer(buf) {
+  const canvas = document.getElementById('c');
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    preserveDrawingBuffer: true,
+  });
+  renderer.setSize(512, 512);
+  renderer.setClearColor(0x1a1a2e);
+  renderer.shadowMap.enabled = true;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.001, 1000000);
+
+  const geometry = parseSTL(buf);
+  geometry.computeVertexNormals();
+  geometry.center();
+  geometry.computeBoundingSphere();
+
+  const sphere = geometry.boundingSphere;
+  const radius = sphere ? sphere.radius : 1;
+  const dist = radius * 3.5;
+
+  camera.position.set(dist, dist * 0.75, dist);
+  camera.lookAt(0, 0, 0);
+  camera.near = dist * 0.001;
+  camera.far = dist * 100;
+  camera.updateProjectionMatrix();
+
+  const material = new THREE.MeshPhongMaterial({
+    color: 0x4a9eff,
+    specular: 0x222222,
+    shininess: 30,
+  });
+
+  const mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+  scene.add(ambient);
+
+  const key = new THREE.DirectionalLight(0xffffff, 1.0);
+  key.position.set(1, 2, 1.5);
+  scene.add(key);
+
+  const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
+  fill.position.set(-1, 0.5, -1);
+  scene.add(fill);
+
+  renderer.render(scene, camera);
+}
+
+// Legacy base64 path (kept for backwards compat, small files)
 window.__renderSTL = function(base64data) {
   try {
-    const canvas = document.getElementById('c');
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      preserveDrawingBuffer: true,
-    });
-    renderer.setSize(512, 512);
-    renderer.setClearColor(0x1a1a2e);
-    renderer.shadowMap.enabled = true;
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(35, 1, 0.001, 1000000);
-
-    // Decode base64 to ArrayBuffer
     const binary = atob(base64data);
     const buf = new ArrayBuffer(binary.length);
     const view = new Uint8Array(buf);
     for (let i = 0; i < binary.length; i++) {
       view[i] = binary.charCodeAt(i);
     }
-
-    const geometry = parseSTL(buf);
-    geometry.computeVertexNormals();
-    geometry.center();
-    geometry.computeBoundingSphere();
-
-    const sphere = geometry.boundingSphere;
-    const radius = sphere ? sphere.radius : 1;
-    const dist = radius * 3.5;
-
-    camera.position.set(dist, dist * 0.75, dist);
-    camera.lookAt(0, 0, 0);
-    camera.near = dist * 0.001;
-    camera.far = dist * 100;
-    camera.updateProjectionMatrix();
-
-    const material = new THREE.MeshPhongMaterial({
-      color: 0x4a9eff,
-      specular: 0x222222,
-      shininess: 30,
-    });
-
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
-
-    // Lighting
-    const ambient = new THREE.AmbientLight(0xffffff, 0.4);
-    scene.add(ambient);
-
-    const key = new THREE.DirectionalLight(0xffffff, 1.0);
-    key.position.set(1, 2, 1.5);
-    scene.add(key);
-
-    const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
-    fill.position.set(-1, 0.5, -1);
-    scene.add(fill);
-
-    renderer.render(scene, camera);
+    renderSTLBuffer(buf);
     window.__done = true;
   } catch(e) {
     window.__error = e.message || String(e);
     window.__done = true;
   }
+};
+
+// URL-based path — fetches the file via HTTP, avoids base64 through CDP
+window.__renderSTLFromUrl = function(url) {
+  fetch(url)
+    .then(function(res) {
+      if (!res.ok) throw new Error('Fetch failed: ' + res.status);
+      return res.arrayBuffer();
+    })
+    .then(function(buf) {
+      renderSTLBuffer(buf);
+      window.__done = true;
+    })
+    .catch(function(e) {
+      window.__error = e.message || String(e);
+      window.__done = true;
+    });
 };
 
 window.__renderImage = function(base64data, mimeType) {

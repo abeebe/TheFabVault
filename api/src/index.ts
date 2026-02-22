@@ -16,6 +16,7 @@ import projectsRouter from './routes/projects.js';
 import adminRouter from './routes/admin.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
 import { scanMountImports } from './services/mountImport.js';
+import { assetFilePath } from './services/fileStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,6 +39,17 @@ app.use('/static', express.static(staticDir));
 // Health check (for Docker healthcheck, no auth required)
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Internal: serve raw asset files for the Puppeteer thumbnail renderer.
+// Localhost-only, no auth — only the renderer page on the same host uses this.
+app.get('/internal/asset-raw/:id/:filename', (req, res) => {
+  const filePath = assetFilePath(req.params.id, req.params.filename);
+  res.sendFile(filePath, (err: any) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ error: 'File not found' });
+    }
+  });
 });
 
 // Routes
