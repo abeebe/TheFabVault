@@ -43,6 +43,7 @@ export interface AssetListParams {
   folder_id?: string;
   limit?: number;
   offset?: number;
+  sort?: string;
 }
 
 export interface PaginatedAssets {
@@ -71,6 +72,7 @@ export const api = {
       if (params.folder_id) qs.set('folder_id', params.folder_id);
       if (params.limit) qs.set('limit', String(params.limit));
       if (params.offset !== undefined) qs.set('offset', String(params.offset));
+      if (params.sort) qs.set('sort', params.sort);
       const query = qs.toString();
       return apiFetch(`/assets${query ? `?${query}` : ''}`);
     },
@@ -110,6 +112,12 @@ export const api = {
 
     extractMeta: (id: string): Promise<AssetOut> =>
       apiFetch(`/asset/${id}/extract-meta`, { method: 'POST' }),
+
+    rethumb: (id: string): Promise<{ ok: boolean; queued: string }> =>
+      apiFetch(`/asset/${id}/rethumb`, { method: 'POST' }),
+
+    rethumbFailed: (): Promise<{ ok: boolean; queued: number }> =>
+      apiFetch('/assets/rethumb-failed', { method: 'POST' }),
 
     fileUrl: (asset: AssetOut): string => {
       const token = getToken();

@@ -12,6 +12,7 @@ import {
   assetDir,
   cleanupAsset,
   thumbExists,
+  thumbFilePath,
   sanitizeFilename,
 } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
@@ -142,9 +143,18 @@ router.post('/upload/batch', requireAuth, upload.array('files'), async (req: Req
 
 // ─── GET /assets ──────────────────────────────────────────────────────────────
 
+const SORT_MAP: Record<string, string> = {
+  date_desc: 'created_at DESC',
+  date_asc:  'created_at ASC',
+  name_asc:  'LOWER(COALESCE(original_name, filename)) ASC',
+  name_desc: 'LOWER(COALESCE(original_name, filename)) DESC',
+};
+
 router.get('/assets', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const { q, tags: tagsParam, folder_id, limit = '100', offset = '0' } = req.query as Record<string, string>;
+  const { q, tags: tagsParam, folder_id, limit = '100', offset = '0', sort = 'date_desc' } = req.query as Record<string, string>;
+
+  const orderBy = SORT_MAP[sort] ?? SORT_MAP['date_desc'];
 
   let whereClause = ' WHERE 1=1';
   const whereParams: unknown[] = [];
@@ -165,7 +175,7 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
   // Total count (before pagination)
   const total = (db.prepare(`SELECT COUNT(*) as count FROM assets${whereClause}`).get(...whereParams) as { count: number }).count;
 
-  const sql = `SELECT * FROM assets${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const sql = `SELECT * FROM assets${whereClause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
   const params = [...whereParams, parseInt(limit, 10), parseInt(offset, 10)];
 
   let rows = db.prepare(sql).all(...params) as AssetRow[];
@@ -316,6 +326,48 @@ router.delete('/asset/:id', requireAuth, (req: Request, res: Response) => {
   db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
   cleanupAsset(row.id, { deleteFile });
   res.json({ ok: true });
+});
+
+// ─── POST /asset/:id/rethumb — re-queue thumbnail generation for one asset ────
+
+router.post('/asset/:id/rethumb', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const ext = path.extname(row.filename).toLowerCase();
+  if (!needsThumbnail(row.filename)) {
+    res.status(400).json({ error: 'File type does not support thumbnails' });
+    return;
+  }
+
+  // Delete existing thumbnail file if present
+  const tp = thumbFilePath(row.id);
+  if (fs.existsSync(tp)) {
+    try { fs.unlinkSync(tp); } catch {}
+  }
+
+  db.prepare("UPDATE assets SET thumb_status = 'pending' WHERE id = ?").run(row.id);
+  enqueueThumb(row.id);
+  res.json({ ok: true, queued: row.id });
+});
+
+// ─── POST /assets/rethumb-failed — re-queue all failed/missing thumbnails ─────
+
+router.post('/assets/rethumb-failed', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT id, filename FROM assets WHERE thumb_status IN ('failed', 'none') OR thumb_status IS NULL"
+  ).all() as { id: string; filename: string }[];
+
+  const eligible = rows.filter((r) => needsThumbnail(r.filename));
+
+  for (const row of eligible) {
+    db.prepare("UPDATE assets SET thumb_status = 'pending' WHERE id = ?").run(row.id);
+    enqueueThumb(row.id);
+  }
+
+  res.json({ ok: true, queued: eligible.length });
 });
 
 // ─── GET /folder/:id/download ─────────────────────────────────────────────────

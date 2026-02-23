@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Download, Trash2, Tag, FolderInput, Edit2, FileBox,
-  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders,
+  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders, RefreshCw,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { TagBadge, TagInput } from './TagInput.js';
@@ -56,6 +56,7 @@ export function AssetCard({
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [rethumbing, setRethumbing] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
 
@@ -126,6 +127,20 @@ export function AssetCard({
     a.download = asset.filename;
     a.click();
     setMenuOpen(false);
+  }
+
+  async function handleRethumb() {
+    setRethumbing(true);
+    setMenuOpen(false);
+    try {
+      await api.assets.rethumb(asset.id);
+      // Optimistically set to pending so the polling effect kicks in
+      onUpdate({ ...asset, thumbStatus: 'pending' });
+    } catch (err) {
+      console.error('[AssetCard] rethumb error:', err);
+    } finally {
+      setRethumbing(false);
+    }
   }
 
   const thumbUrl = api.assets.thumbUrl(asset);
@@ -386,6 +401,14 @@ export function AssetCard({
                   </div>
                 )}
                 <hr className="my-1 border-gray-200 dark:border-gray-700" />
+                <button
+                  onClick={handleRethumb}
+                  disabled={rethumbing || asset.thumbStatus === 'pending'}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={asset.thumbStatus === 'pending' ? 'animate-spin' : ''} />
+                  {asset.thumbStatus === 'pending' ? 'Generating…' : 'Regenerate thumbnail'}
+                </button>
                 <button
                   onClick={handleDownload}
                   className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"

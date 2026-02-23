@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { LogOut, Settings } from 'lucide-react';
+import { LogOut, Settings, RefreshCw } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.js';
 import { AssetGrid } from './components/AssetGrid.js';
 import { SearchBar } from './components/SearchBar.js';
@@ -118,6 +118,8 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
+  const [sort, setSort] = useState('date_desc');
+  const [rethumbingFailed, setRethumbingFailed] = useState(false);
   const PAGE_SIZE = 100;
 
   // New project modal
@@ -135,6 +137,7 @@ export function App() {
       folder_id: selectedFolderId ?? undefined,
       limit: PAGE_SIZE,
       offset: currentPage * PAGE_SIZE,
+      sort,
     }).filter(([, v]) => v !== undefined)
   );
 
@@ -186,6 +189,21 @@ export function App() {
       refreshProjects();
     } catch (err) {
       console.error('[App] Failed to add asset to project:', err);
+    }
+  }
+
+  async function handleRethumbFailed() {
+    setRethumbingFailed(true);
+    try {
+      const result = await api.assets.rethumbFailed();
+      if (result.queued > 0) {
+        // Refresh after a short delay to pick up newly queued thumbs
+        setTimeout(() => refresh(), 2000);
+      }
+    } catch (err) {
+      console.error('[App] rethumb-failed error:', err);
+    } finally {
+      setRethumbingFailed(false);
     }
   }
 
@@ -315,7 +333,26 @@ export function App() {
                 </>
               )}
               <div className="flex-1" />
-              <span className="text-xs">{total} {total === 1 ? 'file' : 'files'}</span>
+              <span className="text-xs text-gray-400">{total} {total === 1 ? 'file' : 'files'}</span>
+              <button
+                onClick={handleRethumbFailed}
+                disabled={rethumbingFailed}
+                title="Re-generate missing/failed thumbnails"
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw size={12} className={rethumbingFailed ? 'animate-spin' : ''} />
+                {rethumbingFailed ? 'Queuing…' : 'Rethumb failed'}
+              </button>
+              <select
+                value={sort}
+                onChange={(e) => { setSort(e.target.value); setCurrentPage(0); }}
+                className="text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-2 py-1 outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
+              >
+                <option value="date_desc">Newest first</option>
+                <option value="date_asc">Oldest first</option>
+                <option value="name_asc">Name A→Z</option>
+                <option value="name_desc">Name Z→A</option>
+              </select>
             </div>
 
             {/* Main content */}
