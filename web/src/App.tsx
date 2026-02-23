@@ -117,6 +117,8 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [currentPage, setCurrentPage] = useState(0);
+  const PAGE_SIZE = 100;
 
   // New project modal
   const [newProjectName, setNewProjectName] = useState('');
@@ -131,10 +133,13 @@ export function App() {
       q: searchQuery || undefined,
       tags: selectedTags.length ? selectedTags.join(',') : undefined,
       folder_id: selectedFolderId ?? undefined,
+      limit: PAGE_SIZE,
+      offset: currentPage * PAGE_SIZE,
     }).filter(([, v]) => v !== undefined)
   );
 
-  const { assets, loading, refresh, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
+  const { assets, total, loading, refresh, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const { folders, createFolder, renameFolder, deleteFolder, refresh: refreshFolders } = useFolders();
   const { projects, refresh: refreshProjects, createProject } = useProjects();
 
@@ -142,11 +147,11 @@ export function App() {
     setSelectedTags((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
     );
+    setCurrentPage(0);
   }
 
   function handleCategorySelect(category: Category | null) {
     if (category === selectedCategory) {
-      // Toggle off if clicking the already-selected category
       setSelectedCategory(null);
     } else {
       setSelectedCategory(category);
@@ -155,6 +160,7 @@ export function App() {
       setSearchQuery('');
       setSelectedProjectId(null);
     }
+    setCurrentPage(0);
   }
 
   // Filter assets by selected category
@@ -216,7 +222,7 @@ export function App() {
         assets={assets}
         selectedFolderId={selectedFolderId}
         selectedTags={selectedTags}
-        onFolderSelect={(id) => { setSelectedFolderId(id); setSelectedTags([]); setSelectedProjectId(null); }}
+        onFolderSelect={(id) => { setSelectedFolderId(id); setSelectedTags([]); setSelectedProjectId(null); setCurrentPage(0); }}
         onTagToggle={handleTagToggle}
         onFolderCreate={createFolder}
         onFolderRename={renameFolder}
@@ -243,7 +249,7 @@ export function App() {
             {/* Top bar */}
             <header className="flex items-center gap-3 px-5 py-3 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
               <div className="flex-1 max-w-sm">
-                <SearchBar value={searchQuery} onChange={setSearchQuery} />
+                <SearchBar value={searchQuery} onChange={(v) => { setSearchQuery(v); setCurrentPage(0); }} />
               </div>
               <div className="flex-1" />
               <UploadZone currentFolderId={selectedFolderId} onUploaded={handleUploaded} />
@@ -272,7 +278,7 @@ export function App() {
             <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
               <span
                 className="hover:text-gray-700 dark:hover:text-gray-200 cursor-pointer"
-                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); }}
+                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); setCurrentPage(0); }}
               >
                 All Files
               </span>
@@ -309,7 +315,7 @@ export function App() {
                 </>
               )}
               <div className="flex-1" />
-              <span className="text-xs">{displayAssets.length} {displayAssets.length === 1 ? 'file' : 'files'}</span>
+              <span className="text-xs">{total} {total === 1 ? 'file' : 'files'}</span>
             </div>
 
             {/* Main content */}
@@ -323,6 +329,67 @@ export function App() {
                 projects={projects}
                 onAddToProject={handleAddToProject}
               />
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-2 pt-6 pb-2">
+                  <button
+                    onClick={() => setCurrentPage(0)}
+                    disabled={currentPage === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    First
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+                    disabled={currentPage === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Prev
+                  </button>
+
+                  {/* Page numbers */}
+                  {Array.from({ length: totalPages }, (_, i) => i)
+                    .filter(i => i === 0 || i === totalPages - 1 || Math.abs(i - currentPage) <= 2)
+                    .reduce<(number | 'gap')[]>((acc, i, idx, arr) => {
+                      if (idx > 0 && i - (arr[idx - 1] as number) > 1) acc.push('gap');
+                      acc.push(i);
+                      return acc;
+                    }, [])
+                    .map((item, idx) =>
+                      item === 'gap' ? (
+                        <span key={`gap-${idx}`} className="px-1 text-xs text-gray-400">…</span>
+                      ) : (
+                        <button
+                          key={item}
+                          onClick={() => setCurrentPage(item)}
+                          className={`min-w-[2rem] px-2 py-1.5 text-xs rounded-lg border transition-colors ${
+                            item === currentPage
+                              ? 'bg-accent text-white border-accent font-medium'
+                              : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {item + 1}
+                        </button>
+                      )
+                    )}
+
+                  <button
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={currentPage >= totalPages - 1}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Next
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage(totalPages - 1)}
+                    disabled={currentPage >= totalPages - 1}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Last
+                  </button>
+                </div>
+              )}
             </div>
           </>
         )}

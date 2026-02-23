@@ -146,24 +146,27 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const { q, tags: tagsParam, folder_id, limit = '100', offset = '0' } = req.query as Record<string, string>;
 
-  let sql = 'SELECT * FROM assets WHERE 1=1';
-  const params: unknown[] = [];
+  let whereClause = ' WHERE 1=1';
+  const whereParams: unknown[] = [];
 
   if (q) {
-    sql += ' AND (filename LIKE ? OR original_name LIKE ? OR notes LIKE ?)';
+    whereClause += ' AND (filename LIKE ? OR original_name LIKE ? OR notes LIKE ?)';
     const like = `%${q}%`;
-    params.push(like, like, like);
+    whereParams.push(like, like, like);
   }
 
   if (folder_id === 'none') {
-    sql += ' AND folder_id IS NULL';
+    whereClause += ' AND folder_id IS NULL';
   } else if (folder_id) {
-    sql += ' AND folder_id = ?';
-    params.push(folder_id);
+    whereClause += ' AND folder_id = ?';
+    whereParams.push(folder_id);
   }
 
-  sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-  params.push(parseInt(limit, 10), parseInt(offset, 10));
+  // Total count (before pagination)
+  const total = (db.prepare(`SELECT COUNT(*) as count FROM assets${whereClause}`).get(...whereParams) as { count: number }).count;
+
+  const sql = `SELECT * FROM assets${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const params = [...whereParams, parseInt(limit, 10), parseInt(offset, 10)];
 
   let rows = db.prepare(sql).all(...params) as AssetRow[];
 
@@ -175,7 +178,7 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
     });
   }
 
-  res.json(rows.map(toOut));
+  res.json({ items: rows.map(toOut), total });
 });
 
 // ─── GET /asset/:id ───────────────────────────────────────────────────────────

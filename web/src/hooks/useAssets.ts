@@ -5,6 +5,7 @@ import type { AssetListParams } from '../lib/api.js';
 
 export function useAssets(params: AssetListParams) {
   const [assets, setAssets] = useState<AssetOut[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -12,8 +13,9 @@ export function useAssets(params: AssetListParams) {
     setLoading(true);
     setError(null);
     try {
-      const list = await api.assets.list(params);
-      setAssets(list);
+      const result = await api.assets.list(params);
+      setAssets(result.items);
+      setTotal(result.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -29,11 +31,13 @@ export function useAssets(params: AssetListParams) {
 
   const removeAsset = useCallback((id: string) => {
     setAssets((prev) => prev.filter((a) => a.id !== id));
+    setTotal((prev) => Math.max(0, prev - 1));
   }, []);
 
   const addAssets = useCallback((newAssets: AssetOut[]) => {
     setAssets((prev) => [...newAssets, ...prev]);
+    setTotal((prev) => prev + newAssets.length);
   }, []);
 
-  return { assets, loading, error, refresh, updateAsset, removeAsset, addAssets };
+  return { assets, total, loading, error, refresh, updateAsset, removeAsset, addAssets };
 }

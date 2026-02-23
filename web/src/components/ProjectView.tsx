@@ -365,8 +365,8 @@ function AssetPicker({
   const [searchFilter, setSearchFilter] = useState('');
 
   useEffect(() => {
-    api.assets.list({ limit: 500 }).then((assets) => {
-      setAllAssets(assets);
+    api.assets.list({ limit: 500 }).then((result) => {
+      setAllAssets(result.items);
     }).catch((err) => {
       console.error('[AssetPicker] Failed to load assets:', err);
     }).finally(() => setLoading(false));

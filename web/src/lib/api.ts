@@ -45,6 +45,11 @@ export interface AssetListParams {
   offset?: number;
 }
 
+export interface PaginatedAssets {
+  items: AssetOut[];
+  total: number;
+}
+
 export const api = {
   health: (): Promise<HealthResponse> => apiFetch('/health'),
 
@@ -59,13 +64,13 @@ export const api = {
   },
 
   assets: {
-    list: (params: AssetListParams = {}): Promise<AssetOut[]> => {
+    list: (params: AssetListParams = {}): Promise<PaginatedAssets> => {
       const qs = new URLSearchParams();
       if (params.q) qs.set('q', params.q);
       if (params.tags) qs.set('tags', params.tags);
       if (params.folder_id) qs.set('folder_id', params.folder_id);
       if (params.limit) qs.set('limit', String(params.limit));
-      if (params.offset) qs.set('offset', String(params.offset));
+      if (params.offset !== undefined) qs.set('offset', String(params.offset));
       const query = qs.toString();
       return apiFetch(`/assets${query ? `?${query}` : ''}`);
     },
