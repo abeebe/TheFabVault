@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Download, Trash2, Tag, FolderInput, Edit2, FileBox,
-  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders, RefreshCw,
+  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders, RefreshCw, LayoutGrid, Heart,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { TagBadge, TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
+import { StarRating } from './StarRating.js';
 import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
 
 interface AssetCardProps {
@@ -15,11 +16,9 @@ interface AssetCardProps {
   onSelect: () => void;
   onUpdate: (updated: AssetOut) => void;
   onPreview: () => void;
-  // Delete options:
-  //   onDelete       — project mode: remove from project (no disk option)
-  //   onDeleteWithFile — normal mode: two-choice delete (keep / delete file)
+  // Delete:
+  //   onDelete — moves to trash (normal mode) or removes from project (project mode)
   onDelete?: () => void;
-  onDeleteWithFile?: (deleteFile: boolean) => void;
   // Project mode extras
   projectMode?: boolean;
   hasOverrides?: boolean;
@@ -43,7 +42,7 @@ function formatSize(bytes: number): string {
 
 export function AssetCard({
   asset, folders, selected, onSelect, onUpdate, onPreview,
-  onDelete, onDeleteWithFile,
+  onDelete,
   projectMode, hasOverrides, onEditOverrides,
   projects, onAddToProject,
 }: AssetCardProps) {
@@ -54,6 +53,7 @@ export function AssetCard({
   const [tags, setTags] = useState(asset.tags);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [showCategoryMenu, setShowCategoryMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saving, setSaving] = useState(false);
   const [rethumbing, setRethumbing] = useState(false);
@@ -143,6 +143,17 @@ export function AssetCard({
     }
   }
 
+  async function handleSetCategory(category: string | null) {
+    try {
+      const updated = await api.assets.setCategory(asset.id, category);
+      onUpdate(updated);
+    } catch (err) {
+      console.error('[AssetCard] setCategory error:', err);
+    }
+    setShowCategoryMenu(false);
+    setMenuOpen(false);
+  }
+
   const thumbUrl = api.assets.thumbUrl(asset);
 
   return (
@@ -173,6 +184,25 @@ export function AssetCard({
           </span>
         </div>
       )}
+
+      {/* Favorite heart */}
+      <button
+        onClick={async (e) => {
+          e.stopPropagation();
+          try {
+            const updated = await api.assets.setFavorite(asset.id, !asset.isFavorite);
+            onUpdate(updated);
+          } catch {}
+        }}
+        title={asset.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+        className={`absolute top-2 right-8 z-10 p-1 rounded transition-all ${
+          asset.isFavorite
+            ? 'opacity-100 text-red-500'
+            : 'opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400'
+        }`}
+      >
+        <Heart size={14} fill={asset.isFavorite ? 'currentColor' : 'none'} />
+      </button>
 
       {/* Thumbnail area */}
       <div
@@ -234,8 +264,20 @@ export function AssetCard({
           </p>
         )}
 
-        {/* Size */}
-        <p className="text-xs text-gray-400">{formatSize(asset.size)}</p>
+        {/* Size + Rating */}
+        <div className="flex items-center justify-between gap-1">
+          <p className="text-xs text-gray-400">{formatSize(asset.size)}</p>
+          <StarRating
+            rating={asset.rating}
+            size="sm"
+            onChange={async (r) => {
+              try {
+                const updated = await api.assets.setRating(asset.id, r);
+                onUpdate(updated);
+              } catch {}
+            }}
+          />
+        </div>
 
         {/* Tags */}
         {editingTags ? (
@@ -285,21 +327,15 @@ export function AssetCard({
               /* ── Inline delete confirmation ── */
               <div className="px-3 py-2">
                 <p className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-2">
-                  {projectMode ? 'Remove from project?' : 'Remove from vault?'}
+                  {projectMode ? 'Remove from project?' : 'Move to trash?'}
                 </p>
                 {!projectMode && (
                   <div className="flex flex-col gap-1 mb-2">
                     <button
-                      onClick={() => { onDeleteWithFile?.(false); setConfirmDelete(false); setMenuOpen(false); }}
-                      className="w-full text-left px-2 py-1.5 rounded text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-                    >
-                      Keep file on disk
-                    </button>
-                    <button
-                      onClick={() => { onDeleteWithFile?.(true); setConfirmDelete(false); setMenuOpen(false); }}
+                      onClick={() => { onDelete?.(); setConfirmDelete(false); setMenuOpen(false); }}
                       className="w-full text-left px-2 py-1.5 rounded text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
                     >
-                      Delete file from disk
+                      Move to trash
                     </button>
                   </div>
                 )}
@@ -344,10 +380,38 @@ export function AssetCard({
                 >
                   <Tag size={14} /> Edit tags
                 </button>
+                {/* Set category sub-menu */}
+                <div>
+                  <button
+                    onClick={() => { setShowCategoryMenu((v) => !v); setShowMoveMenu(false); setShowProjectMenu(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                  >
+                    <LayoutGrid size={14} /> Set category
+                  </button>
+                  {showCategoryMenu && (
+                    <div className="border-l-2 border-accent/30 ml-4 py-1 animate-fade-in">
+                      {([
+                        { value: null, label: 'Auto-detect' },
+                        { value: '3dmodel', label: '3D Models' },
+                        { value: '2d', label: '2D Designs' },
+                      ] as { value: string | null; label: string }[]).map(({ value, label }) => (
+                        <button
+                          key={String(value)}
+                          onClick={() => handleSetCategory(value)}
+                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-700 ${
+                            asset.category === value ? 'text-accent font-medium' : 'text-gray-700 dark:text-gray-200'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {!projectMode && (
                   <div>
                     <button
-                      onClick={() => setShowMoveMenu((v) => !v)}
+                      onClick={() => { setShowMoveMenu((v) => !v); setShowCategoryMenu(false); setShowProjectMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
                     >
                       <FolderInput size={14} /> Move to folder
@@ -380,7 +444,7 @@ export function AssetCard({
                 {!projectMode && onAddToProject && projects && projects.length > 0 && (
                   <div>
                     <button
-                      onClick={() => setShowProjectMenu((v) => !v)}
+                      onClick={() => { setShowProjectMenu((v) => !v); setShowCategoryMenu(false); setShowMoveMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
                     >
                       <FolderPlus size={14} /> Add to project
@@ -415,7 +479,7 @@ export function AssetCard({
                 >
                   <Download size={14} /> Download
                 </button>
-                {(onDelete || onDeleteWithFile) && (
+                {onDelete && (
                   <button
                     onClick={() => setConfirmDelete(true)}
                     className={`w-full flex items-center gap-2 px-3 py-2 ${
@@ -424,7 +488,7 @@ export function AssetCard({
                         : 'hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400'
                     }`}
                   >
-                    <Trash2 size={14} /> {projectMode ? 'Remove from project' : 'Delete'}
+                    <Trash2 size={14} /> {projectMode ? 'Remove from project' : 'Move to trash'}
                   </button>
                 )}
               </>

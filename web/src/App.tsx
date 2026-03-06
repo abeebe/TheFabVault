@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { LogOut, Settings, RefreshCw } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.js';
 import { AssetGrid } from './components/AssetGrid.js';
@@ -9,6 +9,7 @@ import { Spinner } from './components/Spinner.js';
 import { Modal } from './components/Modal.js';
 import { ProjectView } from './components/ProjectView.js';
 import { AdminSettings } from './components/AdminSettings.js';
+import { TrashView } from './components/TrashView.js';
 import { useAuth } from './hooks/useAuth.js';
 import { useAssets } from './hooks/useAssets.js';
 import { useFolders } from './hooks/useFolders.js';
@@ -18,28 +19,17 @@ import { api } from './lib/api.js';
 import type { AssetOut } from './types/index.js';
 
 // Category detection utilities
-type Category = '3dprint' | 'laser' | 'vinyl';
+type Category = '3dmodel' | '2d' | 'uncategorized';
 
-function getAssetCategories(asset: AssetOut): Category[] {
-  const categories: Category[] = [];
-
+function getAssetCategory(asset: AssetOut): Category {
+  // Explicit DB override takes priority
+  if (asset.category === '3dmodel') return '3dmodel';
+  if (asset.category === '2d') return '2d';
+  // Auto-detect from extension
   const ext = asset.filename.split('.').pop()?.toLowerCase();
-
-  // 3D files - automatic detection by extension
-  if (['.stl', '.obj', '.3mf'].includes(`.${ext}`)) {
-    categories.push('3dprint');
-  }
-
-  // Laser files - automatic detection by extension
-  if (['.svg', '.dxf'].includes(`.${ext}`)) {
-    categories.push('laser');
-  }
-
-  // Tags-based - manual assignment (additive, won't duplicate)
-  if (asset.tags.includes('laser') && !categories.includes('laser')) categories.push('laser');
-  if (asset.tags.includes('vinyl')) categories.push('vinyl');
-
-  return categories;
+  if (ext && ['.stl', '.obj', '.3mf'].includes(`.${ext}`)) return '3dmodel';
+  if (ext && ['.svg', '.dxf'].includes(`.${ext}`)) return '2d';
+  return 'uncategorized';
 }
 
 function LoginPage({ onLogin }: { onLogin: (u: string, p: string) => Promise<void> }) {
@@ -117,6 +107,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const [sort, setSort] = useState('date_desc');
   const [rethumbingFailed, setRethumbingFailed] = useState(false);
@@ -130,6 +121,10 @@ export function App() {
   // Admin settings modal
   const [adminSettingsOpen, setAdminSettingsOpen] = useState(false);
 
+  // Trash modal
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashCount, setTrashCount] = useState(0);
+
   const cleanParams = Object.fromEntries(
     Object.entries({
       q: searchQuery || undefined,
@@ -141,10 +136,26 @@ export function App() {
     }).filter(([, v]) => v !== undefined)
   );
 
-  const { assets, total, loading, refresh, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
+  const { assets, total, loading, refresh: refreshAssets, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const { folders, createFolder, renameFolder, deleteFolder, refresh: refreshFolders } = useFolders();
   const { projects, refresh: refreshProjects, createProject } = useProjects();
+
+  // Keep trash count in sync
+  const refreshTrashCount = useCallback(async () => {
+    try {
+      const result = await api.trash.list();
+      setTrashCount(result.total);
+    } catch {}
+  }, []);
+
+  // Load trash count on mount
+  useEffect(() => { refreshTrashCount(); }, [refreshTrashCount]);
+
+  const refresh = useCallback(() => {
+    refreshAssets();
+    refreshTrashCount();
+  }, [refreshAssets, refreshTrashCount]);
 
   function handleTagToggle(tag: string) {
     setSelectedTags((prev) =>
@@ -162,14 +173,33 @@ export function App() {
       setSelectedTags([]);
       setSearchQuery('');
       setSelectedProjectId(null);
+      setShowFavoritesOnly(false);
     }
     setCurrentPage(0);
   }
 
-  // Filter assets by selected category
-  const displayAssets = selectedCategory
-    ? assets.filter(a => getAssetCategories(a).includes(selectedCategory))
-    : assets;
+  function handleFavoritesToggle() {
+    setShowFavoritesOnly((prev) => {
+      const next = !prev;
+      if (next) {
+        // Clear other filters when switching to favorites
+        setSelectedCategory(null);
+        setSelectedFolderId(null);
+        setSelectedTags([]);
+        setSearchQuery('');
+        setSelectedProjectId(null);
+        setCurrentPage(0);
+      }
+      return next;
+    });
+  }
+
+  // Filter assets by selected category or favorites
+  const displayAssets = showFavoritesOnly
+    ? assets.filter(a => a.isFavorite)
+    : selectedCategory
+      ? assets.filter(a => getAssetCategory(a) === selectedCategory)
+      : assets;
 
   const handleUploaded = useCallback((newAssets: AssetOut[]) => {
     addAssets(newAssets);
@@ -246,12 +276,17 @@ export function App() {
         onFolderRename={renameFolder}
         onFolderDelete={deleteFolder}
         onImportScan={() => { refresh(); refreshFolders(); }}
+        onOpenSettings={() => setAdminSettingsOpen(true)}
+        onOpenTrash={() => setTrashOpen(true)}
+        trashCount={trashCount}
         projects={projects}
         selectedProjectId={selectedProjectId}
         onProjectSelect={handleProjectSelect}
         onProjectCreate={() => setNewProjectOpen(true)}
         selectedCategory={selectedCategory}
         onCategorySelect={handleCategorySelect}
+        showFavoritesOnly={showFavoritesOnly}
+        onFavoritesToggle={handleFavoritesToggle}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -272,23 +307,21 @@ export function App() {
               <div className="flex-1" />
               <UploadZone currentFolderId={selectedFolderId} onUploaded={handleUploaded} />
               <ThemeToggle theme={theme} onCycle={cycleTheme} />
+              <button
+                onClick={() => setAdminSettingsOpen(true)}
+                title="Admin settings"
+                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              >
+                <Settings size={16} />
+              </button>
               {authRequired && (
-                <>
-                  <button
-                    onClick={() => setAdminSettingsOpen(true)}
-                    title="Admin settings"
-                    className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                  >
-                    <Settings size={16} />
-                  </button>
-                  <button
-                    onClick={logout}
-                    title="Sign out"
-                    className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                  >
-                    <LogOut size={16} />
-                  </button>
-                </>
+                <button
+                  onClick={logout}
+                  title="Sign out"
+                  className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <LogOut size={16} />
+                </button>
               )}
             </header>
 
@@ -296,15 +329,21 @@ export function App() {
             <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
               <span
                 className="hover:text-gray-700 dark:hover:text-gray-200 cursor-pointer"
-                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); setCurrentPage(0); }}
+                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); setShowFavoritesOnly(false); setCurrentPage(0); }}
               >
                 All Files
               </span>
-              {selectedCategory && (
+              {showFavoritesOnly && (
+                <>
+                  <span>/</span>
+                  <span className="text-red-500 font-medium">Favorites</span>
+                </>
+              )}
+              {!showFavoritesOnly && selectedCategory && (
                 <>
                   <span>/</span>
                   <span className="text-gray-900 dark:text-gray-100 font-medium">
-                    {selectedCategory === '3dprint' ? '3D Print' : selectedCategory.charAt(0).toUpperCase() + selectedCategory.slice(1)}
+                    {selectedCategory === '3dmodel' ? '3D Models' : selectedCategory === '2d' ? '2D Designs' : 'Uncategorized'}
                   </span>
                 </>
               )}
@@ -468,6 +507,14 @@ export function App() {
 
       {/* Admin settings modal */}
       <AdminSettings isOpen={adminSettingsOpen} onClose={() => setAdminSettingsOpen(false)} />
+
+      {/* Trash modal */}
+      {trashOpen && (
+        <TrashView
+          onClose={() => { setTrashOpen(false); refreshTrashCount(); }}
+          onRestored={() => { refresh(); refreshFolders(); }}
+        />
+      )}
     </div>
   );
 }

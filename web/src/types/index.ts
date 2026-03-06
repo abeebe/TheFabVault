@@ -86,6 +86,21 @@ export interface AssetOut {
   url: string;
   meta: AssetMeta;
   createdAt: number;
+  category: string | null;
+  deletedAt: number | null;
+  rating: number | null;
+  isFavorite: boolean;
+}
+
+export interface VersionOut {
+  id: string;
+  assetId: string;
+  versionNum: number;
+  filename: string;
+  size: number;
+  fileHash: string | null;
+  notes: string | null;
+  createdAt: number;
 }
 
 export interface FolderOut {
@@ -161,3 +176,65 @@ export interface AdminConfig {
 }
 
 export type Theme = 'light' | 'dark' | 'system';
+
+// ─── Duplicates ───────────────────────────────────────────────────────────────
+
+export interface DuplicateAsset {
+  id: string;
+  filename: string;
+  originalName: string | null;
+  size: number;
+  createdAt: number;
+  folderId: string | null;
+  tags: string[];
+  thumbUrl: string | null;
+}
+
+export interface DuplicateGroup {
+  key: string;
+  count: number;
+  assets: DuplicateAsset[];
+}
+
+export interface DuplicatesReport {
+  byName: DuplicateGroup[];
+  byHash: DuplicateGroup[];
+  unhashedCount: number;
+}
+
+// ─── Network Mounts ───────────────────────────────────────────────────────────
+
+export interface MountConfig {
+  id: string;
+  slot: 1 | 2 | 3;
+  name: string;
+  type: 'nfs' | 'smb';
+  host: string;
+  remote_path: string;
+  username: string | null;
+  password: string | null;
+  mount_opts: string | null;
+  enabled: number;
+  role: 'import' | 'library';
+  created_at: number;
+  updated_at: number;
+}
+
+export interface MountSlotStatus {
+  slot: 1 | 2 | 3;
+  mountPoint: string;
+  mounted: boolean;
+  config: MountConfig | null;
+}
+
+// ─── Orphans ──────────────────────────────────────────────────────────────────
+
+export interface OrphanRecord {
+  id: string;
+  filename: string;
+}
+
+export interface OrphansReport {
+  deadRecords: OrphanRecord[];
+  orphanDirs: string[];
+}

@@ -66,6 +66,52 @@ const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
   );
   `,
+  // v3: user-overridable category column on assets
+  `ALTER TABLE assets ADD COLUMN category TEXT;`,
+  // v4: network mount configurations (NFS/SMB shares managed by the app)
+  `
+  CREATE TABLE IF NOT EXISTS mount_configs (
+    id          TEXT    PRIMARY KEY,
+    slot        INTEGER NOT NULL UNIQUE CHECK(slot IN (1, 2, 3)),
+    name        TEXT    NOT NULL,
+    type        TEXT    NOT NULL CHECK(type IN ('nfs', 'smb')),
+    host        TEXT    NOT NULL,
+    remote_path TEXT    NOT NULL,
+    username    TEXT,
+    password    TEXT,
+    mount_opts  TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  `,
+  // v5: role column — 'import' (read-only scan source) or 'library' (read-write primary storage)
+  `ALTER TABLE mount_configs ADD COLUMN role TEXT NOT NULL DEFAULT 'import'
+   CHECK(role IN ('import', 'library'));`,
+  // v6: SHA-256 content hash for duplicate detection
+  `ALTER TABLE assets ADD COLUMN file_hash TEXT;
+   CREATE INDEX IF NOT EXISTS idx_assets_file_hash ON assets(file_hash);`,
+  // v7: soft-delete / trash (NULL = active, unix timestamp = trashed)
+  `ALTER TABLE assets ADD COLUMN deleted_at INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_assets_deleted ON assets(deleted_at);`,
+  // v8: star rating (NULL = unrated, 1–5)
+  `ALTER TABLE assets ADD COLUMN rating INTEGER;`,
+  // v9: version history — each row is a previous version of an asset file
+  `CREATE TABLE IF NOT EXISTS asset_versions (
+    id          TEXT    PRIMARY KEY,
+    asset_id    TEXT    NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    version_num INTEGER NOT NULL,
+    filename    TEXT    NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    file_hash   TEXT,
+    notes       TEXT,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(asset_id, version_num)
+  );
+  CREATE INDEX IF NOT EXISTS idx_asset_versions_asset ON asset_versions(asset_id);`,
+  // v10: favorites (0 = normal, 1 = favorited)
+  `ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+   CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(is_favorite);`,
 ];
 
 function runMigrations(db: Database.Database): void {

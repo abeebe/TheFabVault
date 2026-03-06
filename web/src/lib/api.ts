@@ -2,6 +2,8 @@ import type {
   AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult,
   ProjectOut, ProjectDetailOut, ProjectOverrides,
   PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
+  MountSlotStatus, MountConfig, DuplicatesReport, VersionOut,
+  OrphansReport,
 } from '../types/index.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
@@ -107,17 +109,52 @@ export const api = {
     moveToFolder: (id: string, folderId: string | null): Promise<AssetOut> =>
       apiFetch(`/asset/${id}/folder`, { method: 'PATCH', body: JSON.stringify({ folder_id: folderId }) }),
 
-    delete: (id: string, opts?: { deleteFile?: boolean }): Promise<void> =>
-      apiFetch(`/asset/${id}?delete_file=${opts?.deleteFile ?? true}`, { method: 'DELETE' }),
+    // Soft-delete (moves to trash). Use trash.empty() or trash.deletePermanently() for hard delete.
+    delete: (id: string): Promise<void> =>
+      apiFetch(`/asset/${id}`, { method: 'DELETE' }),
+
+    deletePermanently: (id: string): Promise<void> =>
+      apiFetch(`/asset/${id}?permanent=true`, { method: 'DELETE' }),
 
     extractMeta: (id: string): Promise<AssetOut> =>
       apiFetch(`/asset/${id}/extract-meta`, { method: 'POST' }),
+
+    setCategory: (id: string, category: string | null): Promise<AssetOut> =>
+      apiFetch(`/asset/${id}/category`, {
+        method: 'PATCH',
+        body: JSON.stringify({ category }),
+      }),
 
     rethumb: (id: string): Promise<{ ok: boolean; queued: string }> =>
       apiFetch(`/asset/${id}/rethumb`, { method: 'POST' }),
 
     rethumbFailed: (): Promise<{ ok: boolean; queued: number }> =>
       apiFetch('/assets/rethumb-failed', { method: 'POST' }),
+
+    checkHash: (hash: string): Promise<{ exists: boolean; asset?: AssetOut }> =>
+      apiFetch('/check-hash', { method: 'POST', body: JSON.stringify({ hash }) }),
+
+    setRating: (id: string, rating: number | null): Promise<AssetOut> =>
+      apiFetch(`/asset/${id}/rating`, { method: 'PATCH', body: JSON.stringify({ rating }) }),
+
+    setFavorite: (id: string, favorite: boolean): Promise<AssetOut> =>
+      apiFetch(`/asset/${id}/favorite`, { method: 'PATCH', body: JSON.stringify({ favorite }) }),
+
+    getVersions: (id: string): Promise<{ versions: VersionOut[] }> =>
+      apiFetch(`/asset/${id}/versions`),
+
+    uploadVersion: (id: string, file: File, notes?: string): Promise<{ asset: AssetOut }> => {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (notes) fd.append('notes', notes);
+      return apiFetch(`/asset/${id}/version`, { method: 'POST', body: fd });
+    },
+
+    restoreVersion: (id: string, versionId: string): Promise<{ asset: AssetOut }> =>
+      apiFetch(`/asset/${id}/version/${versionId}/restore`, { method: 'POST' }),
+
+    deleteVersion: (id: string, versionId: string): Promise<{ ok: boolean }> =>
+      apiFetch(`/asset/${id}/version/${versionId}`, { method: 'DELETE' }),
 
     fileUrl: (asset: AssetOut): string => {
       const token = getToken();
@@ -217,8 +254,47 @@ export const api = {
     },
   },
 
+  trash: {
+    list: (): Promise<{ items: AssetOut[]; total: number }> =>
+      apiFetch('/trash'),
+
+    restore: (id: string): Promise<AssetOut> =>
+      apiFetch(`/asset/${id}/restore`, { method: 'POST' }),
+
+    empty: (): Promise<{ ok: boolean; deleted: number }> =>
+      apiFetch('/trash', { method: 'DELETE' }),
+  },
+
   import: {
     scan: (): Promise<ScanResult> => apiFetch('/import/scan', { method: 'POST' }),
+  },
+
+  mounts: {
+    list: (): Promise<MountSlotStatus[]> =>
+      apiFetch('/admin/mounts'),
+
+    save: (body: {
+      slot: 1 | 2 | 3;
+      name: string;
+      type: 'nfs' | 'smb';
+      host: string;
+      remote_path: string;
+      username?: string;
+      password?: string;
+      mount_opts?: string;
+      enabled?: boolean;
+      role?: 'import' | 'library';
+    }): Promise<{ success: boolean; id: string }> =>
+      apiFetch('/admin/mounts', { method: 'POST', body: JSON.stringify(body) }),
+
+    delete: (slot: 1 | 2 | 3): Promise<{ success: boolean }> =>
+      apiFetch(`/admin/mounts/${slot}`, { method: 'DELETE' }),
+
+    mount: (slot: 1 | 2 | 3): Promise<{ success: boolean; mounted: boolean; message?: string }> =>
+      apiFetch(`/admin/mounts/${slot}/mount`, { method: 'POST' }),
+
+    unmount: (slot: 1 | 2 | 3): Promise<{ success: boolean; mounted: boolean; message?: string }> =>
+      apiFetch(`/admin/mounts/${slot}/unmount`, { method: 'POST' }),
   },
 
   admin: {
@@ -232,5 +308,17 @@ export const api = {
 
     restart: (): Promise<{ success: boolean; message: string }> =>
       apiFetch('/admin/restart', { method: 'POST' }),
+
+    getDuplicates: (): Promise<DuplicatesReport> =>
+      apiFetch('/admin/duplicates'),
+
+    rehashFiles: (): Promise<{ ok: boolean; queued: number }> =>
+      apiFetch('/admin/duplicates/rehash', { method: 'POST' }),
+
+    getOrphans: (): Promise<OrphansReport> =>
+      apiFetch('/admin/orphans'),
+
+    cleanOrphans: (opts?: { deleteDeadRecords?: boolean; deleteOrphanDirs?: boolean }): Promise<{ ok: boolean; removedRecords: number; removedDirs: number }> =>
+      apiFetch('/admin/orphans/clean', { method: 'POST', body: JSON.stringify(opts ?? {}) }),
   },
 };

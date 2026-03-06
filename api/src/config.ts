@@ -31,7 +31,17 @@ export const config = {
     return getStorageDir();
   },
   dataDir: process.env.DATA_DIR ?? './data/db',
-  importMountPath: process.env.IMPORT_MOUNT_PATH ?? '',
+  // importMountPaths: comma-separated container paths to scan for new files.
+  // Defaults to the three in-app managed mount points.
+  // Legacy: IMPORT_MOUNT_PATH (single path) is still honoured as a fallback.
+  get importMountPaths(): string[] {
+    const multi = process.env.IMPORT_MOUNT_PATHS;
+    if (multi?.trim()) {
+      return multi.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    const single = process.env.IMPORT_MOUNT_PATH ?? '';
+    return single ? [single] : ['/imports/1', '/imports/2', '/imports/3'];
+  },
   importMountOnStartup: process.env.IMPORT_MOUNT_ON_STARTUP !== 'false',
   importMountExts: process.env.IMPORT_MOUNT_EXTS ?? '',
   importMaxMb: parseInt(process.env.IMPORT_MAX_MB ?? '512', 10),

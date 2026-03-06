@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { ChevronDown, ExternalLink } from 'lucide-react';
 import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
 import { GCodeViewer } from './GCodeViewer.js';
 import { MetaPanel } from './MetaPanel.js';
+import { StarRating } from './StarRating.js';
+import { VersionPanel } from './VersionPanel.js';
 import { dxfToSvg } from '../lib/dxf.js';
 import { api } from '../lib/api.js';
 import type { AssetOut } from '../types/index.js';
@@ -209,17 +212,111 @@ function ImageViewer({ asset }: { asset: AssetOut }) {
   );
 }
 
+// ─── Slicer handoff ───────────────────────────────────────────────────────────
+
+interface Slicer {
+  name: string;
+  scheme: (fileUrl: string) => string;
+  note?: string;
+}
+
+const SLICERS: Slicer[] = [
+  {
+    name: 'OrcaSlicer',
+    scheme: (url) => `orcaslicer://open?file=${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'PrusaSlicer',
+    scheme: (url) => `prusaslicer://open?file=${encodeURIComponent(url)}`,
+    note: 'May be restricted to Printables.com URLs',
+  },
+  {
+    name: 'Bambu Studio',
+    // bambu-connect:// needs a local path — fall back to download
+    scheme: (url) => url,
+    note: 'Download the file first, then open in Bambu Studio',
+  },
+  {
+    name: 'Cura / download',
+    scheme: (url) => url,
+  },
+];
+
+function SlicerHandoff({ asset }: { asset: AssetOut }) {
+  const [open, setOpen] = useState(false);
+  const fileUrl = api.assets.fileUrl(asset);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+      >
+        <ExternalLink size={14} /> Open in slicer <ChevronDown size={12} />
+      </button>
+
+      {open && (
+        <>
+          {/* Click-away backdrop */}
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 bottom-full mb-1 z-20 w-56 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 py-1 animate-fade-in">
+            {SLICERS.map((slicer) => {
+              const href = slicer.scheme(fileUrl);
+              const isDownload = href === fileUrl;
+              return (
+                <a
+                  key={slicer.name}
+                  href={href}
+                  download={isDownload ? asset.filename : undefined}
+                  onClick={() => setOpen(false)}
+                  className="flex flex-col px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <span className="text-sm font-medium text-gray-800 dark:text-gray-200">{slicer.name}</span>
+                  {slicer.note && (
+                    <span className="text-xs text-gray-400 mt-0.5">{slicer.note}</span>
+                  )}
+                </a>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Main viewer export ───────────────────────────────────────────────────────
+
 export function ModelViewer({ asset, onClose, onUpdate }: ModelViewerProps) {
   const [currentAsset, setCurrentAsset] = useState(asset);
   const ext = getExt(currentAsset.filename);
 
-  function handleMetaRefresh(updated: AssetOut) {
+  function handleAssetUpdate(updated: AssetOut) {
     setCurrentAsset(updated);
     onUpdate?.(updated);
   }
 
+  async function handleRatingChange(rating: number | null) {
+    try {
+      const updated = await api.assets.setRating(currentAsset.id, rating);
+      handleAssetUpdate(updated);
+    } catch {}
+  }
+
   const isGCode = GCODE_EXTS.has(ext);
   const hasGraphicViewer = STL_EXTS.has(ext) || SVG_EXTS.has(ext) || DXF_EXTS.has(ext) || IMG_EXTS.has(ext);
+
+  const ratingRow = (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 dark:border-gray-700">
+      <span className="text-xs text-gray-500 dark:text-gray-400">Rating</span>
+      <StarRating rating={currentAsset.rating} onChange={handleRatingChange} />
+      {currentAsset.rating && (
+        <span className="text-xs text-gray-400 ml-1">
+          {['', 'Terrible', 'Poor', 'OK', 'Good', 'Great'][currentAsset.rating]}
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <Modal
@@ -228,7 +325,11 @@ export function ModelViewer({ asset, onClose, onUpdate }: ModelViewerProps) {
       wide
     >
       {isGCode && (
-        <GCodeViewer asset={currentAsset} />
+        <>
+          {ratingRow}
+          <GCodeViewer asset={currentAsset} />
+          <VersionPanel asset={currentAsset} onAssetUpdated={handleAssetUpdate} />
+        </>
       )}
       {hasGraphicViewer && (
         <>
@@ -237,15 +338,24 @@ export function ModelViewer({ asset, onClose, onUpdate }: ModelViewerProps) {
             {(SVG_EXTS.has(ext) || DXF_EXTS.has(ext)) && <SvgViewer asset={currentAsset} />}
             {IMG_EXTS.has(ext) && <ImageViewer asset={currentAsset} />}
           </div>
-          <MetaPanel asset={currentAsset} onRefresh={handleMetaRefresh} />
+          {STL_EXTS.has(ext) && (
+            <div className="flex justify-end px-4 pt-2">
+              <SlicerHandoff asset={currentAsset} />
+            </div>
+          )}
+          {ratingRow}
+          <MetaPanel asset={currentAsset} onRefresh={handleAssetUpdate} />
+          <VersionPanel asset={currentAsset} onAssetUpdated={handleAssetUpdate} />
         </>
       )}
       {!hasGraphicViewer && !isGCode && (
         <>
+          {ratingRow}
           <div className="flex items-center justify-center py-10 text-gray-500">
             No preview available for this file type
           </div>
-          <MetaPanel asset={currentAsset} onRefresh={handleMetaRefresh} />
+          <MetaPanel asset={currentAsset} onRefresh={handleAssetUpdate} />
+          <VersionPanel asset={currentAsset} onAssetUpdated={handleAssetUpdate} />
         </>
       )}
     </Modal>

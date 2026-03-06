@@ -19,6 +19,16 @@ export function assetFilePath(assetId: string, filename: string): string {
   return path.join(assetDir(assetId), filename);
 }
 
+export function versionDir(assetId: string): string {
+  const dir = path.join(assetDir(assetId), 'versions');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function versionFilePath(assetId: string, versionId: string, filename: string): string {
+  return path.join(versionDir(assetId), `${versionId}_${filename}`);
+}
+
 export function thumbFilePath(assetId: string): string {
   return path.join(THUMBS_DIR, `${assetId}.jpg`);
 }

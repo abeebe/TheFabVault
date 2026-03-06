@@ -14,9 +14,11 @@ import foldersRouter from './routes/folders.js';
 import thumbsRouter from './routes/thumbs.js';
 import projectsRouter from './routes/projects.js';
 import adminRouter from './routes/admin.js';
+import mountsRouter from './routes/mounts.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
 import { scanMountImports } from './services/mountImport.js';
 import { assetFilePath } from './services/fileStore.js';
+import { ensureMountPoints, remountAll } from './services/mountManager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,7 +40,7 @@ app.use('/static', express.static(staticDir));
 
 // Health check (for Docker healthcheck, no auth required)
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ ok: true, authRequired: config.authEnabled });
 });
 
 // Internal: serve raw asset files for the Puppeteer thumbnail renderer.
@@ -59,6 +61,7 @@ app.use('/', foldersRouter);
 app.use('/', thumbsRouter);
 app.use('/', projectsRouter);
 app.use('/', adminRouter);
+app.use('/', mountsRouter);
 
 // Import scan endpoint
 app.post('/import/scan', requireAuth, async (_req, res) => {
@@ -83,7 +86,7 @@ const server = app.listen(config.port, () => {
   console.log(`[api] Storage: ${config.storageDir}`);
 
   // Initialize DB
-  getDb();
+  const db = getDb();
 
   // Set port for Puppeteer renderer URL
   setServerPort(config.port);
@@ -91,11 +94,20 @@ const server = app.listen(config.port, () => {
   // Re-queue any pending thumbnails from before shutdown
   requeuePendingThumbs();
 
-  // Auto-scan NAS mount on startup
-  if (config.importMountPath && config.importMountOnStartup) {
-    console.log(`[api] Starting mount import scan: ${config.importMountPath}`);
-    scanMountImports().catch((err) => console.error('[api] Mount import error:', err));
-  }
+  // Ensure /imports/1,2,3 mount point directories exist
+  ensureMountPoints();
+
+  // Re-mount any NFS/SMB shares configured via the admin UI
+  remountAll(db).then(() => {
+    // Auto-scan mount points on startup (after shares are mounted)
+    if (config.importMountOnStartup) {
+      const paths = config.importMountPaths;
+      if (paths.length) {
+        console.log(`[api] Starting mount import scan: ${paths.join(', ')}`);
+        scanMountImports().catch((err) => console.error('[api] Mount import error:', err));
+      }
+    }
+  }).catch((err) => console.error('[api] remountAll error:', err));
 });
 
 // Graceful shutdown

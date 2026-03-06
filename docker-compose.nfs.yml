@@ -1,0 +1,114 @@
+# TheFabVault — NFS Storage Configuration (Docker-volume alternative)
+#
+# Use this file INSTEAD OF docker-compose.yml when you want Docker itself to manage
+# NFS mounts (no SYS_ADMIN capability needed; no Admin UI mount management).
+# Asset storage AND the database live on the NFS server; up to 3 read-only import
+# mounts are supported for scanning.
+#
+# Usage:
+#   docker compose -f docker-compose.nfs.yml up -d --build
+#
+# Host prerequisite:
+#   Debian/Ubuntu:  sudo apt install nfs-common
+#   RHEL/Fedora:    sudo dnf install nfs-utils
+#   Unraid:         NFS client is built-in
+#
+# Required .env vars:
+#   NFS_STORAGE_HOST   — IP/hostname of the NFS server
+#   NFS_STORAGE_PATH   — Exported path for assets    (e.g. /mnt/tank/fabvault/storage)
+#   NFS_DATA_PATH      — Exported path for database  (e.g. /mnt/tank/fabvault/db)
+#
+# Optional import mounts (leave path blank to skip that slot):
+#   NFS_IMPORT_1_PATH  — e.g. /mnt/tank/3d-prints
+#   NFS_IMPORT_2_PATH  — e.g. /mnt/tank/laser-files
+#   NFS_IMPORT_3_PATH  — e.g. /mnt/tank/vinyl-designs
+#   NFS_IMPORT_N_HOST  — override NFS server per slot (defaults to NFS_STORAGE_HOST)
+#   NFS_VERSION        — NFS protocol version (default: 4; use 3 for older servers)
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      AUTH_USERNAME: "${AUTH_USERNAME}"
+      AUTH_PASSWORD: "${AUTH_PASSWORD}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_TTL: "${JWT_TTL:-43200}"
+      STORAGE_DIR: "/app/storage"
+      DATA_DIR: "/app/data"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
+      IMPORT_MOUNT_PATHS: "/imports/1,/imports/2,/imports/3"
+      IMPORT_MOUNT_ON_STARTUP: "${IMPORT_MOUNT_ON_STARTUP:-true}"
+      IMPORT_MOUNT_EXTS: "${IMPORT_MOUNT_EXTS:-}"
+      IMPORT_MAX_MB: "${IMPORT_MAX_MB:-512}"
+    volumes:
+      - fabvault-nfs-storage:/app/storage
+      - fabvault-nfs-data:/app/data
+      - fabvault-nfs-import-1:/imports/1:ro
+      - fabvault-nfs-import-2:/imports/2:ro
+      - fabvault-nfs-import-3:/imports/3:ro
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: "${VITE_API_URL:-http://localhost:3000}"
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  # ─── Primary storage (required) ───────────────────────────────────────────
+  fabvault-nfs-storage:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_STORAGE_HOST},rw,nfsvers=${NFS_VERSION:-4},soft,timeo=30,retrans=3"
+      device: ":${NFS_STORAGE_PATH}"
+
+  fabvault-nfs-data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_DATA_HOST:-${NFS_STORAGE_HOST}},rw,nfsvers=${NFS_VERSION:-4},soft,timeo=30,retrans=3"
+      device: ":${NFS_DATA_PATH}"
+
+  # ─── Import mounts (read-only) ────────────────────────────────────────────
+  # If NFS_IMPORT_N_PATH is blank, defaults to the storage path (scanned but empty).
+  fabvault-nfs-import-1:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_IMPORT_1_HOST:-${NFS_STORAGE_HOST}},ro,nfsvers=${NFS_VERSION:-4},soft,timeo=30,retrans=3"
+      device: ":${NFS_IMPORT_1_PATH:-${NFS_STORAGE_PATH}}"
+
+  fabvault-nfs-import-2:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_IMPORT_2_HOST:-${NFS_STORAGE_HOST}},ro,nfsvers=${NFS_VERSION:-4},soft,timeo=30,retrans=3"
+      device: ":${NFS_IMPORT_2_PATH:-${NFS_STORAGE_PATH}}"
+
+  fabvault-nfs-import-3:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_IMPORT_3_HOST:-${NFS_STORAGE_HOST}},ro,nfsvers=${NFS_VERSION:-4},soft,timeo=30,retrans=3"
+      device: ":${NFS_IMPORT_3_PATH:-${NFS_STORAGE_PATH}}"

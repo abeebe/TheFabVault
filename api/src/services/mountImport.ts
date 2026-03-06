@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { glob } from 'glob';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
@@ -17,7 +18,7 @@ const DEFAULT_EXTS = new Set([
   '.gcode', '.gc', '.g',
 ]);
 
-const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
+const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.dxf', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
 
 function parseAllowedExts(raw: string): Set<string> | null {
   if (!raw.trim()) return null; // null = use defaults
@@ -49,14 +50,10 @@ function moveFile(src: string, dst: string): void {
   }
 }
 
-export async function scanMountImports(): Promise<ScanResult> {
-  const mountPath = config.importMountPath;
-  if (!mountPath) {
-    return { imported: 0, skipped: 0, failed: 0 };
-  }
-
+/** Scan a single mount point and import any new files found */
+async function scanSingleMount(mountPath: string): Promise<ScanResult> {
   if (!fs.existsSync(mountPath) || !fs.statSync(mountPath).isDirectory()) {
-    console.warn(`[mountImport] Mount path not found or not a directory: ${mountPath}`);
+    // Not mounted or not a directory — silently skip
     return { imported: 0, skipped: 0, failed: 0 };
   }
 
@@ -129,9 +126,18 @@ export async function scanMountImports(): Promise<ScanResult> {
     const mimeType = mime.lookup(filename) || 'application/octet-stream';
     const id = uuidv4();
 
+    // Compute SHA-256 hash before moving the file
+    let fileHash: string | null = null;
+    try {
+      const buf = fs.readFileSync(absPath);
+      fileHash = crypto.createHash('sha256').update(buf).digest('hex');
+    } catch {
+      // Hash failure is non-fatal — asset is still importable
+    }
+
     db.prepare(
-      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status, meta_json)
-       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '{}')`
+      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status, meta_json, file_hash)
+       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '{}', ?)`
     ).run(
       id,
       filename,
@@ -141,6 +147,7 @@ export async function scanMountImports(): Promise<ScanResult> {
       folderId,
       absPath,
       THUMB_EXTS.has(ext) ? 'pending' : 'none',
+      fileHash,
     );
 
     try {
@@ -168,8 +175,36 @@ export async function scanMountImports(): Promise<ScanResult> {
     }
   }
 
-  console.log(`[mountImport] Done — imported: ${imported}, skipped: ${skipped}, failed: ${failed}`);
+  console.log(`[mountImport] ${mountPath} done — imported: ${imported}, skipped: ${skipped}, failed: ${failed}`);
   return { imported, skipped, failed };
+}
+
+/**
+ * Scan all configured import mount paths in parallel.
+ * Paths that aren't mounted or don't exist are silently skipped.
+ */
+export async function scanMountImports(): Promise<ScanResult> {
+  const paths = config.importMountPaths;
+  if (!paths.length) {
+    return { imported: 0, skipped: 0, failed: 0 };
+  }
+
+  const results = await Promise.allSettled(paths.map(scanSingleMount));
+
+  return results.reduce<ScanResult>(
+    (acc, r) => {
+      if (r.status === 'fulfilled') {
+        acc.imported += r.value.imported;
+        acc.skipped += r.value.skipped;
+        acc.failed += r.value.failed;
+      } else {
+        console.error('[mountImport] Scan error:', r.reason);
+        acc.failed++;
+      }
+      return acc;
+    },
+    { imported: 0, skipped: 0, failed: 0 },
+  );
 }
 
 function ensureFolderPath(db: ReturnType<typeof getDb>, relDir: string): string {

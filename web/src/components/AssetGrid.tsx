@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Trash2, Tag, FolderInput } from 'lucide-react';
+import { Trash2, Tag, FolderInput, LayoutGrid } from 'lucide-react';
 import { AssetCard } from './AssetCard.js';
 import { TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
@@ -31,6 +31,7 @@ export function AssetGrid({
   const [previewAsset, setPreviewAsset] = useState<AssetOut | null>(null);
   const [batchTagMode, setBatchTagMode] = useState(false);
   const [batchTags, setBatchTags] = useState<string[]>([]);
+  const [batchCategoryMode, setBatchCategoryMode] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
@@ -43,19 +44,19 @@ export function AssetGrid({
     });
   }
 
-  // Single-asset delete — fixes bug where card never called the API
-  async function handleAssetDelete(id: string, deleteFile: boolean) {
+  // Single-asset delete — soft-deletes (moves to trash)
+  async function handleAssetDelete(id: string) {
     try {
-      await api.assets.delete(id, { deleteFile });
+      await api.assets.delete(id);
       onDelete(id);
     } catch {}
   }
 
-  async function executeBatchDelete(deleteFile: boolean) {
+  async function executeBatchDelete() {
     setBatchDeleting(true);
     for (const id of selected) {
       try {
-        await api.assets.delete(id, { deleteFile });
+        await api.assets.delete(id);
         onDelete(id);
       } catch {}
     }
@@ -86,6 +87,17 @@ export function AssetGrid({
         onUpdate(updated);
       } catch {}
     }
+    setSelected(new Set());
+  }
+
+  async function handleBatchCategory(category: string | null) {
+    for (const id of selected) {
+      try {
+        const updated = await api.assets.setCategory(id, category);
+        onUpdate(updated);
+      } catch {}
+    }
+    setBatchCategoryMode(false);
     setSelected(new Set());
   }
 
@@ -132,13 +144,42 @@ export function AssetGrid({
                 Cancel
               </button>
             </>
+          ) : batchCategoryMode ? (
+            <>
+              <span className="text-sm text-gray-600 dark:text-gray-300">Set category:</span>
+              {([
+                { value: null, label: 'Auto-detect' },
+                { value: '3dmodel', label: '3D Models' },
+                { value: '2d', label: '2D Designs' },
+              ] as { value: string | null; label: string }[]).map(({ value, label }) => (
+                <button
+                  key={String(value)}
+                  onClick={() => handleBatchCategory(value)}
+                  className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                >
+                  {label}
+                </button>
+              ))}
+              <button
+                onClick={() => setBatchCategoryMode(false)}
+                className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+            </>
           ) : (
             <>
               <button
-                onClick={() => setBatchTagMode(true)}
+                onClick={() => { setBatchTagMode(true); setBatchCategoryMode(false); }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
               >
                 <Tag size={14} /> Add tags
+              </button>
+              <button
+                onClick={() => { setBatchCategoryMode(true); setBatchTagMode(false); }}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <LayoutGrid size={14} /> Set category
               </button>
               {!projectMode && (
                 <div className="relative group">
@@ -205,9 +246,8 @@ export function AssetGrid({
             onEditOverrides={onEditOverrides ? () => onEditOverrides(asset) : undefined}
             projects={projects}
             onAddToProject={onAddToProject ? (projectId) => onAddToProject(asset.id, projectId) : undefined}
-            // project mode: parent handles remove-from-project API call; normal mode: we handle delete here
-            onDelete={projectMode ? () => onDelete(asset.id) : undefined}
-            onDeleteWithFile={!projectMode ? (deleteFile) => handleAssetDelete(asset.id, deleteFile) : undefined}
+            // project mode: parent handles remove-from-project API call; normal mode: we soft-delete
+            onDelete={projectMode ? () => onDelete(asset.id) : () => handleAssetDelete(asset.id)}
           />
         ))}
       </div>
@@ -240,7 +280,7 @@ export function AssetGrid({
                     Cancel
                   </button>
                   <button
-                    onClick={() => executeBatchDelete(false)}
+                    onClick={() => executeBatchDelete()}
                     disabled={batchDeleting}
                     className="px-4 py-1.5 text-sm rounded bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-60"
                   >
@@ -251,24 +291,19 @@ export function AssetGrid({
             ) : (
               <>
                 <p className="text-sm text-gray-600 dark:text-gray-300">
-                  Choose how to remove the selected {selected.size} file{selected.size !== 1 ? 's' : ''}:
+                  Move {selected.size} file{selected.size !== 1 ? 's' : ''} to trash?
+                  You can restore them or permanently delete from the Trash view.
                 </p>
                 <div className="flex flex-col gap-2">
                   <button
-                    onClick={() => executeBatchDelete(false)}
-                    disabled={batchDeleting}
-                    className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60 text-left"
-                  >
-                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Remove from vault</span>
-                    <span className="text-xs text-gray-400 mt-0.5">Files remain on disk — only the vault records are removed</span>
-                  </button>
-                  <button
-                    onClick={() => executeBatchDelete(true)}
+                    onClick={() => executeBatchDelete()}
                     disabled={batchDeleting}
                     className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 text-left"
                   >
-                    <span className="text-sm font-medium text-red-600 dark:text-red-400">Delete files from disk</span>
-                    <span className="text-xs text-gray-400 mt-0.5">Permanently removes vault records and deletes the files</span>
+                    <span className="text-sm font-medium text-red-600 dark:text-red-400">
+                      {batchDeleting ? 'Moving to trash…' : 'Move to trash'}
+                    </span>
+                    <span className="text-xs text-gray-400 mt-0.5">Files can be restored from the Trash in the sidebar</span>
                   </button>
                 </div>
                 <div className="flex justify-end">

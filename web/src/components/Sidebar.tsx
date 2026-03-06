@@ -1,30 +1,21 @@
 import { useState } from 'react';
-import { RefreshCw, Download, Tag, X, Plus, Layers, ChevronDown, ChevronRight, Box, Zap } from 'lucide-react';
+import { Settings, Download, File, X, Plus, Layers, ChevronDown, ChevronRight, Box, Zap, Trash2, Heart } from 'lucide-react';
 import { FolderTree } from './FolderTree.js';
 import { TagBadge } from './TagInput.js';
 import { api } from '../lib/api.js';
 import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
 
-type Category = '3dprint' | 'laser' | 'vinyl';
+type Category = '3dmodel' | '2d' | 'uncategorized';
 
-function getAssetCategories(asset: AssetOut): Category[] {
-  const categories: Category[] = [];
+function getAssetCategory(asset: AssetOut): Category {
+  // Explicit DB override takes priority
+  if (asset.category === '3dmodel') return '3dmodel';
+  if (asset.category === '2d') return '2d';
+  // Auto-detect from extension
   const ext = asset.filename.split('.').pop()?.toLowerCase();
-
-  // 3D files by extension
-  if (['.stl', '.obj', '.3mf'].includes(`.${ext}`)) {
-    categories.push('3dprint');
-  }
-
-  // Laser files by extension
-  if (['.svg', '.dxf'].includes(`.${ext}`)) {
-    categories.push('laser');
-  }
-
-  // Tags-based (additive, won't duplicate)
-  if (asset.tags.includes('laser') && !categories.includes('laser')) categories.push('laser');
-  if (asset.tags.includes('vinyl')) categories.push('vinyl');
-  return categories;
+  if (ext && ['.stl', '.obj', '.3mf'].includes(`.${ext}`)) return '3dmodel';
+  if (ext && ['.svg', '.dxf'].includes(`.${ext}`)) return '2d';
+  return 'uncategorized';
 }
 
 interface SidebarProps {
@@ -38,14 +29,20 @@ interface SidebarProps {
   onFolderRename: (id: string, name: string) => void;
   onFolderDelete: (id: string) => void;
   onImportScan: () => void;
+  onOpenSettings: () => void;
+  onOpenTrash: () => void;
+  trashCount?: number;
   // Projects
   projects?: ProjectOut[];
   selectedProjectId?: string | null;
   onProjectSelect?: (id: string) => void;
   onProjectCreate?: () => void;
   // Categories
-  selectedCategory?: Category | null;
-  onCategorySelect?: (category: Category | null) => void;
+  selectedCategory?: '3dmodel' | '2d' | 'uncategorized' | null;
+  onCategorySelect?: (category: '3dmodel' | '2d' | 'uncategorized' | null) => void;
+  // Favorites
+  showFavoritesOnly?: boolean;
+  onFavoritesToggle?: () => void;
 }
 
 export function Sidebar({
@@ -59,12 +56,17 @@ export function Sidebar({
   onFolderRename,
   onFolderDelete,
   onImportScan,
+  onOpenSettings,
+  onOpenTrash,
+  trashCount = 0,
   projects,
   selectedProjectId,
   onProjectSelect,
   onProjectCreate,
   selectedCategory,
   onCategorySelect,
+  showFavoritesOnly,
+  onFavoritesToggle,
 }: SidebarProps) {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
@@ -117,59 +119,69 @@ export function Sidebar({
         <div>
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-2 mb-1.5">Categories</p>
 
-          {/* 3D Print */}
-          <div>
-            <button
-              onClick={() => onCategorySelect?.(selectedCategory === '3dprint' ? null : '3dprint')}
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-                selectedCategory === '3dprint'
-                  ? 'bg-accent/10 text-accent font-medium'
-                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <Box size={14} className="flex-shrink-0" />
-              <span>3D Print</span>
-              <span className="ml-auto text-[10px] text-gray-400">
-                {assets.filter((a) => getAssetCategories(a).includes('3dprint')).length}
-              </span>
-            </button>
-          </div>
+          {/* Favorites */}
+          <button
+            onClick={onFavoritesToggle}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+              showFavoritesOnly
+                ? 'bg-red-50 dark:bg-red-900/20 text-red-500 font-medium'
+                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+          >
+            <Heart size={14} className="flex-shrink-0" fill={showFavoritesOnly ? 'currentColor' : 'none'} />
+            <span>Favorites</span>
+            <span className="ml-auto text-[10px] text-gray-400">
+              {assets.filter((a) => a.isFavorite).length}
+            </span>
+          </button>
 
-          {/* Laser */}
-          <div>
-            <button
-              onClick={() => onCategorySelect?.(selectedCategory === 'laser' ? null : 'laser')}
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-                selectedCategory === 'laser'
-                  ? 'bg-accent/10 text-accent font-medium'
-                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <Zap size={14} className="flex-shrink-0" />
-              <span>Laser</span>
-              <span className="ml-auto text-[10px] text-gray-400">
-                {assets.filter((a) => getAssetCategories(a).includes('laser')).length}
-              </span>
-            </button>
-          </div>
+          {/* 3D Models */}
+          <button
+            onClick={() => onCategorySelect?.(selectedCategory === '3dmodel' ? null : '3dmodel')}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+              selectedCategory === '3dmodel'
+                ? 'bg-accent/10 text-accent font-medium'
+                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+          >
+            <Box size={14} className="flex-shrink-0" />
+            <span>3D Models</span>
+            <span className="ml-auto text-[10px] text-gray-400">
+              {assets.filter((a) => getAssetCategory(a) === '3dmodel').length}
+            </span>
+          </button>
 
-          {/* Vinyl */}
-          <div>
-            <button
-              onClick={() => onCategorySelect?.(selectedCategory === 'vinyl' ? null : 'vinyl')}
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-                selectedCategory === 'vinyl'
-                  ? 'bg-accent/10 text-accent font-medium'
-                  : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <Tag size={14} className="flex-shrink-0" />
-              <span>Vinyl</span>
-              <span className="ml-auto text-[10px] text-gray-400">
-                {assets.filter((a) => getAssetCategories(a).includes('vinyl')).length}
-              </span>
-            </button>
-          </div>
+          {/* 2D Designs */}
+          <button
+            onClick={() => onCategorySelect?.(selectedCategory === '2d' ? null : '2d')}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+              selectedCategory === '2d'
+                ? 'bg-accent/10 text-accent font-medium'
+                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+          >
+            <Zap size={14} className="flex-shrink-0" />
+            <span>2D Designs</span>
+            <span className="ml-auto text-[10px] text-gray-400">
+              {assets.filter((a) => getAssetCategory(a) === '2d').length}
+            </span>
+          </button>
+
+          {/* Uncategorized */}
+          <button
+            onClick={() => onCategorySelect?.(selectedCategory === 'uncategorized' ? null : 'uncategorized')}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+              selectedCategory === 'uncategorized'
+                ? 'bg-accent/10 text-accent font-medium'
+                : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+          >
+            <File size={14} className="flex-shrink-0" />
+            <span>Uncategorized</span>
+            <span className="ml-auto text-[10px] text-gray-400">
+              {assets.filter((a) => getAssetCategory(a) === 'uncategorized').length}
+            </span>
+          </button>
         </div>
 
         {/* Projects section */}
@@ -261,21 +273,28 @@ export function Sidebar({
           </a>
         )}
 
-        {/* Mount import scan */}
+        {/* Trash */}
         <button
-          onClick={handleScan}
-          disabled={scanning}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+          onClick={onOpenTrash}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
         >
-          <RefreshCw size={14} className={scanning ? 'animate-spin' : ''} />
-          {scanning ? 'Scanning...' : 'Scan NAS mount'}
+          <Trash2 size={14} />
+          Trash
+          {trashCount > 0 && (
+            <span className="ml-auto text-[10px] bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded-full px-1.5 py-0.5 leading-none">
+              {trashCount}
+            </span>
+          )}
         </button>
 
-        {scanResult && (
-          <p className="text-xs text-gray-400 px-3">
-            {scanResult.imported} imported, {scanResult.skipped} skipped
-          </p>
-        )}
+        {/* Network / Admin settings */}
+        <button
+          onClick={onOpenSettings}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        >
+          <Settings size={14} />
+          Settings
+        </button>
       </div>
     </aside>
   );

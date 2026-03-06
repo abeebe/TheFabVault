@@ -94,6 +94,21 @@ export interface AssetOut {
   url: string;
   meta: AssetMeta;
   createdAt: number;
+  category: string | null;
+  deletedAt: number | null;
+  rating: number | null;
+  isFavorite: boolean;
+}
+
+export interface VersionOut {
+  id: string;
+  assetId: string;
+  versionNum: number;
+  filename: string;
+  size: number;
+  fileHash: string | null;
+  notes: string | null;
+  createdAt: number;
 }
 
 export interface FolderOut {
@@ -155,6 +170,22 @@ export interface AssetRow {
   source_path: string | null;
   thumb_status: 'none' | 'pending' | 'done' | 'failed';
   meta_json: string;
+  created_at: number;
+  category: string | null;
+  file_hash: string | null;
+  deleted_at: number | null;
+  rating: number | null;
+  is_favorite: number;
+}
+
+export interface VersionRow {
+  id: string;
+  asset_id: string;
+  version_num: number;
+  filename: string;
+  size: number;
+  file_hash: string | null;
+  notes: string | null;
   created_at: number;
 }
 

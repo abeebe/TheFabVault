@@ -3,6 +3,7 @@ import multer from 'multer';
 import archiver from 'archiver';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
 import { requireAuth } from '../auth.js';
@@ -14,10 +15,11 @@ import {
   thumbExists,
   thumbFilePath,
   sanitizeFilename,
+  versionFilePath,
 } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
 import { extractMeta } from '../services/metaExtract.js';
-import type { AssetOut, AssetRow, FolderRow } from '../types/index.js';
+import type { AssetOut, AssetRow, FolderRow, VersionRow, VersionOut } from '../types/index.js';
 
 const router = Router();
 
@@ -56,6 +58,23 @@ function toOut(row: AssetRow): AssetOut {
     url: `/file/${row.id}/${encodedName}`,
     meta: JSON.parse(row.meta_json || '{}'),
     createdAt: row.created_at,
+    category: row.category ?? null,
+    deletedAt: row.deleted_at ?? null,
+    rating: row.rating ?? null,
+    isFavorite: Boolean(row.is_favorite),
+  };
+}
+
+function toVersionOut(row: VersionRow): VersionOut {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    versionNum: row.version_num,
+    filename: row.filename,
+    size: row.size,
+    fileHash: row.file_hash ?? null,
+    notes: row.notes ?? null,
+    createdAt: row.created_at,
   };
 }
 
@@ -72,13 +91,15 @@ async function saveUploadedFile(
 ): Promise<AssetRow> {
   const db = getDb();
 
+  const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+
   db.prepare(
-    `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, notes, source_path, thumb_status, meta_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, notes, source_path, thumb_status, meta_json, file_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     assetId, filename, originalName, mimeType, buffer.length,
     folderId ?? null, JSON.stringify(tags), notes ?? null, sourcePath,
-    needsThumbnail(filename) ? 'pending' : 'none', '{}',
+    needsThumbnail(filename) ? 'pending' : 'none', '{}', fileHash,
   );
 
   const dest = assetFilePath(assetId, filename);
@@ -96,6 +117,25 @@ async function saveUploadedFile(
 
   return db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow;
 }
+
+// ─── POST /check-hash ─────────────────────────────────────────────────────────
+// Check if a file with a given SHA-256 hash already exists in the vault.
+// Used by the frontend before uploading to warn about duplicates.
+
+router.post('/check-hash', requireAuth, (req: Request, res: Response) => {
+  const { hash } = req.body as { hash?: string };
+  if (!hash || typeof hash !== 'string' || !/^[0-9a-f]{64}$/i.test(hash)) {
+    res.status(400).json({ error: 'Invalid hash — expected 64-char hex SHA-256' });
+    return;
+  }
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE file_hash = ? LIMIT 1').get(hash) as AssetRow | undefined;
+  if (!row) {
+    res.json({ exists: false });
+    return;
+  }
+  res.json({ exists: true, asset: toOut(row) });
+});
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
 
@@ -156,7 +196,7 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
 
   const orderBy = SORT_MAP[sort] ?? SORT_MAP['date_desc'];
 
-  let whereClause = ' WHERE 1=1';
+  let whereClause = ' WHERE deleted_at IS NULL';
   const whereParams: unknown[] = [];
 
   if (q) {
@@ -266,6 +306,22 @@ router.patch('/asset/:id/tags', requireAuth, (req: Request, res: Response) => {
   res.json(toOut(updated));
 });
 
+// ─── PATCH /asset/:id/category ───────────────────────────────────────────────
+
+router.patch('/asset/:id/category', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const { category } = req.body as { category?: string | null };
+  // null clears the override (reverts to auto-detect); a string sets an explicit category
+  const value = category === undefined ? row.category : (category ?? null);
+
+  db.prepare('UPDATE assets SET category = ? WHERE id = ?').run(value, row.id);
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
+  res.json(toOut(updated));
+});
+
 // ─── PATCH /asset/:id/rename ──────────────────────────────────────────────────
 
 router.patch('/asset/:id/rename', requireAuth, (req: Request, res: Response) => {
@@ -316,15 +372,199 @@ router.patch('/asset/:id/folder', requireAuth, (req: Request, res: Response) => 
 });
 
 // ─── DELETE /asset/:id ────────────────────────────────────────────────────────
+// Soft-deletes by default (moves to trash). Pass ?permanent=true to hard-delete.
 
 router.delete('/asset/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-  // delete_file defaults to true — pass ?delete_file=false to keep the file on disk
-  const deleteFile = req.query.delete_file !== 'false';
-  db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
-  cleanupAsset(row.id, { deleteFile });
+
+  if (req.query.permanent === 'true') {
+    // Hard delete — remove from DB and disk
+    db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
+    cleanupAsset(row.id, { deleteFile: true });
+  } else {
+    // Soft delete — move to trash
+    db.prepare('UPDATE assets SET deleted_at = unixepoch() WHERE id = ?').run(row.id);
+  }
+  res.json({ ok: true });
+});
+
+// ─── GET /trash ───────────────────────────────────────────────────────────────
+
+router.get('/trash', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT * FROM assets WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
+  ).all() as AssetRow[];
+  res.json({ items: rows.map(toOut), total: rows.length });
+});
+
+// ─── POST /asset/:id/restore ──────────────────────────────────────────────────
+
+router.post('/asset/:id/restore', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NOT NULL').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found in trash' }); return; }
+  db.prepare('UPDATE assets SET deleted_at = NULL WHERE id = ?').run(row.id);
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
+  res.json(toOut(updated));
+});
+
+// ─── DELETE /trash ────────────────────────────────────────────────────────────
+// Permanently deletes ALL trashed assets.
+
+router.delete('/trash', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM assets WHERE deleted_at IS NOT NULL').all() as AssetRow[];
+  for (const row of rows) {
+    db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
+    cleanupAsset(row.id, { deleteFile: true });
+  }
+  res.json({ ok: true, deleted: rows.length });
+});
+
+// ─── PATCH /asset/:id/rating ──────────────────────────────────────────────────
+
+router.patch('/asset/:id/rating', requireAuth, (req: Request, res: Response) => {
+  const { rating } = req.body as { rating?: number | null };
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  if (rating !== null && rating !== undefined && (rating < 1 || rating > 5 || !Number.isInteger(rating))) {
+    res.status(400).json({ error: 'Rating must be 1–5 or null' });
+    return;
+  }
+  db.prepare('UPDATE assets SET rating = ? WHERE id = ?').run(rating ?? null, row.id);
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
+  res.json(toOut(updated));
+});
+
+// ─── PATCH /asset/:id/favorite ────────────────────────────────────────────────
+
+router.patch('/asset/:id/favorite', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  const { favorite } = req.body as { favorite?: boolean };
+  if (typeof favorite !== 'boolean') { res.status(400).json({ error: 'favorite must be a boolean' }); return; }
+  db.prepare('UPDATE assets SET is_favorite = ? WHERE id = ?').run(favorite ? 1 : 0, row.id);
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(row.id) as AssetRow;
+  res.json(toOut(updated));
+});
+
+// ─── GET /asset/:id/versions ──────────────────────────────────────────────────
+
+router.get('/asset/:id/versions', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const row = db.prepare('SELECT id FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  const versions = db.prepare(
+    'SELECT * FROM asset_versions WHERE asset_id = ? ORDER BY version_num DESC'
+  ).all(row.id) as VersionRow[];
+  res.json({ versions: versions.map(toVersionOut) });
+});
+
+// ─── POST /asset/:id/version — upload a new version of an asset ───────────────
+
+router.post('/asset/:id/version', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
+  const db = getDb();
+  const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
+  if (!asset) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const notes = (req.body.notes as string | undefined) ?? null;
+  const versionId = uuidv4();
+
+  // Determine next version number
+  const { maxVer } = db.prepare(
+    'SELECT COALESCE(MAX(version_num), 0) AS maxVer FROM asset_versions WHERE asset_id = ?'
+  ).get(asset.id) as { maxVer: number };
+  const newVersionNum = maxVer + 1;
+
+  // Archive the current file as a version entry
+  const currentFilePath = assetFilePath(asset.id, asset.filename);
+  const archivePath = versionFilePath(asset.id, versionId, asset.filename);
+  if (fs.existsSync(currentFilePath)) {
+    fs.copyFileSync(currentFilePath, archivePath);
+  }
+
+  db.prepare(
+    `INSERT INTO asset_versions (id, asset_id, version_num, filename, size, file_hash, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(versionId, asset.id, newVersionNum, asset.filename, asset.size, asset.file_hash, notes);
+
+  // Replace the current file with the new upload
+  const newFilename = sanitizeFilename(req.file.originalname || asset.filename);
+  const newHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const newPath = assetFilePath(asset.id, newFilename);
+  fs.writeFileSync(newPath, req.file.buffer);
+
+  // Remove old file if the filename changed
+  if (newFilename !== asset.filename && fs.existsSync(currentFilePath)) {
+    try { fs.unlinkSync(currentFilePath); } catch {}
+  }
+
+  db.prepare(
+    `UPDATE assets SET filename = ?, size = ?, file_hash = ?, thumb_status = ? WHERE id = ?`
+  ).run(newFilename, req.file.buffer.length, newHash, needsThumbnail(newFilename) ? 'pending' : 'none', asset.id);
+
+  if (needsThumbnail(newFilename)) enqueueThumb(asset.id);
+
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(asset.id) as AssetRow;
+  res.json({ asset: toOut(updated) });
+});
+
+// ─── POST /asset/:id/version/:versionId/restore — restore a previous version ──
+
+router.post('/asset/:id/version/:versionId/restore', requireAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
+  if (!asset) { res.status(404).json({ error: 'Asset not found' }); return; }
+
+  const version = db.prepare(
+    'SELECT * FROM asset_versions WHERE id = ? AND asset_id = ?'
+  ).get(req.params.versionId, asset.id) as VersionRow | undefined;
+  if (!version) { res.status(404).json({ error: 'Version not found' }); return; }
+
+  const versionFile = versionFilePath(asset.id, version.id, version.filename);
+  if (!fs.existsSync(versionFile)) {
+    res.status(404).json({ error: 'Version file not found on disk' });
+    return;
+  }
+
+  // Replace the current asset file with the version file
+  const destPath = assetFilePath(asset.id, version.filename);
+  const oldPath = assetFilePath(asset.id, asset.filename);
+  fs.copyFileSync(versionFile, destPath);
+  if (version.filename !== asset.filename && fs.existsSync(oldPath)) {
+    try { fs.unlinkSync(oldPath); } catch {}
+  }
+
+  db.prepare(
+    `UPDATE assets SET filename = ?, size = ?, file_hash = ?, thumb_status = ? WHERE id = ?`
+  ).run(version.filename, version.size, version.file_hash, needsThumbnail(version.filename) ? 'pending' : 'none', asset.id);
+
+  if (needsThumbnail(version.filename)) enqueueThumb(asset.id);
+
+  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(asset.id) as AssetRow;
+  res.json({ asset: toOut(updated) });
+});
+
+// ─── DELETE /asset/:id/version/:versionId ─────────────────────────────────────
+
+router.delete('/asset/:id/version/:versionId', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const version = db.prepare(
+    'SELECT * FROM asset_versions WHERE id = ? AND asset_id = ?'
+  ).get(req.params.versionId, req.params.id) as VersionRow | undefined;
+  if (!version) { res.status(404).json({ error: 'Version not found' }); return; }
+
+  // Delete the version file from disk
+  const vFile = versionFilePath(req.params.id, version.id, version.filename);
+  try { if (fs.existsSync(vFile)) fs.unlinkSync(vFile); } catch {}
+
+  db.prepare('DELETE FROM asset_versions WHERE id = ?').run(version.id);
   res.json({ ok: true });
 });
 

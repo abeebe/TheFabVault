@@ -47,6 +47,10 @@ function assetRowToOut(row: AssetRow): import('../types/index.js').AssetOut {
     url: `/file/${row.id}/${encodedName}`,
     meta: JSON.parse(row.meta_json || '{}'),
     createdAt: row.created_at,
+    category: row.category ?? null,
+    deletedAt: row.deleted_at ?? null,
+    rating: row.rating ?? null,
+    isFavorite: Boolean(row.is_favorite),
   };
 }
 

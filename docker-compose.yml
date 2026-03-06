@@ -16,14 +16,16 @@ services:
       STORAGE_DIR: "/app/storage"
       DATA_DIR: "/app/data"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
-      IMPORT_MOUNT_PATH: "${IMPORT_MOUNT_PATH:-}"
       IMPORT_MOUNT_ON_STARTUP: "${IMPORT_MOUNT_ON_STARTUP:-true}"
       IMPORT_MOUNT_EXTS: "${IMPORT_MOUNT_EXTS:-}"
       IMPORT_MAX_MB: "${IMPORT_MAX_MB:-512}"
+    # SYS_ADMIN lets the API mount NFS/SMB shares inside the container (via Admin UI).
+    # Safe to remove if you don't use the Network Mounts feature.
+    cap_add:
+      - SYS_ADMIN
     volumes:
       - ./data/storage:/app/storage
       - ./data/db:/app/data
-      - "${IMPORT_MOUNT_PATH_HOST:-./data/imports-stub}:/imports:ro"
     stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
