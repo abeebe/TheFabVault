@@ -6,36 +6,38 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "archiver": "7.0.1",
-    "better-sqlite3": "12.6.2",
-    "cors": "2.8.5",
-    "dotenv": "16.4.5",
+    "better-sqlite3": "12.10.0",
+    "cors": "2.8.6",
+    "dotenv": "17.4.2",
     "dxf-parser": "1.1.2",
     "express": "4.19.2",
-    "glob": "11.0.0",
-    "jsonwebtoken": "9.0.2",
-    "mime-types": "2.1.35",
+    "glob": "13.0.6",
+    "jsonwebtoken": "9.0.3",
+    "mime-types": "3.0.2",
     "multer": "1.4.5-lts.1",
-    "p-queue": "8.0.1",
+    "p-queue": "9.3.0",
     "puppeteer": "22.12.1",
-    "sharp": "0.33.4",
-    "uuid": "10.0.0"
+    "sharp": "0.33.5",
+    "uuid": "14.0.0"
   },
   "devDependencies": {
     "@types/archiver": "6.0.2",
-    "@types/better-sqlite3": "7.6.10",
-    "@types/cors": "2.8.17",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/cors": "2.8.19",
     "@types/dotenv": "6.1.1",
     "@types/express": "4.17.21",
-    "@types/jsonwebtoken": "9.0.6",
-    "@types/mime-types": "2.1.4",
+    "@types/jsonwebtoken": "9.0.10",
+    "@types/mime-types": "3.0.1",
     "@types/multer": "1.4.11",
-    "@types/node": "20.14.0",
+    "@types/node": "25.9.1",
     "@types/uuid": "10.0.0",
-    "tsx": "4.16.2",
-    "typescript": "5.5.3"
+    "tsx": "4.22.3",
+    "typescript": "5.5.3",
+    "vitest": "3.2.4"
   }
 }
