@@ -364,6 +364,9 @@ function AssetPicker({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
+  const [page, setPage] = useState(0);
+
+  const PAGE_SIZE = 10;
 
   useEffect(() => {
     api.assets.list({ limit: 500 }).then((result) => {
@@ -372,6 +375,10 @@ function AssetPicker({
       console.error('[AssetPicker] Failed to load assets:', err);
     }).finally(() => setLoading(false));
   }, []);
+
+  // Reset to first page whenever the filter changes so users don't end up
+  // looking at an empty page after narrowing the result set.
+  useEffect(() => { setPage(0); }, [searchFilter]);
 
   function toggleAsset(id: string) {
     setSelected((prev) => {
@@ -404,6 +411,25 @@ function AssetPicker({
       )
     : available;
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pageStart = currentPage * PAGE_SIZE;
+  const pageItems = filtered.slice(pageStart, pageStart + PAGE_SIZE);
+
+  const allPageSelected = pageItems.length > 0 && pageItems.every((a) => selected.has(a.id));
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) {
+        for (const a of pageItems) next.delete(a.id);
+      } else {
+        for (const a of pageItems) next.add(a.id);
+      }
+      return next;
+    });
+  }
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
@@ -430,6 +456,22 @@ function AssetPicker({
               className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/40"
             />
           </div>
+          <div className="mt-2 flex items-center justify-between">
+            <button
+              onClick={toggleSelectAll}
+              disabled={pageItems.length === 0}
+              className="text-xs text-accent hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+            >
+              {allPageSelected
+                ? `Deselect page (${pageItems.length})`
+                : `Select page (${pageItems.length})`}
+            </button>
+            <span className="text-[11px] text-gray-400">
+              {filtered.length > 0
+                ? `Showing ${pageStart + 1}–${Math.min(pageStart + PAGE_SIZE, filtered.length)} of ${filtered.length}`
+                : ''}
+            </span>
+          </div>
         </div>
 
         {/* Asset list */}
@@ -444,7 +486,7 @@ function AssetPicker({
             </div>
           ) : (
             <div className="space-y-1">
-              {filtered.map((asset) => {
+              {pageItems.map((asset) => {
                 const isSelected = selected.has(asset.id);
                 const thumbUrl = api.assets.thumbUrl(asset);
                 return (
@@ -494,6 +536,29 @@ function AssetPicker({
             </div>
           )}
         </div>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-2 px-5 py-2 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <button
+              onClick={() => setPage(currentPage - 1)}
+              disabled={currentPage === 0}
+              className="px-2 py-1 text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              ‹ Prev
+            </button>
+            <span className="text-xs text-gray-500 tabular-nums">
+              Page {currentPage + 1} of {totalPages}
+            </span>
+            <button
+              onClick={() => setPage(currentPage + 1)}
+              disabled={currentPage >= totalPages - 1}
+              className="px-2 py-1 text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Next ›
+            </button>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-between px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
