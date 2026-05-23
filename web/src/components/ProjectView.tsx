@@ -93,7 +93,8 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
 
   const handleRemoveAsset = useCallback(async (id: string) => {
     await removeAsset(id);
-  }, [removeAsset]);
+    onProjectUpdated();
+  }, [removeAsset, onProjectUpdated]);
 
   const handleUpdateOverrides = useCallback(async (overrides: ProjectOverrides) => {
     if (!overridesAsset) return;
@@ -330,7 +331,7 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
         <AssetPicker
           projectId={project.id}
           existingAssetIds={new Set(project.assets.map((a) => a.id))}
-          onDone={() => { setAddAssetMode(false); refresh(); }}
+          onDone={() => { setAddAssetMode(false); refresh(); onProjectUpdated(); }}
           onClose={() => setAddAssetMode(false)}
         />
       )}

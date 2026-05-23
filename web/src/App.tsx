@@ -203,7 +203,17 @@ export function App() {
 
   const handleUploaded = useCallback((newAssets: AssetOut[]) => {
     addAssets(newAssets);
-  }, [addAssets]);
+    // Sidebar project counts include "All assets"–style aggregates; refresh
+    // so newly uploaded files are reflected immediately.
+    refreshProjects();
+  }, [addAssets, refreshProjects]);
+
+  // Wrap removeAsset so deleting (trashing) an asset also refreshes sidebar
+  // project counts — the deleted asset may have been a member of a project.
+  const handleRemoveAsset = useCallback((id: string) => {
+    removeAsset(id);
+    refreshProjects();
+  }, [removeAsset, refreshProjects]);
 
   function handleProjectSelect(id: string) {
     setSelectedProjectId(id);
@@ -401,7 +411,7 @@ export function App() {
                 folders={folders}
                 loading={loading}
                 onUpdate={updateAsset}
-                onDelete={removeAsset}
+                onDelete={handleRemoveAsset}
                 projects={projects}
                 onAddToProject={handleAddToProject}
               />
