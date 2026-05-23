@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     nfs-common \
     cifs-utils \
+    build-essential \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
