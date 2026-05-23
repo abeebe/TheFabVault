@@ -4,23 +4,13 @@ import { FolderTree } from './FolderTree.js';
 import { TagBadge } from './TagInput.js';
 import { api } from '../lib/api.js';
 import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
-
-type Category = '3dmodel' | '2d' | 'uncategorized';
-
-function getAssetCategory(asset: AssetOut): Category {
-  // Explicit DB override takes priority
-  if (asset.category === '3dmodel') return '3dmodel';
-  if (asset.category === '2d') return '2d';
-  // Auto-detect from extension
-  const ext = asset.filename.split('.').pop()?.toLowerCase();
-  if (ext && ['.stl', '.obj', '.3mf'].includes(`.${ext}`)) return '3dmodel';
-  if (ext && ['.svg', '.dxf'].includes(`.${ext}`)) return '2d';
-  return 'uncategorized';
-}
+import type { AssetStats } from '../hooks/useAssetStats.js';
 
 interface SidebarProps {
   folders: FolderOut[];
   assets: AssetOut[];
+  // Category counts across the whole vault (not just the loaded page).
+  assetStats: AssetStats;
   selectedFolderId: string | null;
   selectedTags: string[];
   onFolderSelect: (id: string | null) => void;
@@ -48,6 +38,7 @@ interface SidebarProps {
 export function Sidebar({
   folders,
   assets,
+  assetStats,
   selectedFolderId,
   selectedTags,
   onFolderSelect,
@@ -131,7 +122,7 @@ export function Sidebar({
             <Heart size={14} className="flex-shrink-0" fill={showFavoritesOnly ? 'currentColor' : 'none'} />
             <span>Favorites</span>
             <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => a.isFavorite).length}
+              {assetStats.favorites}
             </span>
           </button>
 
@@ -147,7 +138,7 @@ export function Sidebar({
             <Box size={14} className="flex-shrink-0" />
             <span>3D Models</span>
             <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategory(a) === '3dmodel').length}
+              {assetStats.threeDmodel}
             </span>
           </button>
 
@@ -163,7 +154,7 @@ export function Sidebar({
             <Zap size={14} className="flex-shrink-0" />
             <span>2D Designs</span>
             <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategory(a) === '2d').length}
+              {assetStats.twoD}
             </span>
           </button>
 
@@ -179,7 +170,7 @@ export function Sidebar({
             <File size={14} className="flex-shrink-0" />
             <span>Uncategorized</span>
             <span className="ml-auto text-[10px] text-gray-400">
-              {assets.filter((a) => getAssetCategory(a) === 'uncategorized').length}
+              {assetStats.uncategorized}
             </span>
           </button>
         </div>

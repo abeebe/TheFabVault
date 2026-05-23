@@ -18,22 +18,12 @@ import { useAssets } from './hooks/useAssets.js';
 import { useFolders } from './hooks/useFolders.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useProjects } from './hooks/useProjects.js';
+import { useAssetStats } from './hooks/useAssetStats.js';
 import { api } from './lib/api.js';
 import type { AssetOut } from './types/index.js';
 
-// Category detection utilities
+// Category filter values — server now does the actual matching.
 type Category = '3dmodel' | '2d' | 'uncategorized';
-
-function getAssetCategory(asset: AssetOut): Category {
-  // Explicit DB override takes priority
-  if (asset.category === '3dmodel') return '3dmodel';
-  if (asset.category === '2d') return '2d';
-  // Auto-detect from extension
-  const ext = asset.filename.split('.').pop()?.toLowerCase();
-  if (ext && ['.stl', '.obj', '.3mf'].includes(`.${ext}`)) return '3dmodel';
-  if (ext && ['.svg', '.dxf'].includes(`.${ext}`)) return '2d';
-  return 'uncategorized';
-}
 
 function LoginPage({ onLogin }: { onLogin: (u: string, p: string) => Promise<void> }) {
   const [username, setUsername] = useState('');
@@ -133,6 +123,8 @@ export function App() {
       q: searchQuery || undefined,
       tags: selectedTags.length ? selectedTags.join(',') : undefined,
       folder_id: selectedFolderId ?? undefined,
+      category: selectedCategory ?? undefined,
+      favorites: showFavoritesOnly ? true : undefined,
       limit: PAGE_SIZE,
       offset: currentPage * PAGE_SIZE,
       sort,
@@ -143,6 +135,7 @@ export function App() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const { folders, createFolder, renameFolder, deleteFolder, refresh: refreshFolders } = useFolders();
   const { projects, refresh: refreshProjects, createProject } = useProjects();
+  const { stats: assetStats, refresh: refreshAssetStats } = useAssetStats();
 
   // Keep trash count in sync
   const refreshTrashCount = useCallback(async () => {
@@ -197,19 +190,17 @@ export function App() {
     });
   }
 
-  // Filter assets by selected category or favorites
-  const displayAssets = showFavoritesOnly
-    ? assets.filter(a => a.isFavorite)
-    : selectedCategory
-      ? assets.filter(a => getAssetCategory(a) === selectedCategory)
-      : assets;
+  // Server now applies category/favorites/tag filters via query params,
+  // so `assets` is already the filtered, paginated slice.
+  const displayAssets = assets;
 
   const handleUploaded = useCallback((newAssets: AssetOut[]) => {
     addAssets(newAssets);
     // Sidebar project counts include "All assets"–style aggregates; refresh
     // so newly uploaded files are reflected immediately.
     refreshProjects();
-  }, [addAssets, refreshProjects]);
+    refreshAssetStats();
+  }, [addAssets, refreshProjects, refreshAssetStats]);
 
   // Register the upload-completion callback with the module-level upload
   // store so uploads kicked off from any view feed back into App state.
@@ -223,7 +214,8 @@ export function App() {
   const handleRemoveAsset = useCallback((id: string) => {
     removeAsset(id);
     refreshProjects();
-  }, [removeAsset, refreshProjects]);
+    refreshAssetStats();
+  }, [removeAsset, refreshProjects, refreshAssetStats]);
 
   function handleProjectSelect(id: string) {
     setSelectedProjectId(id);
@@ -288,6 +280,7 @@ export function App() {
       <Sidebar
         folders={folders}
         assets={assets}
+        assetStats={assetStats}
         selectedFolderId={selectedFolderId}
         selectedTags={selectedTags}
         onFolderSelect={(id) => { setSelectedFolderId(id); setSelectedTags([]); setSelectedProjectId(null); setCurrentPage(0); }}
@@ -295,7 +288,7 @@ export function App() {
         onFolderCreate={createFolder}
         onFolderRename={renameFolder}
         onFolderDelete={deleteFolder}
-        onImportScan={() => { refresh(); refreshFolders(); }}
+        onImportScan={() => { refresh(); refreshFolders(); refreshAssetStats(); refreshProjects(); }}
         onOpenSettings={() => setAdminSettingsOpen(true)}
         onOpenTrash={() => setTrashOpen(true)}
         trashCount={trashCount}
@@ -532,7 +525,7 @@ export function App() {
       {trashOpen && (
         <TrashView
           onClose={() => { setTrashOpen(false); refreshTrashCount(); }}
-          onRestored={() => { refresh(); refreshFolders(); }}
+          onRestored={() => { refresh(); refreshFolders(); refreshAssetStats(); refreshProjects(); }}
         />
       )}
 

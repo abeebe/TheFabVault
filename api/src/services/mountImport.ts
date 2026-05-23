@@ -12,8 +12,8 @@ import { config } from '../config.js';
 import type { ScanResult, AssetRow } from '../types/index.js';
 
 const DEFAULT_EXTS = new Set([
-  '.stl', '.obj', '.3mf',
-  '.svg', '.dxf',
+  '.stl', '.obj', '.3mf', '.lys', '.ctb', '.photon',
+  '.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2',
   '.png', '.jpg', '.jpeg', '.webp',
   '.gcode', '.gc', '.g',
 ]);

@@ -43,6 +43,8 @@ export interface AssetListParams {
   q?: string;
   tags?: string;
   folder_id?: string;
+  category?: '3dmodel' | '2d' | 'uncategorized';
+  favorites?: boolean;
   limit?: number;
   offset?: number;
   sort?: string;
@@ -72,6 +74,8 @@ export const api = {
       if (params.q) qs.set('q', params.q);
       if (params.tags) qs.set('tags', params.tags);
       if (params.folder_id) qs.set('folder_id', params.folder_id);
+      if (params.category) qs.set('category', params.category);
+      if (params.favorites) qs.set('favorites', 'true');
       if (params.limit) qs.set('limit', String(params.limit));
       if (params.offset !== undefined) qs.set('offset', String(params.offset));
       if (params.sort) qs.set('sort', params.sort);
@@ -80,6 +84,14 @@ export const api = {
     },
 
     get: (id: string): Promise<AssetOut> => apiFetch(`/asset/${id}`),
+
+    stats: (): Promise<{
+      total: number;
+      favorites: number;
+      threeDmodel: number;
+      twoD: number;
+      uncategorized: number;
+    }> => apiFetch('/asset-stats'),
 
     upload: (
       file: File,

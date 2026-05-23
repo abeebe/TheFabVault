@@ -343,8 +343,8 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
 
 function getFileIcon(filename: string) {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
-  if (['.stl', '.obj', '.3mf', '.step', '.stp'].includes(ext)) return <FileBox size={20} className="text-blue-400" />;
-  if (['.png', '.jpg', '.jpeg', '.webp', '.svg', '.dxf'].includes(ext)) return <Image size={20} className="text-green-400" />;
+  if (['.stl', '.obj', '.3mf', '.step', '.stp', '.lys', '.ctb', '.photon'].includes(ext)) return <FileBox size={20} className="text-blue-400" />;
+  if (['.png', '.jpg', '.jpeg', '.webp', '.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2'].includes(ext)) return <Image size={20} className="text-green-400" />;
   return <File size={20} className="text-gray-400" />;
 }
 

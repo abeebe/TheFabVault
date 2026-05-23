@@ -196,9 +196,44 @@ const SORT_MAP: Record<string, string> = {
   name_desc: 'LOWER(COALESCE(original_name, filename)) DESC',
 };
 
+// SQL fragments matching the auto-category logic in
+// web/src/App.tsx#getAssetCategory. Keep extension lists in sync with
+// THREE_D_EXTS / TWO_D_EXTS below and with the frontend.
+function categoryWhereFragment(category: string): { sql: string; params: unknown[] } {
+  const likeAny = (exts: Iterable<string>) =>
+    Array.from(exts).map(() => 'LOWER(filename) LIKE ?').join(' OR ');
+  const params = (exts: Iterable<string>) => Array.from(exts).map((e) => `%${e}`);
+
+  if (category === '3dmodel') {
+    return {
+      sql: ` AND (category = '3dmodel' OR (category IS NULL AND (${likeAny(THREE_D_EXTS)})))`,
+      params: params(THREE_D_EXTS),
+    };
+  }
+  if (category === '2d') {
+    return {
+      sql: ` AND (category = '2d' OR (category IS NULL AND (${likeAny(TWO_D_EXTS)})))`,
+      params: params(TWO_D_EXTS),
+    };
+  }
+  if (category === 'uncategorized') {
+    // Not an override category AND no recognized extension.
+    return {
+      sql: ` AND (category IS NULL OR category NOT IN ('3dmodel', '2d'))
+             AND NOT (${likeAny(THREE_D_EXTS)})
+             AND NOT (${likeAny(TWO_D_EXTS)})`,
+      params: [...params(THREE_D_EXTS), ...params(TWO_D_EXTS)],
+    };
+  }
+  return { sql: '', params: [] };
+}
+
 router.get('/assets', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const { q, tags: tagsParam, folder_id, limit = '100', offset = '0', sort = 'date_desc' } = req.query as Record<string, string>;
+  const {
+    q, tags: tagsParam, folder_id, category, favorites,
+    limit = '100', offset = '0', sort = 'date_desc',
+  } = req.query as Record<string, string>;
 
   const orderBy = SORT_MAP[sort] ?? SORT_MAP['date_desc'];
 
@@ -218,23 +253,71 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
     whereParams.push(folder_id);
   }
 
-  // Total count (before pagination)
+  if (favorites === 'true' || favorites === '1') {
+    whereClause += ' AND is_favorite = 1';
+  }
+
+  if (category) {
+    const frag = categoryWhereFragment(category);
+    if (frag.sql) {
+      whereClause += frag.sql;
+      whereParams.push(...frag.params);
+    }
+  }
+
+  // Tag filter — runs against tags_json (JSON array stored as text). LIKE
+  // with quoted tag avoids false positives like "foo" matching "foobar".
+  if (tagsParam) {
+    const filterTags = tagsParam.split(',').map((t) => t.trim()).filter(Boolean);
+    for (const tag of filterTags) {
+      whereClause += ' AND tags_json LIKE ?';
+      whereParams.push(`%"${tag}"%`);
+    }
+  }
+
+  // Total count (before pagination) — now matches the filtered set so
+  // pagination doesn't show empty pages for category/favorite filters.
   const total = (db.prepare(`SELECT COUNT(*) as count FROM assets${whereClause}`).get(...whereParams) as { count: number }).count;
 
   const sql = `SELECT * FROM assets${whereClause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
   const params = [...whereParams, parseInt(limit, 10), parseInt(offset, 10)];
 
-  let rows = db.prepare(sql).all(...params) as AssetRow[];
-
-  if (tagsParam) {
-    const filterTags = tagsParam.split(',').map((t) => t.trim()).filter(Boolean);
-    rows = rows.filter((row) => {
-      const assetTags: string[] = JSON.parse(row.tags_json || '[]');
-      return filterTags.every((ft) => assetTags.includes(ft));
-    });
-  }
+  const rows = db.prepare(sql).all(...params) as AssetRow[];
 
   res.json({ items: rows.map(toOut), total });
+});
+
+// ─── GET /asset-stats ─────────────────────────────────────────────────────────
+// Returns category counts across ALL non-trashed assets (the /assets list
+// is paginated, so its categories would only reflect the current page).
+// Keep the extension lists in sync with web/src/App.tsx#getAssetCategory.
+
+const THREE_D_EXTS = new Set(['.stl', '.obj', '.3mf', '.lys', '.ctb', '.photon']);
+const TWO_D_EXTS = new Set(['.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2']);
+
+router.get('/asset-stats', requireAuth, (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db
+    .prepare('SELECT filename, category, is_favorite FROM assets WHERE deleted_at IS NULL')
+    .all() as Array<{ filename: string; category: string | null; is_favorite: number }>;
+
+  let favorites = 0;
+  let threeDmodel = 0;
+  let twoD = 0;
+  let uncategorized = 0;
+
+  for (const row of rows) {
+    if (row.is_favorite) favorites++;
+    if (row.category === '3dmodel') { threeDmodel++; continue; }
+    if (row.category === '2d') { twoD++; continue; }
+    const dotIdx = row.filename.lastIndexOf('.');
+    const ext = dotIdx >= 0 ? row.filename.slice(dotIdx).toLowerCase() : '';
+    if (THREE_D_EXTS.has(ext)) threeDmodel++;
+    else if (TWO_D_EXTS.has(ext)) twoD++;
+    else uncategorized++;
+  }
+
+  res.json({ total: rows.length, favorites, threeDmodel, twoD, uncategorized });
 });
 
 // ─── GET /asset/:id ───────────────────────────────────────────────────────────

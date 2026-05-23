@@ -29,8 +29,8 @@ interface AssetCardProps {
 
 function getFileIcon(mime: string, filename: string) {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
-  if (['.stl', '.obj', '.3mf', '.step', '.stp'].includes(ext)) return <FileBox size={28} className="text-blue-400" />;
-  if (mime.startsWith('image/') || ['.svg', '.dxf'].includes(ext)) return <Image size={28} className="text-green-400" />;
+  if (['.stl', '.obj', '.3mf', '.step', '.stp', '.lys', '.ctb', '.photon'].includes(ext)) return <FileBox size={28} className="text-blue-400" />;
+  if (mime.startsWith('image/') || ['.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2'].includes(ext)) return <Image size={28} className="text-green-400" />;
   return <File size={28} className="text-gray-400" />;
 }
 
