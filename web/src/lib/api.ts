@@ -81,13 +81,55 @@ export const api = {
 
     get: (id: string): Promise<AssetOut> => apiFetch(`/asset/${id}`),
 
-    upload: (file: File, opts: { folderId?: string; tags?: string[]; notes?: string } = {}): Promise<AssetOut> => {
+    upload: (
+      file: File,
+      opts: {
+        folderId?: string;
+        tags?: string[];
+        notes?: string;
+        // Called with bytes uploaded so far + total bytes. Triggers the
+        // XHR path so the upload progress event can be observed; without
+        // this callback the request uses fetch.
+        onProgress?: (loaded: number, total: number) => void;
+      } = {},
+    ): Promise<AssetOut> => {
       const fd = new FormData();
       fd.append('file', file);
       if (opts.folderId) fd.append('folder_id', opts.folderId);
       if (opts.tags?.length) fd.append('tags', opts.tags.join(','));
       if (opts.notes) fd.append('notes', opts.notes);
-      return apiFetch('/upload', { method: 'POST', body: fd });
+
+      if (!opts.onProgress) {
+        return apiFetch('/upload', { method: 'POST', body: fd });
+      }
+
+      // XHR path — fetch doesn't expose upload progress.
+      return new Promise<AssetOut>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const token = getToken();
+        xhr.open('POST', `${API_BASE}/upload`);
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) opts.onProgress!(e.loaded, e.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status === 401) {
+            localStorage.removeItem('mv_token');
+            window.dispatchEvent(new Event('mv:unauthorized'));
+            reject(new Error('Unauthorized'));
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText) as AssetOut); }
+            catch (err) { reject(err); }
+          } else {
+            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload aborted'));
+        xhr.send(fd);
+      });
     },
 
     uploadBatch: (files: File[], folderId?: string): Promise<AssetOut[]> => {

@@ -16,14 +16,26 @@ export function UploadZone({ currentFolderId }: UploadZoneProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
-  const { items } = useUploads();
+  const { items, phase, batchTotal, hashedCount } = useUploads();
 
   const begin = useCallback((files: File[]) => {
     if (!files.length) return;
     void startUploads(files, { folderId: currentFolderId });
   }, [currentFolderId]);
 
+  const doneCount = items.filter((i) => i.status === 'done').length;
+  const errorCount = items.filter((i) => i.status === 'error').length;
+  const finishedCount = doneCount + errorCount;
   const pendingCount = items.filter((i) => i.status === 'uploading' || i.status === 'pending').length;
+
+  let pillLabel: string;
+  if (phase === 'hashing') {
+    pillLabel = `Checking ${hashedCount}/${batchTotal}...`;
+  } else if (phase === 'uploading' || pendingCount > 0) {
+    pillLabel = `${finishedCount}/${items.length} done`;
+  } else {
+    pillLabel = `${doneCount} done`;
+  }
 
   return (
     <>
@@ -70,8 +82,8 @@ export function UploadZone({ currentFolderId }: UploadZoneProps) {
                 : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
             }`}
           >
-            {pendingCount > 0 ? <Spinner size="sm" /> : <CheckCircle size={14} />}
-            {pendingCount > 0 ? `${pendingCount} uploading...` : `${items.filter((i) => i.status === 'done').length} done`}
+            {pendingCount > 0 || phase === 'hashing' ? <Spinner size="sm" /> : <CheckCircle size={14} />}
+            {pillLabel}
           </button>
         )}
       </div>
