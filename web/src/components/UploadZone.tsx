@@ -125,35 +125,48 @@ export function UploadZone({ currentFolderId, onUploaded }: UploadZoneProps) {
   // Stores the promise resolver for the duplicate modal so we can await it
   const dupeResolveRef = useRef<((d: DuplicateEntry[]) => void) | null>(null);
 
-  // Core upload loop — runs after duplicate check is resolved
+  // Core upload loop — runs after duplicate check is resolved.
+  // Uploads run with bounded concurrency so bulk drops aren't serialized.
   const runUploads = useCallback(async (files: File[]) => {
     if (!files.length) return;
 
+    const CONCURRENCY = 6;
     const uploaded: AssetOut[] = [];
+    let cursor = 0;
 
-    for (const file of files) {
-      setItems((prev) =>
-        prev.map((item) =>
-          item.file === file ? { ...item, status: 'uploading' } : item
-        )
-      );
+    const worker = async () => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= files.length) return;
+        const file = files[idx];
 
-      try {
-        const asset = await api.assets.upload(file, { folderId: currentFolderId ?? undefined });
-        uploaded.push(asset);
         setItems((prev) =>
           prev.map((item) =>
-            item.file === file ? { ...item, status: 'done', result: asset } : item
+            item.file === file ? { ...item, status: 'uploading' } : item
           )
         );
-      } catch (err) {
-        setItems((prev) =>
-          prev.map((item) =>
-            item.file === file ? { ...item, status: 'error', error: String(err) } : item
-          )
-        );
+
+        try {
+          const asset = await api.assets.upload(file, { folderId: currentFolderId ?? undefined });
+          uploaded.push(asset);
+          setItems((prev) =>
+            prev.map((item) =>
+              item.file === file ? { ...item, status: 'done', result: asset } : item
+            )
+          );
+        } catch (err) {
+          setItems((prev) =>
+            prev.map((item) =>
+              item.file === file ? { ...item, status: 'error', error: String(err) } : item
+            )
+          );
+        }
       }
-    }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, files.length) }, () => worker())
+    );
 
     if (uploaded.length > 0) onUploaded(uploaded);
   }, [currentFolderId, onUploaded]);

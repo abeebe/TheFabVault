@@ -9,7 +9,7 @@ import { extractGCodeThumbnail } from './metaExtract.js';
 import { dxfToSvg } from './dxfToSvg.js';
 import type { AssetRow } from '../types/index.js';
 
-const queue = new PQueue({ concurrency: 1 });
+const queue = new PQueue({ concurrency: 4 });
 let browser: Browser | null = null;
 let serverPort = 3000;
 const MAX_RETRIES = 2;

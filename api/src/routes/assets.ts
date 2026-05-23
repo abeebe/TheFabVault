@@ -108,12 +108,18 @@ async function saveUploadedFile(
   const size = fs.statSync(dest).size;
   db.prepare('UPDATE assets SET size = ? WHERE id = ?').run(size, assetId);
 
-  try {
-    const meta = await extractMeta(dest);
-    db.prepare('UPDATE assets SET meta_json = ? WHERE id = ?').run(JSON.stringify(meta), assetId);
-  } catch (err) {
-    console.warn(`[assets] Meta extraction failed for ${assetId}:`, err);
-  }
+  // Run metadata extraction in the background so large 3D files don't block
+  // the upload response. The row is returned immediately with meta_json='{}'
+  // and updated once extraction finishes.
+  void extractMeta(dest)
+    .then((meta) => {
+      getDb()
+        .prepare('UPDATE assets SET meta_json = ? WHERE id = ?')
+        .run(JSON.stringify(meta), assetId);
+    })
+    .catch((err) => {
+      console.warn(`[assets] Meta extraction failed for ${assetId}:`, err);
+    });
 
   return db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow;
 }
