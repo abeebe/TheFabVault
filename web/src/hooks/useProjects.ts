@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../lib/api.js';
+import { subscribeProjectAdds } from '../lib/uploadStore.js';
 import type { ProjectOut, ProjectDetailOut, ProjectOverrides } from '../types/index.js';
 
 export function useProjects() {
@@ -57,6 +58,13 @@ export function useProjectDetail(id: string | null) {
   }, [id]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Refresh whenever a drag-drop (or any upload targeted at this project)
+  // adds assets to it from elsewhere in the app.
+  useEffect(() => {
+    if (!id) return;
+    return subscribeProjectAdds(id, () => { void refresh(); });
+  }, [id, refresh]);
 
   const addAssets = useCallback(async (assetIds: string[]) => {
     if (!id) return;

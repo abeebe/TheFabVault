@@ -5,6 +5,9 @@ import { AssetGrid } from './components/AssetGrid.js';
 import { SearchBar } from './components/SearchBar.js';
 import { ThemeToggle } from './components/ThemeToggle.js';
 import { UploadZone } from './components/UploadZone.js';
+import { UploadPanel } from './components/UploadPanel.js';
+import { GlobalDropZone } from './components/GlobalDropZone.js';
+import { setOnUploaded } from './lib/uploadStore.js';
 import { Spinner } from './components/Spinner.js';
 import { Modal } from './components/Modal.js';
 import { ProjectView } from './components/ProjectView.js';
@@ -208,6 +211,13 @@ export function App() {
     refreshProjects();
   }, [addAssets, refreshProjects]);
 
+  // Register the upload-completion callback with the module-level upload
+  // store so uploads kicked off from any view feed back into App state.
+  useEffect(() => {
+    setOnUploaded(handleUploaded);
+    return () => setOnUploaded(null);
+  }, [handleUploaded]);
+
   // Wrap removeAsset so deleting (trashing) an asset also refreshes sidebar
   // project counts — the deleted asset may have been a member of a project.
   const handleRemoveAsset = useCallback((id: string) => {
@@ -315,7 +325,7 @@ export function App() {
                 <SearchBar value={searchQuery} onChange={(v) => { setSearchQuery(v); setCurrentPage(0); }} />
               </div>
               <div className="flex-1" />
-              <UploadZone currentFolderId={selectedFolderId} onUploaded={handleUploaded} />
+              <UploadZone currentFolderId={selectedFolderId} />
               <ThemeToggle theme={theme} onCycle={cycleTheme} />
               <button
                 onClick={() => setAdminSettingsOpen(true)}
@@ -525,6 +535,33 @@ export function App() {
           onRestored={() => { refresh(); refreshFolders(); }}
         />
       )}
+
+      {/* Upload progress panel — mounted at root so it survives view changes */}
+      <UploadPanel />
+
+      {/* Drag-drop overlay — works on every view; drops go to the current
+          project if one is selected, otherwise the current folder. */}
+      <GlobalDropZone
+        currentFolderId={selectedFolderId}
+        currentFolderName={selectedFolderId ? (folders.find((f) => f.id === selectedFolderId)?.name ?? null) : null}
+        currentProjectId={selectedProjectId}
+        currentProjectName={
+          selectedProjectId
+            ? (projects.find((p) => p.id === selectedProjectId)?.name ?? null)
+            : null
+        }
+        currentProjectFolderId={
+          selectedProjectId
+            ? (projects.find((p) => p.id === selectedProjectId)?.folderId ?? null)
+            : null
+        }
+        currentProjectFolderName={(() => {
+          if (!selectedProjectId) return null;
+          const fid = projects.find((p) => p.id === selectedProjectId)?.folderId;
+          if (!fid) return null;
+          return folders.find((f) => f.id === fid)?.name ?? null;
+        })()}
+      />
     </div>
   );
 }
