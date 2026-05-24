@@ -1,0 +1,96 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/abeebe/thefabvault-api:latest
+            ghcr.io/abeebe/thefabvault-api:${{ steps.sha.outputs.short }}
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: true
+          build-args: |
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+            VITE_GIT_SHA=${{ steps.sha.outputs.short }}
+          tags: |
+            ghcr.io/abeebe/thefabvault-web:latest
+            ghcr.io/abeebe/thefabvault-web:${{ steps.sha.outputs.short }}
+
+      - name: Trigger Portainer redeploy via API
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          PORTAINER_STACK_ID: ${{ secrets.PORTAINER_STACK_ID }}
+          PORTAINER_ENDPOINT_ID: ${{ secrets.PORTAINER_ENDPOINT_ID }}
+        run: |
+          # Guard: skip gracefully if secrets are not configured.
+          if [ -z "${PORTAINER_URL}" ] || [ -z "${PORTAINER_API_KEY}" ] || \
+             [ -z "${PORTAINER_STACK_ID}" ] || [ -z "${PORTAINER_ENDPOINT_ID}" ]; then
+            echo "WARNING: One or more Portainer secrets are not set."
+            echo "  Required: PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_STACK_ID, PORTAINER_ENDPOINT_ID"
+            echo "Images pushed to ghcr.io successfully."
+            echo "Manual redeploy needed: Portainer stack ${PORTAINER_STACK_ID:-<unset>} on ${PORTAINER_URL:-<unset>}"
+            exit 0
+          fi
+
+          echo "Fetching current stack file from Portainer..."
+          STACK_FILE=$(curl -skf -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/${PORTAINER_STACK_ID}/file" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['StackFileContent'])")
+
+          if [ -z "${STACK_FILE}" ]; then
+            echo "ERROR: Could not retrieve stack file from Portainer. Manual redeploy needed."
+            exit 1
+          fi
+
+          echo "Redeploying stack ${PORTAINER_STACK_ID} (pull latest images)..."
+          HTTP_STATUS=$(curl -sk -o /tmp/portainer-redeploy.json -w "%{http_code}" \
+            -X PUT \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/${PORTAINER_STACK_ID}?endpointId=${PORTAINER_ENDPOINT_ID}" \
+            -d "{\"stackFileContent\": $(python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' <<< "${STACK_FILE}"), \"pullImage\": true, \"prune\": false}")
+
+          echo "Portainer API response: HTTP ${HTTP_STATUS}"
+          cat /tmp/portainer-redeploy.json || true
+
+          if [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
+            echo "Portainer redeploy triggered successfully."
+          else
+            echo "ERROR: Portainer API returned HTTP ${HTTP_STATUS}. Manual redeploy may be needed."
+            exit 1
+          fi
