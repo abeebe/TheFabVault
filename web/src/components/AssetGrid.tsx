@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Trash2, Tag, FolderInput, LayoutGrid } from 'lucide-react';
+import { Trash2, Tag, FolderInput, LayoutGrid, Sparkles } from 'lucide-react';
 import { AssetCard } from './AssetCard.js';
 import { TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
 import { ModelViewer } from './ModelViewer.js';
 import { Modal } from './Modal.js';
 import { api } from '../lib/api.js';
-import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides } from '../types/index.js';
+import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides, SetOut } from '../types/index.js';
 
 interface AssetGridProps {
   assets: AssetOut[];
@@ -20,12 +20,17 @@ interface AssetGridProps {
   projectAssetOverrides?: Record<string, ProjectOverrides>;
   projects?: ProjectOut[];
   onAddToProject?: (assetId: string, projectId: string) => void;
+  // Sets — when provided, batch bar shows a "Group as set" dropdown
+  // with existing sets + a "New set…" entry.
+  sets?: SetOut[];
+  onSetsChanged?: () => void;
 }
 
 export function AssetGrid({
   assets, folders, loading, onUpdate, onDelete,
   projectMode, onEditOverrides, projectAssetOverrides,
   projects, onAddToProject,
+  sets, onSetsChanged,
 }: AssetGridProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewAsset, setPreviewAsset] = useState<AssetOut | null>(null);
@@ -34,6 +39,8 @@ export function AssetGrid({
   const [batchCategoryMode, setBatchCategoryMode] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [newSetMode, setNewSetMode] = useState(false);
+  const [newSetName, setNewSetName] = useState('');
 
   function toggleSelect(id: string) {
     setSelected((prev) => {
@@ -88,6 +95,32 @@ export function AssetGrid({
       } catch {}
     }
     setSelected(new Set());
+  }
+
+  async function handleBatchAddToSet(setId: string) {
+    try {
+      await api.sets.addAssets(setId, Array.from(selected));
+      onSetsChanged?.();
+      setSelected(new Set());
+    } catch (err) {
+      console.error('[AssetGrid] Failed to add selection to set:', err);
+      alert(`Couldn't add to set: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function handleBatchCreateSet() {
+    const name = newSetName.trim();
+    if (!name) return;
+    try {
+      await api.sets.create({ name, assetIds: Array.from(selected) });
+      onSetsChanged?.();
+      setSelected(new Set());
+      setNewSetMode(false);
+      setNewSetName('');
+    } catch (err) {
+      console.error('[AssetGrid] Failed to create set:', err);
+      alert(`Couldn't create set: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async function handleBatchCategory(category: string | null) {
@@ -167,6 +200,34 @@ export function AssetGrid({
                 Cancel
               </button>
             </>
+          ) : newSetMode ? (
+            <>
+              <span className="text-sm text-gray-600 dark:text-gray-300">New set name:</span>
+              <input
+                autoFocus
+                value={newSetName}
+                onChange={(e) => setNewSetName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleBatchCreateSet();
+                  if (e.key === 'Escape') { setNewSetMode(false); setNewSetName(''); }
+                }}
+                placeholder="e.g. Anatomical Skull"
+                className="w-56 px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-accent/40"
+              />
+              <button
+                onClick={handleBatchCreateSet}
+                disabled={!newSetName.trim()}
+                className="px-3 py-1.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Create set
+              </button>
+              <button
+                onClick={() => { setNewSetMode(false); setNewSetName(''); }}
+                className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+            </>
           ) : (
             <>
               <button
@@ -175,6 +236,35 @@ export function AssetGrid({
               >
                 <Tag size={14} /> Add tags
               </button>
+
+              {!projectMode && sets !== undefined && (
+                <div className="relative group">
+                  <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <Sparkles size={14} /> Group as set
+                  </button>
+                  <div className="absolute right-0 top-full mt-1 hidden group-hover:block w-52 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 z-20 animate-fade-in max-h-72 overflow-y-auto">
+                    <button
+                      onClick={() => { setNewSetMode(true); setNewSetName(''); }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-accent font-medium flex items-center gap-2"
+                    >
+                      <Sparkles size={12} /> New set…
+                    </button>
+                    {sets.length > 0 && (
+                      <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
+                    )}
+                    {sets.map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => handleBatchAddToSet(s.id)}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 flex items-center justify-between gap-2"
+                      >
+                        <span className="truncate">{s.name}</span>
+                        <span className="text-[10px] text-gray-400 flex-shrink-0">{s.assetCount}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <button
                 onClick={() => { setBatchCategoryMode(true); setBatchTagMode(false); }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"

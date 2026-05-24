@@ -3,7 +3,8 @@ import { Settings, Download, File, X, Plus, Layers, ChevronDown, ChevronRight, B
 import { FolderTree } from './FolderTree.js';
 import { TagBadge } from './TagInput.js';
 import { api } from '../lib/api.js';
-import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
+import { Sparkles } from 'lucide-react';
+import type { AssetOut, FolderOut, ProjectOut, SetOut } from '../types/index.js';
 import type { AssetStats } from '../hooks/useAssetStats.js';
 
 function formatVaultSize(bytes: number): string {
@@ -32,9 +33,16 @@ interface SidebarProps {
   onFolderMove: (id: string, parentId: string | null) => void;
   onFolderDelete: (id: string) => void;
   // Drag-drop: assets dropped onto a folder row → move them there;
-  // dropped onto a project row → add them to that project.
+  // dropped onto a project row → add them to that project;
+  // dropped onto a set row → add them to that set.
   onAssetsDropToFolder: (assetIds: string[], folderId: string | null) => void;
   onAssetsDropToProject: (assetIds: string[], projectId: string) => void;
+  onAssetsDropToSet: (assetIds: string[], setId: string) => void;
+  // Sets
+  sets?: SetOut[];
+  selectedSetId?: string | null;
+  onSetSelect?: (id: string) => void;
+  onOpenSetSuggestions?: () => void;
   onImportScan: () => void;
   onOpenSettings: () => void;
   onOpenTrash: () => void;
@@ -66,6 +74,11 @@ export function Sidebar({
   onFolderDelete,
   onAssetsDropToFolder,
   onAssetsDropToProject,
+  onAssetsDropToSet,
+  sets,
+  selectedSetId,
+  onSetSelect,
+  onOpenSetSuggestions,
   onImportScan,
   onOpenSettings,
   onOpenTrash,
@@ -82,7 +95,29 @@ export function Sidebar({
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
+  const [setsExpanded, setSetsExpanded] = useState(true);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+  const [dragOverSetId, setDragOverSetId] = useState<string | null>(null);
+
+  function handleSetDragOver(e: React.DragEvent, setId: string) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (dragOverSetId !== setId) setDragOverSetId(setId);
+  }
+  function handleSetDragLeave(e: React.DragEvent) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    setDragOverSetId(null);
+  }
+  function handleSetDrop(e: React.DragEvent, setId: string) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    e.preventDefault();
+    setDragOverSetId(null);
+    try {
+      const ids = JSON.parse(e.dataTransfer.getData(ASSET_DRAG_MIME)) as string[];
+      if (Array.isArray(ids) && ids.length > 0) onAssetsDropToSet(ids, setId);
+    } catch {/* ignore */}
+  }
 
   function handleProjectDragOver(e: React.DragEvent, projectId: string) {
     if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
@@ -263,6 +298,66 @@ export function Sidebar({
                       <Layers size={13} className="flex-shrink-0 text-gray-400" />
                       <span className="truncate">{p.name}</span>
                       <span className="ml-auto text-[10px] text-gray-400">{p.assetCount}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Sets section — lightweight grouping (no settings/overrides
+            unlike Projects). Sidebar mirrors the Projects shape: a
+            header with expand toggle + auto-detect button, then a
+            list of set rows that accept asset drops. */}
+        {sets !== undefined && (
+          <div>
+            <div className="flex items-center justify-between px-2 mb-1">
+              <button
+                onClick={() => setSetsExpanded((v) => !v)}
+                className="flex items-center gap-1 text-xs font-semibold text-gray-400 uppercase tracking-wider hover:text-gray-600 dark:hover:text-gray-200"
+              >
+                {setsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                Sets
+              </button>
+              {onOpenSetSuggestions && (
+                <button
+                  onClick={onOpenSetSuggestions}
+                  title="Auto-detect sets from filenames"
+                  className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400 hover:text-accent"
+                >
+                  <Sparkles size={12} />
+                </button>
+              )}
+            </div>
+
+            {setsExpanded && (
+              <div className="flex flex-col gap-0.5">
+                {sets.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-gray-400 italic">No sets yet</p>
+                ) : (
+                  sets.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => onSetSelect?.(s.id)}
+                      onDragOver={(e) => handleSetDragOver(e, s.id)}
+                      onDragLeave={handleSetDragLeave}
+                      onDrop={(e) => handleSetDrop(e, s.id)}
+                      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
+                        dragOverSetId === s.id
+                          ? 'bg-accent/25 ring-2 ring-accent/60'
+                          : selectedSetId === s.id
+                            ? 'bg-accent/10 text-accent font-medium'
+                            : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {s.coverThumbUrl ? (
+                        <img src={s.coverThumbUrl} alt="" className="w-4 h-4 rounded object-cover flex-shrink-0" />
+                      ) : (
+                        <Sparkles size={13} className="flex-shrink-0 text-gray-400" />
+                      )}
+                      <span className="truncate">{s.name}</span>
+                      <span className="ml-auto text-[10px] text-gray-400">{s.assetCount}</span>
                     </button>
                   ))
                 )}

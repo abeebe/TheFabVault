@@ -13,6 +13,7 @@ import assetsRouter from './routes/assets.js';
 import foldersRouter from './routes/folders.js';
 import thumbsRouter from './routes/thumbs.js';
 import projectsRouter from './routes/projects.js';
+import setsRouter from './routes/sets.js';
 import adminRouter from './routes/admin.js';
 import mountsRouter from './routes/mounts.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
@@ -60,6 +61,7 @@ app.use('/', assetsRouter);
 app.use('/', foldersRouter);
 app.use('/', thumbsRouter);
 app.use('/', projectsRouter);
+app.use('/', setsRouter);
 app.use('/', adminRouter);
 app.use('/', mountsRouter);
 

@@ -112,6 +112,25 @@ const MIGRATIONS: string[] = [
   // v10: favorites (0 = normal, 1 = favorited)
   `ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
    CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(is_favorite);`,
+  // v11: sets — lightweight grouping primitive distinct from folders
+  // (no file location) and projects (no active-work scaffolding).
+  // A file can belong to many sets; sets carry just name/description
+  // and an optional cover asset.
+  `CREATE TABLE IF NOT EXISTS sets (
+     id             TEXT    PRIMARY KEY,
+     name           TEXT    NOT NULL,
+     description    TEXT,
+     cover_asset_id TEXT    REFERENCES assets(id) ON DELETE SET NULL,
+     created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+   );
+   CREATE TABLE IF NOT EXISTS set_assets (
+     set_id     TEXT    NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+     asset_id   TEXT    NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+     sort_order INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (set_id, asset_id)
+   );
+   CREATE INDEX IF NOT EXISTS idx_set_assets_set ON set_assets(set_id);
+   CREATE INDEX IF NOT EXISTS idx_set_assets_asset ON set_assets(asset_id);`,
 ];
 
 function runMigrations(db: Database.Database): void {

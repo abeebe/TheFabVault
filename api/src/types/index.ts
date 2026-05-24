@@ -139,6 +139,32 @@ export interface ProjectDetailOut extends ProjectOut {
   assets: ProjectAssetOut[];
 }
 
+// ─── Sets (lightweight asset grouping) ────────────────────────────────────────
+
+export interface SetOut {
+  id: string;
+  name: string;
+  description: string | null;
+  coverAssetId: string | null;
+  // URL to the cover image (thumbnail of cover_asset_id, or null if
+  // unset or that asset has no thumbnail).
+  coverThumbUrl: string | null;
+  assetCount: number;
+  createdAt: number;
+}
+
+export interface SetDetailOut extends SetOut {
+  assets: AssetOut[];
+}
+
+export interface SetSuggestion {
+  // Suggested name derived from the shared filename stem.
+  name: string;
+  folderId: string | null;
+  folderName: string | null;
+  assetIds: string[];
+}
+
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
 export interface LoginRequest {
@@ -213,6 +239,20 @@ export interface ProjectAssetRow {
   asset_id: string;
   sort_order: number;
   overrides_json: string;
+}
+
+export interface SetRow {
+  id: string;
+  name: string;
+  description: string | null;
+  cover_asset_id: string | null;
+  created_at: number;
+}
+
+export interface SetAssetRow {
+  set_id: string;
+  asset_id: string;
+  sort_order: number;
 }
 
 export interface ScanResult {

@@ -11,6 +11,8 @@ import { setOnUploaded } from './lib/uploadStore.js';
 import { Spinner } from './components/Spinner.js';
 import { Modal } from './components/Modal.js';
 import { ProjectView } from './components/ProjectView.js';
+import { SetView } from './components/SetView.js';
+import { SetSuggestions } from './components/SetSuggestions.js';
 import { AdminSettings } from './components/AdminSettings.js';
 import { TrashView } from './components/TrashView.js';
 import { useAuth } from './hooks/useAuth.js';
@@ -18,6 +20,7 @@ import { useAssets } from './hooks/useAssets.js';
 import { useFolders } from './hooks/useFolders.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useProjects } from './hooks/useProjects.js';
+import { useSets } from './hooks/useSets.js';
 import { useAssetStats } from './hooks/useAssetStats.js';
 import { api } from './lib/api.js';
 import type { AssetOut } from './types/index.js';
@@ -122,6 +125,8 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
+  const [setSuggestionsOpen, setSetSuggestionsOpen] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
@@ -158,6 +163,7 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const { folders, createFolder, renameFolder, moveFolder, deleteFolder, refresh: refreshFolders } = useFolders();
   const { projects, refresh: refreshProjects, createProject } = useProjects();
+  const { sets, refresh: refreshSets } = useSets();
   const { stats: assetStats, refresh: refreshAssetStats } = useAssetStats();
 
   // Keep trash count in sync
@@ -266,8 +272,28 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
     }
   }, [refreshProjects]);
 
+  // Sidebar drag-drop: assets dropped onto a set row → add them.
+  const handleAssetsDropToSet = useCallback(async (assetIds: string[], setId: string) => {
+    try {
+      await api.sets.addAssets(setId, assetIds);
+      refreshSets();
+    } catch (err) {
+      console.error('[App] Failed to add asset(s) to set:', err);
+      alert(`Couldn't add to set: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshSets]);
+
   function handleProjectSelect(id: string) {
     setSelectedProjectId(id);
+    setSelectedSetId(null);
+    setSelectedFolderId(null);
+    setSelectedTags([]);
+    setSearchQuery('');
+  }
+
+  function handleSetSelect(id: string) {
+    setSelectedSetId(id);
+    setSelectedProjectId(null);
     setSelectedFolderId(null);
     setSelectedTags([]);
     setSearchQuery('');
@@ -342,6 +368,11 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
         selectedProjectId={selectedProjectId}
         onProjectSelect={handleProjectSelect}
         onProjectCreate={() => setNewProjectOpen(true)}
+        sets={sets}
+        selectedSetId={selectedSetId}
+        onSetSelect={handleSetSelect}
+        onOpenSetSuggestions={() => setSetSuggestionsOpen(true)}
+        onAssetsDropToSet={handleAssetsDropToSet}
         selectedCategory={selectedCategory}
         onCategorySelect={handleCategorySelect}
         showFavoritesOnly={showFavoritesOnly}
@@ -349,7 +380,16 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {selectedProjectId ? (
+        {selectedSetId ? (
+          <SetView
+            setId={selectedSetId}
+            folders={folders}
+            projects={projects}
+            onAddToProject={handleAddToProject}
+            onDeleted={() => { setSelectedSetId(null); refreshSets(); refreshAssetStats(); }}
+            onSetUpdated={refreshSets}
+          />
+        ) : selectedProjectId ? (
           <ProjectView
             projectId={selectedProjectId}
             folders={folders}
@@ -463,6 +503,8 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
                 onDelete={handleRemoveAsset}
                 projects={projects}
                 onAddToProject={handleAddToProject}
+                sets={sets}
+                onSetsChanged={refreshSets}
               />
 
               {/* Pagination */}
@@ -577,6 +619,18 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
 
       {/* Upload progress panel — mounted at root so it survives view changes */}
       <UploadPanel />
+
+      {/* Auto-detect Sets modal */}
+      <SetSuggestions
+        isOpen={setSuggestionsOpen}
+        onClose={() => setSetSuggestionsOpen(false)}
+        onCreated={(count) => {
+          if (count > 0) {
+            refreshSets();
+            console.log(`[App] Created ${count} set(s) from suggestions`);
+          }
+        }}
+      />
 
       {/* Drag-drop overlay — works on every view; drops go to the current
           project if one is selected, otherwise the current folder. */}

@@ -1,6 +1,7 @@
 import type {
   AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult,
   ProjectOut, ProjectDetailOut, ProjectOverrides,
+  SetOut, SetDetailOut, SetSuggestion,
   PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
   MountSlotStatus, MountConfig, DuplicatesReport, VersionOut,
   OrphansReport,
@@ -288,6 +289,22 @@ export const api = {
 
     updateOverrides: (id: string, assetId: string, overrides: ProjectOverrides): Promise<void> =>
       apiFetch(`/project/${id}/asset/${assetId}/overrides`, { method: 'PATCH', body: JSON.stringify(overrides) }),
+  },
+
+  sets: {
+    list: (): Promise<SetOut[]> => apiFetch('/sets'),
+    get: (id: string): Promise<SetDetailOut> => apiFetch(`/set/${id}`),
+    create: (body: { name: string; description?: string; assetIds?: string[] }): Promise<SetOut> =>
+      apiFetch('/sets', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: { name?: string; description?: string | null; coverAssetId?: string | null }): Promise<SetOut> =>
+      apiFetch(`/set/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    delete: (id: string): Promise<void> =>
+      apiFetch(`/set/${id}`, { method: 'DELETE' }),
+    addAssets: (id: string, assetIds: string[]): Promise<{ added: number }> =>
+      apiFetch(`/set/${id}/assets`, { method: 'POST', body: JSON.stringify({ assetIds }) }),
+    removeAsset: (id: string, assetId: string): Promise<void> =>
+      apiFetch(`/set/${id}/asset/${assetId}`, { method: 'DELETE' }),
+    suggest: (): Promise<{ suggestions: SetSuggestion[] }> => apiFetch('/sets/suggest'),
   },
 
   download: {

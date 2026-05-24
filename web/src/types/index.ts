@@ -125,6 +125,28 @@ export interface ProjectOut {
   createdAt: number;
 }
 
+// Sets — lightweight asset grouping (no settings, no overrides).
+export interface SetOut {
+  id: string;
+  name: string;
+  description: string | null;
+  coverAssetId: string | null;
+  coverThumbUrl: string | null;
+  assetCount: number;
+  createdAt: number;
+}
+
+export interface SetDetailOut extends SetOut {
+  assets: AssetOut[];
+}
+
+export interface SetSuggestion {
+  name: string;
+  folderId: string | null;
+  folderName: string | null;
+  assetIds: string[];
+}
+
 export interface ProjectAssetOut extends AssetOut {
   overrides: ProjectOverrides;
 }
