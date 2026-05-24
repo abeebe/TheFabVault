@@ -91,8 +91,31 @@ function LoginPage({ onLogin }: { onLogin: (u: string, p: string) => Promise<voi
   );
 }
 
+// Outer auth gate. Crucially, AuthenticatedApp only mounts AFTER auth
+// has been resolved — that's what prevents the data hooks
+// (useAssets/useFolders/useProjects/useAssetStats) from firing while
+// no JWT is present, getting 401'd, storing empty arrays, and then
+// failing to refetch when login completes (user previously had to hit
+// browser refresh to see their data after logging in).
 export function App() {
   const { isAuthenticated, checking, authRequired, login, logout } = useAuth();
+
+  if (checking) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (authRequired && !isAuthenticated) {
+    return <LoginPage onLogin={login} />;
+  }
+
+  return <AuthenticatedApp logout={logout} authRequired={authRequired} />;
+}
+
+function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRequired: boolean }) {
   const { theme, cycleTheme } = useTheme();
 
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -287,18 +310,6 @@ export function App() {
     } finally {
       setCreatingProject(false);
     }
-  }
-
-  if (checking) {
-    return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
-        <Spinner size="lg" />
-      </div>
-    );
-  }
-
-  if (authRequired && !isAuthenticated) {
-    return <LoginPage onLogin={login} />;
   }
 
   return (
