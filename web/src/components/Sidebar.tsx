@@ -15,6 +15,9 @@ function formatVaultSize(bytes: number): string {
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
+// Match FolderTree's ASSET_DRAG_MIME — keep in sync.
+const ASSET_DRAG_MIME = 'application/x-tfv-asset-ids';
+
 interface SidebarProps {
   folders: FolderOut[];
   assets: AssetOut[];
@@ -26,7 +29,12 @@ interface SidebarProps {
   onTagToggle: (tag: string) => void;
   onFolderCreate: (name: string, parentId?: string) => void;
   onFolderRename: (id: string, name: string) => void;
+  onFolderMove: (id: string, parentId: string | null) => void;
   onFolderDelete: (id: string) => void;
+  // Drag-drop: assets dropped onto a folder row → move them there;
+  // dropped onto a project row → add them to that project.
+  onAssetsDropToFolder: (assetIds: string[], folderId: string | null) => void;
+  onAssetsDropToProject: (assetIds: string[], projectId: string) => void;
   onImportScan: () => void;
   onOpenSettings: () => void;
   onOpenTrash: () => void;
@@ -54,7 +62,10 @@ export function Sidebar({
   onTagToggle,
   onFolderCreate,
   onFolderRename,
+  onFolderMove,
   onFolderDelete,
+  onAssetsDropToFolder,
+  onAssetsDropToProject,
   onImportScan,
   onOpenSettings,
   onOpenTrash,
@@ -71,6 +82,27 @@ export function Sidebar({
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
+  const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+
+  function handleProjectDragOver(e: React.DragEvent, projectId: string) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (dragOverProjectId !== projectId) setDragOverProjectId(projectId);
+  }
+  function handleProjectDragLeave(e: React.DragEvent) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    setDragOverProjectId(null);
+  }
+  function handleProjectDrop(e: React.DragEvent, projectId: string) {
+    if (!e.dataTransfer.types.includes(ASSET_DRAG_MIME)) return;
+    e.preventDefault();
+    setDragOverProjectId(null);
+    try {
+      const ids = JSON.parse(e.dataTransfer.getData(ASSET_DRAG_MIME)) as string[];
+      if (Array.isArray(ids) && ids.length > 0) onAssetsDropToProject(ids, projectId);
+    } catch {/* malformed payload — ignore */}
+  }
 
   async function handleScan() {
     setScanning(true);
@@ -111,6 +143,8 @@ export function Sidebar({
             onSelect={onFolderSelect}
             onCreate={onFolderCreate}
             onRename={onFolderRename}
+            onMove={onFolderMove}
+            onAssetsDrop={onAssetsDropToFolder}
             onDelete={onFolderDelete}
           />
         </div>
@@ -215,10 +249,15 @@ export function Sidebar({
                     <button
                       key={p.id}
                       onClick={() => onProjectSelect?.(p.id)}
+                      onDragOver={(e) => handleProjectDragOver(e, p.id)}
+                      onDragLeave={handleProjectDragLeave}
+                      onDrop={(e) => handleProjectDrop(e, p.id)}
                       className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-colors text-left ${
-                        selectedProjectId === p.id
-                          ? 'bg-accent/10 text-accent font-medium'
-                          : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        dragOverProjectId === p.id
+                          ? 'bg-accent/25 ring-2 ring-accent/60'
+                          : selectedProjectId === p.id
+                            ? 'bg-accent/10 text-accent font-medium'
+                            : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
                       }`}
                     >
                       <Layers size={13} className="flex-shrink-0 text-gray-400" />

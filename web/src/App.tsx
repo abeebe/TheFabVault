@@ -133,7 +133,7 @@ export function App() {
 
   const { assets, total, loading, refresh: refreshAssets, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const { folders, createFolder, renameFolder, deleteFolder, refresh: refreshFolders } = useFolders();
+  const { folders, createFolder, renameFolder, moveFolder, deleteFolder, refresh: refreshFolders } = useFolders();
   const { projects, refresh: refreshProjects, createProject } = useProjects();
   const { stats: assetStats, refresh: refreshAssetStats } = useAssetStats();
 
@@ -217,6 +217,32 @@ export function App() {
     refreshAssetStats();
   }, [removeAsset, refreshProjects, refreshAssetStats]);
 
+  // Sidebar drag-drop: assets dropped onto a folder row → move them.
+  // If we're currently filtered by folder, the moved-out assets vanish
+  // from the grid so refreshAssets to pick up the new pagination.
+  const handleAssetsDropToFolder = useCallback(async (assetIds: string[], folderId: string | null) => {
+    try {
+      await Promise.all(assetIds.map((id) => api.assets.moveToFolder(id, folderId)));
+      refreshAssets();
+      refreshFolders();
+      refreshAssetStats();
+    } catch (err) {
+      console.error('[App] Failed to move asset(s) to folder:', err);
+      alert(`Couldn't move file${assetIds.length > 1 ? 's' : ''}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshAssets, refreshFolders, refreshAssetStats]);
+
+  // Sidebar drag-drop: assets dropped onto a project row → add them.
+  const handleAssetsDropToProject = useCallback(async (assetIds: string[], projectId: string) => {
+    try {
+      await api.projects.addAssets(projectId, assetIds);
+      refreshProjects();
+    } catch (err) {
+      console.error('[App] Failed to add asset(s) to project:', err);
+      alert(`Couldn't add to project: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshProjects]);
+
   function handleProjectSelect(id: string) {
     setSelectedProjectId(id);
     setSelectedFolderId(null);
@@ -287,7 +313,16 @@ export function App() {
         onTagToggle={handleTagToggle}
         onFolderCreate={createFolder}
         onFolderRename={renameFolder}
+        onFolderMove={(id, parentId) => {
+          // Toast on error — backend rejects descendant-of-self moves.
+          moveFolder(id, parentId).catch((err) => {
+            console.error('[App] Failed to move folder:', err);
+            alert(`Couldn't move folder: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }}
         onFolderDelete={deleteFolder}
+        onAssetsDropToFolder={handleAssetsDropToFolder}
+        onAssetsDropToProject={handleAssetsDropToProject}
         onImportScan={() => { refresh(); refreshFolders(); refreshAssetStats(); refreshProjects(); }}
         onOpenSettings={() => setAdminSettingsOpen(true)}
         onOpenTrash={() => setTrashOpen(true)}

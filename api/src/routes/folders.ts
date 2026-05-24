@@ -58,17 +58,36 @@ router.patch('/folder/:id', requireAuth, (req: Request, res: Response) => {
     return;
   }
 
-  // Prevent circular parent reference
+  // Prevent circular parent reference (self) and full cycles. Without
+  // this check, dropping a folder into one of its own descendants would
+  // detach the entire subtree from the root (it'd point at itself
+  // through the descendant), making it unreachable from the tree walk.
   if (parent_id && parent_id === id) {
     res.status(400).json({ error: 'A folder cannot be its own parent' });
     return;
   }
 
   if (parent_id) {
-    const parent = db.prepare('SELECT id FROM folders WHERE id = ?').get(parent_id);
+    const parent = db.prepare('SELECT id, parent_id FROM folders WHERE id = ?').get(parent_id) as
+      | { id: string; parent_id: string | null } | undefined;
     if (!parent) {
       res.status(400).json({ error: 'Parent folder not found' });
       return;
+    }
+    // Walk up from the new parent — if we hit the folder being moved,
+    // the new parent is actually a descendant of it.
+    let cursor: string | null = parent.parent_id;
+    const seen = new Set<string>();
+    while (cursor) {
+      if (cursor === id) {
+        res.status(400).json({ error: 'Cannot move a folder into one of its own descendants' });
+        return;
+      }
+      if (seen.has(cursor)) break; // safety net against any pre-existing cycle
+      seen.add(cursor);
+      const next = db.prepare('SELECT parent_id FROM folders WHERE id = ?').get(cursor) as
+        | { parent_id: string | null } | undefined;
+      cursor = next?.parent_id ?? null;
     }
   }
 

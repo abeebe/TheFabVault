@@ -16,6 +16,11 @@ interface AssetCardProps {
   onSelect: () => void;
   onUpdate: (updated: AssetOut) => void;
   onPreview: () => void;
+  // Returns the IDs that should be carried in a drag from this card.
+  // Typically the current multi-selection (if this card is part of it)
+  // or just `[asset.id]`. Provided by AssetGrid so the card doesn't
+  // need to know about selection state across siblings.
+  getDragIds?: () => string[];
   // Delete:
   //   onDelete — moves to trash (normal mode) or removes from project (project mode)
   onDelete?: () => void;
@@ -40,8 +45,12 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Match FolderTree's ASSET_DRAG_MIME — keep in sync.
+const ASSET_DRAG_MIME = 'application/x-tfv-asset-ids';
+
 export function AssetCard({
   asset, folders, selected, onSelect, onUpdate, onPreview,
+  getDragIds,
   onDelete,
   projectMode, hasOverrides, onEditOverrides,
   projects, onAddToProject,
@@ -156,8 +165,16 @@ export function AssetCard({
 
   const thumbUrl = api.assets.thumbUrl(asset);
 
+  function handleDragStart(e: React.DragEvent) {
+    const ids = getDragIds ? getDragIds() : [asset.id];
+    e.dataTransfer.setData(ASSET_DRAG_MIME, JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = 'move';
+  }
+
   return (
     <div
+      draggable={!editingName && !editingTags}
+      onDragStart={handleDragStart}
       className={`group relative flex flex-col rounded-xl border transition-all cursor-pointer
         ${selected
           ? 'border-accent ring-2 ring-accent/30 bg-surface-2'

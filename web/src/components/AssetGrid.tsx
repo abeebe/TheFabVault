@@ -237,6 +237,11 @@ export function AssetGrid({
             onSelect={() => toggleSelect(asset.id)}
             onUpdate={onUpdate}
             onPreview={() => setPreviewAsset(asset)}
+            // If this card is part of a multi-selection, drag the whole
+            // selection; otherwise just this single asset.
+            getDragIds={() => (selected.has(asset.id) && selected.size > 1
+              ? Array.from(selected)
+              : [asset.id])}
             projectMode={projectMode}
             hasOverrides={!!(projectAssetOverrides?.[asset.id] && (
               Object.keys(projectAssetOverrides[asset.id].printer ?? {}).length > 0 ||

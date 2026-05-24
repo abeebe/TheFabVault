@@ -31,10 +31,15 @@ export function useFolders() {
     setFolders((prev) => prev.map((f) => (f.id === id ? updated : f)));
   }, []);
 
+  const moveFolder = useCallback(async (id: string, parentId: string | null): Promise<void> => {
+    const updated = await api.folders.update(id, { parentId });
+    setFolders((prev) => prev.map((f) => (f.id === id ? updated : f)));
+  }, []);
+
   const deleteFolder = useCallback(async (id: string): Promise<void> => {
     await api.folders.delete(id);
     setFolders((prev) => prev.filter((f) => f.id !== id));
   }, []);
 
-  return { folders, loading, refresh, createFolder, renameFolder, deleteFolder };
+  return { folders, loading, refresh, createFolder, renameFolder, moveFolder, deleteFolder };
 }
