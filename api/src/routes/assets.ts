@@ -298,15 +298,17 @@ const TWO_D_EXTS = new Set(['.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbr
 router.get('/asset-stats', requireAuth, (_req: Request, res: Response) => {
   const db = getDb();
   const rows = db
-    .prepare('SELECT filename, category, is_favorite FROM assets WHERE deleted_at IS NULL')
-    .all() as Array<{ filename: string; category: string | null; is_favorite: number }>;
+    .prepare('SELECT filename, category, is_favorite, size FROM assets WHERE deleted_at IS NULL')
+    .all() as Array<{ filename: string; category: string | null; is_favorite: number; size: number }>;
 
   let favorites = 0;
   let threeDmodel = 0;
   let twoD = 0;
   let uncategorized = 0;
+  let totalSize = 0;
 
   for (const row of rows) {
+    totalSize += row.size ?? 0;
     if (row.is_favorite) favorites++;
     if (row.category === '3dmodel') { threeDmodel++; continue; }
     if (row.category === '2d') { twoD++; continue; }
@@ -317,7 +319,7 @@ router.get('/asset-stats', requireAuth, (_req: Request, res: Response) => {
     else uncategorized++;
   }
 
-  res.json({ total: rows.length, favorites, threeDmodel, twoD, uncategorized });
+  res.json({ total: rows.length, totalSize, favorites, threeDmodel, twoD, uncategorized });
 });
 
 // ─── GET /asset/:id ───────────────────────────────────────────────────────────

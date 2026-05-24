@@ -3,13 +3,14 @@ import { api } from '../lib/api.js';
 
 export interface AssetStats {
   total: number;
+  totalSize: number;
   favorites: number;
   threeDmodel: number;
   twoD: number;
   uncategorized: number;
 }
 
-const ZERO: AssetStats = { total: 0, favorites: 0, threeDmodel: 0, twoD: 0, uncategorized: 0 };
+const ZERO: AssetStats = { total: 0, totalSize: 0, favorites: 0, threeDmodel: 0, twoD: 0, uncategorized: 0 };
 
 // Sidebar category counts. The /assets list is paginated, so counting
 // from the loaded page would only reflect ~one page worth — this hook

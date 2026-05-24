@@ -40,6 +40,11 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: "${VITE_API_URL:-http://localhost:3000}"
+        # Pass the host's current git short SHA into the build so the
+        # sidebar can show which deploy is live. Set in your shell:
+        #   export VITE_GIT_SHA=$(git rev-parse --short HEAD)
+        # or it falls back to 'dev'.
+        VITE_GIT_SHA: "${VITE_GIT_SHA:-dev}"
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-80}:80"

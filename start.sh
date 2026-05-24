@@ -48,7 +48,12 @@ echo -e "${GREEN}✓ API started (PID: $API_PID)${NC}"
 
 # Build and start Web
 cd ../web
-echo -e "${BLUE}Building Web frontend...${NC}"
+# Capture the current git short SHA so the sidebar can show which deploy
+# is live. vite.config.ts would fall back to `git rev-parse` on its own,
+# but exporting here also covers Docker builds invoked from this script
+# and prints the value so it's visible in deploy output.
+export VITE_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+echo -e "${BLUE}Building Web frontend (version ${VITE_GIT_SHA})...${NC}"
 npm run build > /dev/null 2>&1
 echo -e "${GREEN}✓ Web built${NC}"
 

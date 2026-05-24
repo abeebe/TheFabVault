@@ -5,6 +5,12 @@ WORKDIR /app
 ARG VITE_API_URL=http://localhost:3000
 ENV VITE_API_URL=$VITE_API_URL
 
+# Git short SHA shown in the sidebar so deploys are identifiable. The
+# build context typically excludes .git, so docker-compose passes this
+# through from `git rev-parse --short HEAD` on the host.
+ARG VITE_GIT_SHA=dev
+ENV VITE_GIT_SHA=$VITE_GIT_SHA
+
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund
 

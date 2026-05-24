@@ -6,6 +6,15 @@ import { api } from '../lib/api.js';
 import type { AssetOut, FolderOut, ProjectOut } from '../types/index.js';
 import type { AssetStats } from '../hooks/useAssetStats.js';
 
+function formatVaultSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let n = bytes / 1024;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 interface SidebarProps {
   folders: FolderOut[];
   assets: AssetOut[];
@@ -254,6 +263,12 @@ export function Sidebar({
 
       {/* Bottom actions */}
       <div className="px-3 py-3 border-t border-gray-200 dark:border-gray-700 space-y-2">
+        {/* Vault totals */}
+        <div className="px-3 py-1.5 text-[11px] text-gray-500 dark:text-gray-400 flex items-center justify-between">
+          <span>{assetStats.total.toLocaleString()} files</span>
+          <span>{formatVaultSize(assetStats.totalSize)}</span>
+        </div>
+
         {/* Folder download */}
         {selectedFolderId && (
           <a
@@ -286,6 +301,15 @@ export function Sidebar({
           <Settings size={14} />
           Settings
         </button>
+
+        {/* Build version — confirms which deploy you're looking at. Set
+            at build time in vite.config.ts. Hover for build timestamp. */}
+        <div
+          className="px-3 pt-1 text-center text-[10px] font-mono text-gray-400 dark:text-gray-500 select-text"
+          title={`Built ${import.meta.env.VITE_BUILD_TIME ?? 'unknown'}`}
+        >
+          {import.meta.env.VITE_GIT_SHA ?? 'dev'}
+        </div>
       </div>
     </aside>
   );

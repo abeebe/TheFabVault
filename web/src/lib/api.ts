@@ -87,6 +87,7 @@ export const api = {
 
     stats: (): Promise<{
       total: number;
+      totalSize: number;
       favorites: number;
       threeDmodel: number;
       twoD: number;
