@@ -18,7 +18,7 @@ const DEFAULT_EXTS = new Set([
   '.gcode', '.gc', '.g',
 ]);
 
-const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.dxf', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
+const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.dxf', '.pdf', '.lbrn', '.lbrn2', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
 
 function parseAllowedExts(raw: string): Set<string> | null {
   if (!raw.trim()) return null; // null = use defaults

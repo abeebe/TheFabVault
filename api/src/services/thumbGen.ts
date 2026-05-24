@@ -7,6 +7,8 @@ import { getDb } from '../db.js';
 import { assetFilePath, thumbFilePath } from './fileStore.js';
 import { extractGCodeThumbnail } from './metaExtract.js';
 import { dxfToSvg } from './dxfToSvg.js';
+import { renderPdfThumbnail } from './pdfThumb.js';
+import { extractLightburnThumbnail } from './lightburnThumb.js';
 import type { AssetRow } from '../types/index.js';
 
 const queue = new PQueue({ concurrency: 4 });
@@ -192,6 +194,34 @@ export async function generateThumb(assetId: string): Promise<void> {
 
     if (STL_EXTS.has(ext)) {
       await renderWithRetry(assetId, filePath, ext, asset.filename);
+      db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
+      return;
+    }
+
+    if (ext === '.lbrn' || ext === '.lbrn2') {
+      const embedded = extractLightburnThumbnail(filePath);
+      if (embedded) {
+        await sharp(embedded)
+          .resize(512, 512, { fit: 'inside', background: { r: 249, g: 250, b: 251, alpha: 1 } })
+          .flatten({ background: { r: 249, g: 250, b: 251 } })
+          .jpeg({ quality: 88 })
+          .toFile(thumbOut);
+        db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
+      } else {
+        // No embedded thumbnail (older LightBurn or save preference) —
+        // fall back to the generic file icon rather than failing.
+        db.prepare("UPDATE assets SET thumb_status = 'none' WHERE id = ?").run(assetId);
+      }
+      return;
+    }
+
+    if (ext === '.pdf') {
+      const jpeg = await renderPdfThumbnail(filePath);
+      await sharp(jpeg)
+        .resize(512, 512, { fit: 'inside', background: { r: 249, g: 250, b: 251, alpha: 1 } })
+        .flatten({ background: { r: 249, g: 250, b: 251 } })
+        .jpeg({ quality: 88 })
+        .toFile(thumbOut);
       db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
       return;
     }

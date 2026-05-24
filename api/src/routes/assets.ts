@@ -30,7 +30,7 @@ const upload = multer({
 
 const THUMB_ELIGIBLE_EXTS = new Set([
   '.stl', '.obj', '.3mf',
-  '.svg', '.dxf',
+  '.svg', '.dxf', '.pdf', '.lbrn', '.lbrn2',
   '.png', '.jpg', '.jpeg', '.webp',
   '.gcode', '.gc', '.g',
 ]);

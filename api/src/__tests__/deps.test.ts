@@ -144,3 +144,85 @@ describe('sharp', () => {
     expect(meta.height).toBe(3);
   });
 });
+
+describe('lightburn thumbnail extractor', () => {
+  it('decodes the embedded PNG from a synthetic .lbrn file', async () => {
+    const { extractLightburnThumbnail } = await import('../services/lightburnThumb.js');
+
+    // Generate a tiny PNG via sharp, then wrap it in a minimal LightBurn
+    // XML envelope to match the shape extractLightburnThumbnail expects.
+    const png = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 12, g: 34, b: 56 } },
+    }).png().toBuffer();
+    const xml =
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<LightBurnProject AppVersion="1.0">\n' +
+      `  <Thumbnail Source="${png.toString('base64')}"/>\n` +
+      '</LightBurnProject>\n';
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-lbrn-'));
+    const file = path.join(dir, 'test.lbrn');
+    try {
+      fs.writeFileSync(file, xml);
+      const out = extractLightburnThumbnail(file);
+      expect(out).not.toBeNull();
+      // PNG magic number
+      expect(out!.slice(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+      const meta = await sharp(out!).metadata();
+      expect(meta.width).toBe(2);
+      expect(meta.height).toBe(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when no <Thumbnail> element is present', () => {
+    // Import statically — already loaded above via dynamic import, just
+    // reuse to avoid a second async setup.
+    return import('../services/lightburnThumb.js').then(({ extractLightburnThumbnail }) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-lbrn-'));
+      const file = path.join(dir, 'no-thumb.lbrn');
+      try {
+        fs.writeFileSync(file, '<?xml version="1.0"?><LightBurnProject></LightBurnProject>');
+        expect(extractLightburnThumbnail(file)).toBeNull();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+describe('pdf thumbnail pipeline', () => {
+  it('renders a generated PDF to a JPEG buffer end-to-end', async () => {
+    // Generate a tiny one-page PDF in memory using @napi-rs/canvas's
+    // built-in PDF surface, then feed it through pdfThumb. Covers both
+    // deps (pdfjs-dist + @napi-rs/canvas) plus the renderer.
+    const { renderPdfThumbnail } = await import('../services/pdfThumb.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-pdf-'));
+    const pdfPath = path.join(dir, 'tiny.pdf');
+    try {
+      // Minimal hand-crafted single-page PDF (612x792, blank). Avoids
+      // depending on yet another lib just to produce a test fixture.
+      const pdf =
+        '%PDF-1.4\n' +
+        '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n' +
+        '2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n' +
+        '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<>>>>endobj\n' +
+        'xref\n0 4\n' +
+        '0000000000 65535 f \n' +
+        '0000000009 00000 n \n' +
+        '0000000052 00000 n \n' +
+        '0000000099 00000 n \n' +
+        'trailer<</Size 4/Root 1 0 R>>\nstartxref\n160\n%%EOF';
+      fs.writeFileSync(pdfPath, pdf);
+
+      const jpeg = await renderPdfThumbnail(pdfPath);
+      expect(jpeg.length).toBeGreaterThan(100);
+      // JPEG SOI marker
+      expect(jpeg.slice(0, 2).toString('hex')).toBe('ffd8');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
