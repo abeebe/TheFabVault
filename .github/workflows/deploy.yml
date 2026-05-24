@@ -7,7 +7,10 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: self-hosted
+    # NOTE: self-hosted runner is registered under five30am org, not abeebe personal account.
+    # Until this repo is transferred to five30am (or a runner is added to abeebe account),
+    # use ubuntu-latest (GitHub-hosted). Transfer to five30am to use self-hosted runner.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
