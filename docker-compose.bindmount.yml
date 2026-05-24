@@ -1,0 +1,66 @@
+# TheFabVault — Homelab bind-mount compose file
+#
+# Designed for deployment on ct-102 (10.10.5.252) via Portainer git-mode stack.
+#
+# Volume layout:
+#   /app/storage  → /mnt/fabvault/storage  (CIFS, Unraid NAS via PVE host mp= passthrough)
+#   /app/data     → /var/lib/fabvault/db   (ext4 local disk — SQLite requires POSIX locking)
+#
+# Required env vars (set in Portainer stack environment):
+#   AUTH_USERNAME, AUTH_PASSWORD, JWT_SECRET, JWT_TTL
+#   CORS_ORIGINS, VITE_API_URL (baked into web image at build time)
+#   API_PORT (default: 3005), WEB_PORT (default: 8085)
+#   IMPORT_MOUNT_ON_STARTUP, IMPORT_MOUNT_EXTS, IMPORT_MAX_MB, IMPORT_MOUNT_PATHS
+#
+# See: ~/projects/DOCS/Reports/holt-fabvault-portainer-migration-2026-05-23.md
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${API_PORT:-3005}:3000"
+    environment:
+      PORT: "3000"
+      AUTH_USERNAME: "${AUTH_USERNAME}"
+      AUTH_PASSWORD: "${AUTH_PASSWORD}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_TTL: "${JWT_TTL:-43200}"
+      STORAGE_DIR: "/app/storage"
+      DATA_DIR: "/app/data"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
+      IMPORT_MOUNT_ON_STARTUP: "${IMPORT_MOUNT_ON_STARTUP:-false}"
+      IMPORT_MOUNT_EXTS: "${IMPORT_MOUNT_EXTS:-}"
+      IMPORT_MAX_MB: "${IMPORT_MAX_MB:-512}"
+      IMPORT_MOUNT_PATHS: "${IMPORT_MOUNT_PATHS:-/imports/1,/imports/2,/imports/3}"
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      - /var/lib/fabvault/db:/app/data
+      - /mnt/fabvault/storage:/app/storage
+      - /mnt/fabvault/storage:/imports/1:ro
+      - /mnt/fabvault/storage:/imports/2:ro
+      - /mnt/fabvault/storage:/imports/3:ro
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: "${VITE_API_URL:-http://localhost:3000}"
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8085}:80"
+    depends_on:
+      api:
+        condition: service_healthy
