@@ -53,47 +53,11 @@ jobs:
             ghcr.io/abeebe/thefabvault-web:latest
             ghcr.io/abeebe/thefabvault-web:${{ steps.sha.outputs.short }}
 
-      - name: Trigger Portainer redeploy via API
-        env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          PORTAINER_STACK_ID: ${{ secrets.PORTAINER_STACK_ID }}
-          PORTAINER_ENDPOINT_ID: ${{ secrets.PORTAINER_ENDPOINT_ID }}
+      - name: Summary
         run: |
-          # Guard: skip gracefully if secrets are not configured.
-          if [ -z "${PORTAINER_URL}" ] || [ -z "${PORTAINER_API_KEY}" ] || \
-             [ -z "${PORTAINER_STACK_ID}" ] || [ -z "${PORTAINER_ENDPOINT_ID}" ]; then
-            echo "WARNING: One or more Portainer secrets are not set."
-            echo "  Required: PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_STACK_ID, PORTAINER_ENDPOINT_ID"
-            echo "Images pushed to ghcr.io successfully."
-            echo "Manual redeploy needed: Portainer stack ${PORTAINER_STACK_ID:-<unset>} on ${PORTAINER_URL:-<unset>}"
-            exit 0
-          fi
-
-          echo "Fetching current stack file from Portainer..."
-          STACK_FILE=$(curl -skf -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            "${PORTAINER_URL}/api/stacks/${PORTAINER_STACK_ID}/file" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['StackFileContent'])")
-
-          if [ -z "${STACK_FILE}" ]; then
-            echo "ERROR: Could not retrieve stack file from Portainer. Manual redeploy needed."
-            exit 1
-          fi
-
-          echo "Redeploying stack ${PORTAINER_STACK_ID} (pull latest images)..."
-          HTTP_STATUS=$(curl -sk -o /tmp/portainer-redeploy.json -w "%{http_code}" \
-            -X PUT \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            -H "Content-Type: application/json" \
-            "${PORTAINER_URL}/api/stacks/${PORTAINER_STACK_ID}?endpointId=${PORTAINER_ENDPOINT_ID}" \
-            -d "{\"stackFileContent\": $(python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' <<< "${STACK_FILE}"), \"pullImage\": true, \"prune\": false}")
-
-          echo "Portainer API response: HTTP ${HTTP_STATUS}"
-          cat /tmp/portainer-redeploy.json || true
-
-          if [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
-            echo "Portainer redeploy triggered successfully."
-          else
-            echo "ERROR: Portainer API returned HTTP ${HTTP_STATUS}. Manual redeploy may be needed."
-            exit 1
-          fi
+          echo "Images pushed to GHCR:"
+          echo "  ghcr.io/abeebe/thefabvault-api:latest"
+          echo "  ghcr.io/abeebe/thefabvault-web:latest"
+          echo ""
+          echo "Redeploy is handled by the VM-side watcher (portainer-image-watcher)."
+          echo "Stack will pull new images automatically within 5 minutes."
