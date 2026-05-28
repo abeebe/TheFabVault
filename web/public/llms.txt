@@ -1,0 +1,20 @@
+# TheFabVault
+
+> Self-hosted digital asset vault for makers, hackers, and hobbyists -- organize 3D print files, GCode, laser cut designs, SVGs, and DXF patterns in one place.
+
+TheFabVault is an open-source, self-hosted application. It provides thumbnail generation, 3D model preview (STL/OBJ/3MF via Three.js), GCode visualization, full-text search, tagging, folder organization, version tracking, and slicer handoff (OrcaSlicer, PrusaSlicer, Bambu Studio, Cura).
+
+## Key Pages
+
+- [Home](https://thefabvault.com/): Product overview and self-hosting instructions
+- [GitHub / Installation](https://thefabvault.com/): Docker-based install docs and deployment guides
+
+## Features Covered
+
+- File management: upload, tag, folder tree, bulk operations, trash/restore
+- 3D model viewer: STL, OBJ, 3MF with Three.js interactive preview
+- GCode viewer: syntax highlighting, slicer stats (print time, filament, temps)
+- DXF/SVG viewer: 2D preview for CNC and laser cut files
+- Projects: group assets with per-project printer/laser/vinyl settings
+- NAS/network mount import: move files from a mounted share into storage
+- Slicer handoff: open any 3D model directly in your installed slicer
