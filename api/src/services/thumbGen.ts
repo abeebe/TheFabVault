@@ -9,6 +9,7 @@ import { extractGCodeThumbnail } from './metaExtract.js';
 import { dxfToSvg } from './dxfToSvg.js';
 import { renderPdfThumbnail } from './pdfThumb.js';
 import { extractLightburnThumbnail } from './lightburnThumb.js';
+import { extract3mfThumbnail } from './threeMfThumb.js';
 import type { AssetRow } from '../types/index.js';
 
 const queue = new PQueue({ concurrency: 4 });
@@ -189,6 +190,29 @@ export async function generateThumb(assetId: string): Promise<void> {
         .jpeg({ quality: 88 })
         .toFile(thumbOut);
       db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
+      return;
+    }
+
+    if (ext === '.3mf') {
+      // 3MFs are zip containers; slicers embed a preview PNG at
+      // Metadata/thumbnail.png. Use that when present — passing the
+      // raw zip to the STL/three.js renderer would treat it as mesh
+      // bytes and OOM Chromium on anything non-trivial.
+      const embedded = await extract3mfThumbnail(filePath);
+      if (embedded) {
+        await sharp(embedded)
+          .resize(512, 512, { fit: 'inside', background: { r: 249, g: 250, b: 251, alpha: 1 } })
+          .flatten({ background: { r: 249, g: 250, b: 251 } })
+          .jpeg({ quality: 88 })
+          .toFile(thumbOut);
+        db.prepare("UPDATE assets SET thumb_status = 'done' WHERE id = ?").run(assetId);
+      } else {
+        // No embedded preview — safer to skip than risk Chromium OOM
+        // on a complex mesh. Asset still renders with the generic
+        // 3D-file icon in the grid.
+        console.warn(`[thumbGen] 3MF ${assetId} has no embedded preview; skipping render`);
+        db.prepare("UPDATE assets SET thumb_status = 'none' WHERE id = ?").run(assetId);
+      }
       return;
     }
 

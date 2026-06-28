@@ -145,6 +145,65 @@ describe('sharp', () => {
   });
 });
 
+describe('3mf thumbnail extractor', () => {
+  it('extracts the embedded PNG from a synthetic .3mf zip', async () => {
+    const { extract3mfThumbnail } = await import('../services/threeMfThumb.js');
+
+    // Generate a real PNG, then build a minimal .3mf (= zip) containing
+    // it at the canonical path. archiver is already a dep for the
+    // download-zip route — reuse it here to avoid a test-only zipper.
+    const archiver = (await import('archiver')).default;
+    const png = await sharp({
+      create: { width: 3, height: 3, channels: 3, background: { r: 99, g: 100, b: 101 } },
+    }).png().toBuffer();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-3mf-'));
+    const file = path.join(dir, 'test.3mf');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(file);
+        const zip = archiver('zip');
+        out.on('close', () => resolve());
+        zip.on('error', reject);
+        zip.pipe(out);
+        zip.append(png, { name: 'Metadata/thumbnail.png' });
+        zip.append('<model/>', { name: '3D/3dmodel.model' });
+        zip.finalize();
+      });
+
+      const out = await extract3mfThumbnail(file);
+      expect(out).not.toBeNull();
+      expect(out!.slice(0, 8).toString('hex')).toBe('89504e470d0a1a0a'); // PNG magic
+      const meta = await sharp(out!).metadata();
+      expect(meta.width).toBe(3);
+      expect(meta.height).toBe(3);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when the 3MF has no embedded preview', async () => {
+    const { extract3mfThumbnail } = await import('../services/threeMfThumb.js');
+    const archiver = (await import('archiver')).default;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-3mf-'));
+    const file = path.join(dir, 'no-thumb.3mf');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(file);
+        const zip = archiver('zip');
+        out.on('close', () => resolve());
+        zip.on('error', reject);
+        zip.pipe(out);
+        zip.append('<model/>', { name: '3D/3dmodel.model' });
+        zip.finalize();
+      });
+      expect(await extract3mfThumbnail(file)).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('lightburn thumbnail extractor', () => {
   it('decodes the embedded PNG from a synthetic .lbrn file', async () => {
     const { extractLightburnThumbnail } = await import('../services/lightburnThumb.js');
