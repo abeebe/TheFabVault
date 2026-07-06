@@ -8,7 +8,10 @@ interface Props {
   allNodes: SubAssemblyOut[];
   allParts: SubAssemblyPartOut[];
   onClose: () => void;
-  onUpdatePart: (part: SubAssemblyPartOut) => void;
+  // Passed straight through to PartRow's onUpdated — must be awaited there
+  // before its `saving` state clears (see PartRow.tsx), so this needs to
+  // return the actual promise, not `void`.
+  onUpdatePart: (part: SubAssemblyPartOut) => Promise<void>;
   onRemovePart: (subAssemblyId: string, assetId: string) => void;
   onEditOverrides: (part: SubAssemblyPartOut) => void;
   onPreview: (part: SubAssemblyPartOut) => void;

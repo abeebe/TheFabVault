@@ -126,3 +126,31 @@ export function getSubtreeIds(db: Database.Database, rootId: string): string[] {
     .all(rootId) as { id: string }[];
   return rows.map((r) => r.id);
 }
+
+// The ungrouped/organized boundary rule, on the removal side: if `assetId`
+// has zero remaining placements anywhere in `projectId`'s manifest, it
+// falls out of "organized" and returns to the ungrouped pool
+// (project_assets). If it's still placed elsewhere (a shared part in a
+// sibling branch), it's left alone. Caller must run the placement DELETE
+// first — this only looks at what's left.
+//
+// Pulled out of routes/subAssemblies.ts's single-part removal handler
+// (DELETE /sub-assembly/:id/part/:assetId) so it's directly unit-testable
+// against an in-memory DB rather than only reachable through an HTTP
+// round-trip, same rationale as services/subAssemblyTree.ts's cycle guard.
+export function returnAssetToUngroupedIfOrphaned(
+  db: Database.Database,
+  projectId: string,
+  assetId: string,
+): void {
+  const stillPlaced = db.prepare(
+    `SELECT 1 FROM sub_assembly_parts p JOIN sub_assemblies sa ON sa.id = p.sub_assembly_id
+     WHERE sa.project_id = ? AND p.asset_id = ?`
+  ).get(projectId, assetId);
+  if (stillPlaced) return;
+
+  db.prepare(
+    `INSERT OR IGNORE INTO project_assets (project_id, asset_id, sort_order, overrides_json)
+     VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_assets WHERE project_id = ?), '{}')`
+  ).run(projectId, assetId, projectId);
+}

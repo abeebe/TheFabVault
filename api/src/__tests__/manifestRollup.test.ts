@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import {
   getSubAssemblyRollups, getProjectRollupTotal, getAllProjectRollups,
-  getSingleProjectManifestInfo, getSubtreeIds,
+  getSingleProjectManifestInfo, getSubtreeIds, returnAssetToUngroupedIfOrphaned,
 } from '../services/manifestRollup.js';
 
 // Minimal in-memory schema — just the tables these tests touch, mirroring
@@ -236,5 +236,51 @@ describe('getSubtreeIds', () => {
     const projectId = makeProject(db);
     const leaf = makeSubAssembly(db, projectId, 'Leaf');
     expect(getSubtreeIds(db, leaf)).toEqual([leaf]);
+  });
+});
+
+describe('returnAssetToUngroupedIfOrphaned — boundary rule on single-part removal (Remy review fix)', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = makeDb(); });
+
+  it('re-inserts a project_assets row when the asset has zero remaining placements', () => {
+    const projectId = makeProject(db);
+    makeSubAssembly(db, projectId, 'Right Foot');
+    const asset = makeAsset(db);
+    // Caller runs the placement DELETE first; by the time this is called
+    // the asset has no rows left in sub_assembly_parts for this project.
+
+    returnAssetToUngroupedIfOrphaned(db, projectId, asset);
+
+    const row = db.prepare('SELECT * FROM project_assets WHERE project_id = ? AND asset_id = ?')
+      .get(projectId, asset);
+    expect(row).toBeTruthy();
+  });
+
+  it('does NOT re-insert when the asset is still placed in a sibling sub-assembly', () => {
+    const projectId = makeProject(db);
+    const leftFoot = makeSubAssembly(db, projectId, 'Left Foot');
+    const greeble = makeAsset(db, 'greeble.stl');
+    // The Right Foot placement was just removed by the caller, but the
+    // same shared part is still placed in Left Foot.
+    placePart(db, leftFoot, greeble, 6, 0);
+
+    returnAssetToUngroupedIfOrphaned(db, projectId, greeble);
+
+    const row = db.prepare('SELECT * FROM project_assets WHERE project_id = ? AND asset_id = ?')
+      .get(projectId, greeble);
+    expect(row).toBeUndefined();
+  });
+
+  it('is idempotent (INSERT OR IGNORE) when called twice for the same orphaned asset', () => {
+    const projectId = makeProject(db);
+    const asset = makeAsset(db);
+
+    returnAssetToUngroupedIfOrphaned(db, projectId, asset);
+    returnAssetToUngroupedIfOrphaned(db, projectId, asset);
+
+    const rows = db.prepare('SELECT * FROM project_assets WHERE project_id = ? AND asset_id = ?')
+      .all(projectId, asset);
+    expect(rows.length).toBe(1);
   });
 });

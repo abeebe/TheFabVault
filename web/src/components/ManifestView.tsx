@@ -351,6 +351,17 @@ export function ManifestView({ project, manifest, loading, error, refresh, onMan
       {addPartsOpen && currentNode && (
         <AssetPicker
           title={`Add parts to ${currentNode.name}`}
+          // Scoped to directParts (this node only), NOT project-wide. This
+          // is deliberate, not an oversight: a literal reading of Reid's UX
+          // spec 4.9 ("exclude assets already in the manifest") would hide
+          // an asset project-wide once placed anywhere, making it
+          // impossible to place a shared part into a second sub-assembly —
+          // that would violate Aaron's locked invariant that shared parts
+          // are links, not exclusive placements (see the PRD boundary-rule
+          // comment atop routes/subAssemblies.ts). The narrower, per-node
+          // exclusion is what resolves that spec-vs-invariant contradiction
+          // in favor of the invariant. Do not "correct" this back to a
+          // project-wide filter.
           existingAssetIds={new Set(directParts.map((p) => p.asset.id))}
           onAdd={(ids) => api.manifest.addParts(currentNode.id, ids)}
           onDone={() => { setAddPartsOpen(false); notifyChanged(); }}

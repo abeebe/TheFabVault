@@ -23,7 +23,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { requireAuth } from '../auth.js';
 import { getDb } from '../db.js';
 import {
-  getSubAssemblyRollups, getProjectRollupTotal, getSubtreeIds,
+  getSubAssemblyRollups, getProjectRollupTotal, getSubtreeIds, returnAssetToUngroupedIfOrphaned,
 } from '../services/manifestRollup.js';
 import { validateReparent } from '../services/subAssemblyTree.js';
 import { thumbExists } from '../services/fileStore.js';
@@ -367,26 +367,28 @@ router.delete('/sub-assembly/:id/part/:assetId', requireAuth, (req: Request, res
     | SubAssemblyRow | undefined;
   if (!sa) { res.status(404).json({ error: 'Sub-assembly not found' }); return; }
 
-  const info = db.prepare('DELETE FROM sub_assembly_parts WHERE sub_assembly_id = ? AND asset_id = ?')
-    .run(req.params.id, req.params.assetId);
-  if (info.changes === 0) { res.status(404).json({ error: 'Part not found' }); return; }
+  // Wrapped in one db.transaction() — mirrors the full sub-assembly delete
+  // above (DELETE /sub-assembly/:id). The placement delete, the "still
+  // placed elsewhere?" orphan check, and the compensating project_assets
+  // insert must commit or roll back together: as three separately
+  // auto-committed statements, a throw between the delete and the
+  // compensating insert could strand the asset in neither pool (Aaron's
+  // never-allowed failure mode).
+  const removed = db.transaction(() => {
+    const info = db.prepare('DELETE FROM sub_assembly_parts WHERE sub_assembly_id = ? AND asset_id = ?')
+      .run(req.params.id, req.params.assetId);
+    if (info.changes === 0) return false;
 
-  // If this asset has no other placements left anywhere in this project's
-  // manifest, it falls out of "organized" — return it to the ungrouped pool
-  // so it never disappears from both (PRD invariant; Reid's UX spec, open
-  // question #1). If it's still placed elsewhere (a shared part), leave it.
-  const stillPlaced = db.prepare(
-    `SELECT 1 FROM sub_assembly_parts p JOIN sub_assemblies s ON s.id = p.sub_assembly_id
-     WHERE s.project_id = ? AND p.asset_id = ?`
-  ).get(sa.project_id, req.params.assetId);
+    // If this asset has no other placements left anywhere in this
+    // project's manifest, it falls out of "organized" — return it to the
+    // ungrouped pool so it never disappears from both (PRD invariant;
+    // Reid's UX spec, open question #1). If it's still placed elsewhere
+    // (a shared part), leave it.
+    returnAssetToUngroupedIfOrphaned(db, sa.project_id, req.params.assetId);
+    return true;
+  })();
 
-  if (!stillPlaced) {
-    db.prepare(
-      `INSERT OR IGNORE INTO project_assets (project_id, asset_id, sort_order, overrides_json)
-       VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_assets WHERE project_id = ?), '{}')`
-    ).run(sa.project_id, req.params.assetId, sa.project_id);
-  }
-
+  if (!removed) { res.status(404).json({ error: 'Part not found' }); return; }
   res.status(204).send();
 });
 

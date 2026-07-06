@@ -59,8 +59,9 @@ export function DeleteSubAssemblyConfirmModal({ target, allNodes, allParts, onCl
         )}
         {blastRadius.nestedCount === 0 && blastRadius.partCount > 0 && (
           <>
-            {blastRadius.partCount} part placement{blastRadius.partCount === 1 ? '' : 's'} will be removed
-            and those files will return to Ungrouped. Printed-count progress on{' '}
+            {blastRadius.partCount} part placement{blastRadius.partCount === 1 ? '' : 's'} will be removed.
+            Files not placed anywhere else in this project return to Ungrouped; a file also used in another
+            sub-assembly stays organized there. Printed-count progress on{' '}
             {blastRadius.partCount === 1 ? 'that placement' : 'those placements'} will be lost. Files stay in your vault.
           </>
         )}
@@ -68,7 +69,9 @@ export function DeleteSubAssemblyConfirmModal({ target, allNodes, allParts, onCl
           <>
             This also deletes {blastRadius.nestedCount} nested sub-assembl{blastRadius.nestedCount === 1 ? 'y' : 'ies'} and
             removes {blastRadius.partCount} part placement{blastRadius.partCount === 1 ? '' : 's'} across all of them.
-            Printed-count progress on those placements will be lost. Files stay in your vault and return to Ungrouped.
+            Printed-count progress on those placements will be lost. Files stay in your vault: files not placed
+            anywhere else in this project return to Ungrouped, files also used in another sub-assembly stay
+            organized there.
           </>
         )}
       </p>

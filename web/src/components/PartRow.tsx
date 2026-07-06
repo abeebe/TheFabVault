@@ -5,7 +5,10 @@ import type { SubAssemblyPartOut } from '../types/index.js';
 
 interface PartRowProps {
   part: SubAssemblyPartOut;
-  onUpdated: (part: SubAssemblyPartOut) => void;
+  // Awaited before `saving` clears (see saveQuantity/setPrintedCount below)
+  // — every wired-up implementation is actually a manifest refetch under
+  // the hood, so the type says so rather than lying with `void`.
+  onUpdated: (part: SubAssemblyPartOut) => Promise<void>;
   onRemoved: () => void;
   onEditOverrides: () => void;
   onPreview: () => void;
@@ -48,7 +51,12 @@ export function PartRow({ part, onUpdated, onRemoved, onEditOverrides, onPreview
     setSaving(true);
     try {
       const updated = await api.manifest.updatePart(part.subAssemblyId, part.asset.id, { quantity: n });
-      onUpdated(updated);
+      // Awaited: onUpdated is wired to a full manifest refetch, and `part`
+      // (this closure's props) won't reflect the new value until that
+      // resolves. Clearing `saving` before then re-enables the control on
+      // stale state — a rapid second click computes its target off the old
+      // quantity/printedCount and gets silently swallowed.
+      await onUpdated(updated);
     } catch (err) {
       console.error('[PartRow] Failed to update quantity:', err);
       setQtyVal(String(part.quantity));
@@ -62,7 +70,9 @@ export function PartRow({ part, onUpdated, onRemoved, onEditOverrides, onPreview
     setSaving(true);
     try {
       const updated = await api.manifest.updatePart(part.subAssemblyId, part.asset.id, { printedCount: n });
-      onUpdated(updated);
+      // See saveQuantity above — same reason this must be awaited before
+      // `saving` clears in `finally`.
+      await onUpdated(updated);
     } catch (err) {
       console.error('[PartRow] Failed to update printed count:', err);
     } finally {
