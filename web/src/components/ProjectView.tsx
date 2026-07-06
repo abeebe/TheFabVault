@@ -27,7 +27,7 @@ interface Props {
 }
 
 export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }: Props) {
-  const { project, loading, refresh, removeAsset, updateOverrides } = useProjectDetail(projectId);
+  const { project, refresh, removeAsset, updateOverrides } = useProjectDetail(projectId);
   // One manifest fetch shared by both the Manifest tab and the Ungrouped
   // tab's "Add to sub-assembly" picker (Reid's UX spec, section 7 — the
   // whole tree loads once per project, not once per tab).
@@ -163,7 +163,21 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
     try { localStorage.setItem(bannerKey, '1'); } catch { /* ignore */ }
   }
 
-  if (loading || !project) {
+  // Deliberately NOT `loading || !project`. useProjectDetail flips `loading`
+  // true on every background refresh too (every manifest edit round-trips
+  // through handleManifestChanged -> refresh()), and this guard used to
+  // swap the ENTIRE subtree for a spinner on each one -- unmounting
+  // ManifestView and wiping its local currentNodeId/breadcrumbPath/
+  // printNextOpen state on remount. That kicked Build Mode back to the
+  // project root and silently closed any open modal on every single edit.
+  // `!project` alone still covers the real "nothing to render yet" case:
+  // project starts as null and only a fetch failure or the pre-fetch state
+  // leaves it null, so the initial-load spinner is unaffected -- verified
+  // by tracing useProjectDetail (initial state project=null, loading=false;
+  // the mount effect's refresh() sets loading=true before project is ever
+  // populated, so this render still has !project true regardless of the
+  // dropped loading clause).
+  if (!project) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <Spinner size="lg" />

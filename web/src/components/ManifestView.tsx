@@ -69,7 +69,16 @@ export function ManifestView({ project, manifest, loading, error, refresh, onMan
     onManifestChanged();
   }
 
-  if (loading || !manifest) {
+  // Same family as the ProjectView fix (see its comment): `loading` from
+  // useManifest also flips true on every background refetch (every edit's
+  // notifyChanged -> refresh()), and blanking this whole view to a
+  // spinner on each one is the identical "loading masks a state-bearing
+  // subtree" bug, just for the manifest fetch instead of the project
+  // fetch. `!manifest` alone still covers the real first-load case:
+  // useManifest is only ever consumed here (verified), manifest starts
+  // null, and the mount effect's refresh() doesn't populate it before
+  // this first render runs.
+  if (!manifest) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <Spinner size="lg" />
