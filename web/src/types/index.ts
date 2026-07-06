@@ -121,7 +121,16 @@ export interface ProjectOut {
   printerSettings: PrinterSettings;
   laserSettings: LaserSettings;
   vinylSettings: VinylSettings;
+  // Count of project_assets rows. Once hasManifest is true, this IS the
+  // "ungrouped" count — files not yet organized into the build manifest.
   assetCount: number;
+  // Build manifest summary (migration v12). hasManifest is false when the
+  // project has no sub-assemblies yet — the flat AssetGrid view is shown
+  // unchanged in that case. manifestPercent is null either when there's no
+  // manifest, or when a manifest exists but zero parts have been placed
+  // anywhere yet ("no parts placed yet" is distinct from "0% printed").
+  hasManifest: boolean;
+  manifestPercent: number | null;
   createdAt: number;
 }
 
@@ -153,6 +162,50 @@ export interface ProjectAssetOut extends AssetOut {
 
 export interface ProjectDetailOut extends ProjectOut {
   assets: ProjectAssetOut[];
+}
+
+// ─── Build Manifest (sub-assemblies) — migration v12 ──────────────────────────
+//
+// Hierarchical breakdown of a project into named sub-assemblies (Right Foot,
+// Dome, Dome Ring nested inside Dome...), each holding "part" placements of
+// existing vault assets with a quantity + printed-count.
+
+export interface SubAssemblyRollup {
+  needed: number;
+  done: number;
+  // null when needed === 0 — "no parts placed yet" is a distinct fact from
+  // "0% of something real".
+  percent: number | null;
+}
+
+export interface SubAssemblyOut {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  name: string;
+  sortOrder: number;
+  createdAt: number;
+  // Rolled up recursively across this node and all of its descendants.
+  rollup: SubAssemblyRollup;
+}
+
+export interface SubAssemblyPartOut {
+  subAssemblyId: string;
+  quantity: number;
+  printedCount: number;
+  sortOrder: number;
+  overrides: ProjectOverrides;
+  asset: AssetOut;
+}
+
+// Whole-manifest payload for one project. Fetched once per project load —
+// Build Mode's breadcrumb drill-down is pure client-side state against this
+// flat tree, never a per-node network call.
+export interface ManifestOut {
+  subAssemblies: SubAssemblyOut[];
+  parts: SubAssemblyPartOut[];
+  projectRollup: SubAssemblyRollup;
+  ungroupedCount: number;
 }
 
 // ─── Misc ─────────────────────────────────────────────────────────────────────

@@ -127,7 +127,19 @@ export interface ProjectOut {
   printerSettings: PrinterSettings;
   laserSettings: LaserSettings;
   vinylSettings: VinylSettings;
+  // assetCount is (and always has been) the count of project_assets rows.
+  // Once a project grows a build manifest (hasManifest === true), this
+  // number IS the "ungrouped" count — files not yet organized into a
+  // sub-assembly — since organizing a file removes its project_assets row.
+  // No separate ungrouped-count field needed; see services/manifestRollup.ts.
   assetCount: number;
+  // Build manifest summary (migration v12). false/null when the project
+  // has zero sub_assemblies rows — the flat, unmodified, "kept as-is"
+  // path the original PRD guarantees. manifestPercent is null when a
+  // manifest exists but zero parts have been placed anywhere yet ("no
+  // parts placed yet" is a distinct fact from "0% of something real").
+  hasManifest: boolean;
+  manifestPercent: number | null;
   createdAt: number;
 }
 
@@ -137,6 +149,71 @@ export interface ProjectAssetOut extends AssetOut {
 
 export interface ProjectDetailOut extends ProjectOut {
   assets: ProjectAssetOut[];
+}
+
+// ─── Build Manifest (sub-assemblies) — migration v12 ──────────────────────────
+//
+// Hierarchical breakdown of a project into named sub-assemblies (Right Foot,
+// Dome, Dome Ring nested inside Dome...), each holding "part" placements of
+// existing vault assets with a quantity + printed-count. See:
+// Reports/sloane-prd-thefabvault-build-manifest-2026-07-06.md (data model)
+// Reports/reid-thefabvault-manifest-ux-2026-07-06.md (UI/IA)
+
+export interface SubAssemblyRow {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  name: string;
+  sort_order: number;
+  created_at: number;
+}
+
+export interface SubAssemblyPartRow {
+  sub_assembly_id: string;
+  asset_id: string;
+  quantity: number;
+  printed_count: number;
+  sort_order: number;
+  overrides_json: string;
+  created_at: number;
+}
+
+export interface SubAssemblyRollup {
+  needed: number;
+  done: number;
+  // null when needed === 0 — "no parts placed yet" is a distinct fact
+  // from "0% of something real" (PRD, progress rollup section).
+  percent: number | null;
+}
+
+export interface SubAssemblyOut {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  name: string;
+  sortOrder: number;
+  createdAt: number;
+  // Rolled up recursively across this node and all of its descendants.
+  rollup: SubAssemblyRollup;
+}
+
+export interface SubAssemblyPartOut {
+  subAssemblyId: string;
+  quantity: number;
+  printedCount: number;
+  sortOrder: number;
+  overrides: ProjectOverrides;
+  asset: AssetOut;
+}
+
+// Whole-manifest payload for one project. Fetched once per project load
+// (Reid's UX spec, section 7): Build Mode's breadcrumb drill-down is pure
+// client-side state against this flat tree, never a per-node network call.
+export interface ManifestOut {
+  subAssemblies: SubAssemblyOut[];
+  parts: SubAssemblyPartOut[];
+  projectRollup: SubAssemblyRollup;
+  ungroupedCount: number;
 }
 
 // ─── Sets (lightweight asset grouping) ────────────────────────────────────────
@@ -254,6 +331,9 @@ export interface SetAssetRow {
   asset_id: string;
   sort_order: number;
 }
+
+// SubAssemblyRow / SubAssemblyPartRow are declared above, alongside their
+// *Out counterparts — see "Build Manifest (sub-assemblies)" section.
 
 export interface ScanResult {
   imported: number;

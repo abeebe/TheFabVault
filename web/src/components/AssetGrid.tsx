@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Trash2, Tag, FolderInput, LayoutGrid, Sparkles } from 'lucide-react';
+import { Trash2, Tag, FolderInput, LayoutGrid, Sparkles, Boxes } from 'lucide-react';
 import { AssetCard } from './AssetCard.js';
 import { TagInput } from './TagInput.js';
 import { Spinner } from './Spinner.js';
 import { ModelViewer } from './ModelViewer.js';
 import { Modal } from './Modal.js';
 import { api } from '../lib/api.js';
-import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides, SetOut } from '../types/index.js';
+import type { AssetOut, FolderOut, ProjectOut, ProjectOverrides, SetOut, SubAssemblyOut } from '../types/index.js';
 
 interface AssetGridProps {
   assets: AssetOut[];
@@ -20,6 +20,16 @@ interface AssetGridProps {
   projectAssetOverrides?: Record<string, ProjectOverrides>;
   projects?: ProjectOut[];
   onAddToProject?: (assetId: string, projectId: string) => void;
+  // Ungrouped tab's own remove action gets a second, more destructive
+  // option alongside the existing "remove from project": also trash the
+  // asset (reuses the existing deleted_at soft-delete). Handles errant
+  // imports and folder-overlap dupes without a manifest detour.
+  onTrashFromProject?: (id: string) => void;
+  // Build manifest — when provided (Ungrouped tab of a manifest-bearing
+  // project), the batch bar and each card's menu gain an "Add to
+  // sub-assembly..." action that opens a picker scoped to these nodes.
+  subAssemblies?: SubAssemblyOut[];
+  onOpenAssignToSubAssembly?: (assetIds: string[]) => void;
   // Sets — when provided, batch bar shows a "Group as set" dropdown
   // with existing sets + a "New set…" entry.
   sets?: SetOut[];
@@ -30,6 +40,7 @@ export function AssetGrid({
   assets, folders, loading, onUpdate, onDelete,
   projectMode, onEditOverrides, projectAssetOverrides,
   projects, onAddToProject,
+  onTrashFromProject, subAssemblies, onOpenAssignToSubAssembly,
   sets, onSetsChanged,
 }: AssetGridProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -66,6 +77,19 @@ export function AssetGrid({
         await api.assets.delete(id);
         onDelete(id);
       } catch {}
+    }
+    setBatchDeleting(false);
+    setBatchDeleteOpen(false);
+    setSelected(new Set());
+  }
+
+  // Ungrouped tab's secondary batch option: remove from project AND trash
+  // the asset, in one action.
+  async function executeBatchTrashFromProject() {
+    if (!onTrashFromProject) return;
+    setBatchDeleting(true);
+    for (const id of selected) {
+      onTrashFromProject(id);
     }
     setBatchDeleting(false);
     setBatchDeleteOpen(false);
@@ -271,6 +295,14 @@ export function AssetGrid({
               >
                 <LayoutGrid size={14} /> Set category
               </button>
+              {projectMode && onOpenAssignToSubAssembly && subAssemblies !== undefined && (
+                <button
+                  onClick={() => onOpenAssignToSubAssembly(Array.from(selected))}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <Boxes size={14} /> Add to sub-assembly...
+                </button>
+              )}
               {!projectMode && (
                 <div className="relative group">
                   <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
@@ -343,6 +375,12 @@ export function AssetGrid({
             onAddToProject={onAddToProject ? (projectId) => onAddToProject(asset.id, projectId) : undefined}
             // project mode: parent handles remove-from-project API call; normal mode: we soft-delete
             onDelete={projectMode ? () => onDelete(asset.id) : () => handleAssetDelete(asset.id)}
+            onTrashFromProject={projectMode && onTrashFromProject ? () => onTrashFromProject(asset.id) : undefined}
+            onOpenAssignToSubAssembly={
+              projectMode && onOpenAssignToSubAssembly && subAssemblies !== undefined
+                ? () => onOpenAssignToSubAssembly([asset.id])
+                : undefined
+            }
           />
         ))}
       </div>
@@ -365,21 +403,39 @@ export function AssetGrid({
             {projectMode ? (
               <>
                 <p className="text-sm text-gray-600 dark:text-gray-300">
-                  The selected files will be removed from this project. They will remain in your vault.
+                  The selected files will be removed from this project. They will remain in your vault
+                  {onTrashFromProject ? ', or you can trash them entirely.' : '.'}
                 </p>
-                <div className="flex justify-end gap-2">
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() => executeBatchDelete()}
+                    disabled={batchDeleting}
+                    className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-orange-200 dark:border-orange-800 hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-60 text-left"
+                  >
+                    <span className="text-sm font-medium text-orange-600 dark:text-orange-400">
+                      {batchDeleting ? 'Removing…' : 'Remove from project'}
+                    </span>
+                    <span className="text-xs text-gray-400 mt-0.5">Files stay in the vault, just no longer attached here</span>
+                  </button>
+                  {onTrashFromProject && (
+                    <button
+                      onClick={() => executeBatchTrashFromProject()}
+                      disabled={batchDeleting}
+                      className="w-full flex flex-col items-start px-4 py-3 rounded-lg border border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 text-left"
+                    >
+                      <span className="text-sm font-medium text-red-600 dark:text-red-400">
+                        {batchDeleting ? 'Removing and trashing…' : 'Remove and trash'}
+                      </span>
+                      <span className="text-xs text-gray-400 mt-0.5">Removes from the project AND moves to Trash — for errant imports or dupes</span>
+                    </button>
+                  )}
+                </div>
+                <div className="flex justify-end">
                   <button
                     onClick={() => setBatchDeleteOpen(false)}
                     className="px-3 py-1.5 text-sm rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
                   >
                     Cancel
-                  </button>
-                  <button
-                    onClick={() => executeBatchDelete()}
-                    disabled={batchDeleting}
-                    className="px-4 py-1.5 text-sm rounded bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-60"
-                  >
-                    {batchDeleting ? 'Removing…' : 'Remove from project'}
                   </button>
                 </div>
               </>

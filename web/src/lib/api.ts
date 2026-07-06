@@ -4,7 +4,7 @@ import type {
   SetOut, SetDetailOut, SetSuggestion,
   PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
   MountSlotStatus, MountConfig, DuplicatesReport, VersionOut,
-  OrphansReport,
+  OrphansReport, ManifestOut, SubAssemblyOut, SubAssemblyPartOut,
 } from '../types/index.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
@@ -289,6 +289,34 @@ export const api = {
 
     updateOverrides: (id: string, assetId: string, overrides: ProjectOverrides): Promise<void> =>
       apiFetch(`/project/${id}/asset/${assetId}/overrides`, { method: 'PATCH', body: JSON.stringify(overrides) }),
+  },
+
+  // Build manifest (sub-assemblies) — Bet 1. Fetch the whole tree once per
+  // project load; Build Mode's drill-down is pure client-side state against
+  // it, never a per-node request.
+  manifest: {
+    get: (projectId: string): Promise<ManifestOut> => apiFetch(`/project/${projectId}/manifest`),
+
+    createSubAssembly: (projectId: string, body: { name: string; parentId?: string }): Promise<SubAssemblyOut> =>
+      apiFetch(`/project/${projectId}/sub-assemblies`, { method: 'POST', body: JSON.stringify(body) }),
+
+    updateSubAssembly: (id: string, body: { name?: string; parentId?: string | null; sortOrder?: number }): Promise<SubAssemblyOut> =>
+      apiFetch(`/sub-assembly/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    deleteSubAssembly: (id: string): Promise<void> =>
+      apiFetch(`/sub-assembly/${id}`, { method: 'DELETE' }),
+
+    addParts: (subAssemblyId: string, assetIds: string[]): Promise<{ added: number }> =>
+      apiFetch(`/sub-assembly/${subAssemblyId}/parts`, { method: 'POST', body: JSON.stringify({ assetIds }) }),
+
+    updatePart: (subAssemblyId: string, assetId: string, body: { quantity?: number; printedCount?: number }): Promise<SubAssemblyPartOut> =>
+      apiFetch(`/sub-assembly/${subAssemblyId}/part/${assetId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    updatePartOverrides: (subAssemblyId: string, assetId: string, overrides: ProjectOverrides): Promise<void> =>
+      apiFetch(`/sub-assembly/${subAssemblyId}/part/${assetId}/overrides`, { method: 'PATCH', body: JSON.stringify(overrides) }),
+
+    removePart: (subAssemblyId: string, assetId: string): Promise<void> =>
+      apiFetch(`/sub-assembly/${subAssemblyId}/part/${assetId}`, { method: 'DELETE' }),
   },
 
   sets: {
