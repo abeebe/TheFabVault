@@ -131,6 +131,39 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_set_assets_set ON set_assets(set_id);
    CREATE INDEX IF NOT EXISTS idx_set_assets_asset ON set_assets(asset_id);`,
+  // v12: sub-assemblies. Hierarchical build-manifest breakdown for a
+  // project (R2D2 -> Right Foot -> parts). Self-referential parent_id
+  // gives infinite nesting, same pattern as folders.parent_id.
+  `CREATE TABLE IF NOT EXISTS sub_assemblies (
+    id         TEXT    PRIMARY KEY,
+    project_id TEXT    NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    parent_id  TEXT    REFERENCES sub_assemblies(id) ON DELETE CASCADE,
+    name       TEXT    NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  -- A "part" is a placement of one asset inside one sub-assembly. It is
+  -- not a copy of the file (asset_id points at the one row in assets).
+  -- quantity = physical prints this placement needs. printed_count =
+  -- how many of those are done. Progress is tracked per placement, not
+  -- per asset — two placements of the same shared asset in two different
+  -- sub-assemblies are two independent counters.
+  CREATE TABLE IF NOT EXISTS sub_assembly_parts (
+    sub_assembly_id TEXT    NOT NULL REFERENCES sub_assemblies(id) ON DELETE CASCADE,
+    asset_id        TEXT    NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    quantity        INTEGER NOT NULL DEFAULT 1 CHECK(quantity >= 1),
+    printed_count   INTEGER NOT NULL DEFAULT 0 CHECK(printed_count >= 0),
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    overrides_json  TEXT    NOT NULL DEFAULT '{}',
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (sub_assembly_id, asset_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sub_assemblies_project    ON sub_assemblies(project_id);
+  CREATE INDEX IF NOT EXISTS idx_sub_assemblies_parent     ON sub_assemblies(parent_id);
+  CREATE INDEX IF NOT EXISTS idx_sub_assembly_parts_sa     ON sub_assembly_parts(sub_assembly_id);
+  CREATE INDEX IF NOT EXISTS idx_sub_assembly_parts_asset  ON sub_assembly_parts(asset_id);`,
 ];
 
 function runMigrations(db: Database.Database): void {

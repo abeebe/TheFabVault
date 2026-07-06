@@ -8,12 +8,17 @@ import type {
   PrinterSettings, LaserSettings, VinylSettings, ProjectOverrides,
 } from '../types/index.js';
 import { thumbExists } from '../services/fileStore.js';
+import { getAllProjectRollups, getSingleProjectManifestInfo } from '../services/manifestRollup.js';
 
 const router = Router();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function projectToOut(row: ProjectRow, assetCount: number): ProjectOut {
+function projectToOut(
+  row: ProjectRow,
+  assetCount: number,
+  manifestInfo: { hasManifest: boolean; manifestPercent: number | null },
+): ProjectOut {
   return {
     id: row.id,
     name: row.name,
@@ -24,6 +29,8 @@ function projectToOut(row: ProjectRow, assetCount: number): ProjectOut {
     laserSettings: JSON.parse(row.laser_settings_json || '{}') as LaserSettings,
     vinylSettings: JSON.parse(row.vinyl_settings_json || '{}') as VinylSettings,
     assetCount,
+    hasManifest: manifestInfo.hasManifest,
+    manifestPercent: manifestInfo.manifestPercent,
     createdAt: row.created_at,
   };
 }
@@ -65,7 +72,14 @@ router.get('/projects', requireAuth, (req: Request, res: Response) => {
     .all() as { project_id: string; cnt: number }[];
   const countMap = new Map(counts.map((c) => [c.project_id, c.cnt]));
 
-  res.json(rows.map((r) => projectToOut(r, countMap.get(r.id) ?? 0)));
+  // One query for every project's manifest rollup — avoids an N+1 per-row
+  // lookup for the sidebar's percent badge (Reid's UX spec, section 4.2).
+  const rollupMap = getAllProjectRollups(db);
+
+  res.json(rows.map((r) => projectToOut(r, countMap.get(r.id) ?? 0, {
+    hasManifest: rollupMap.has(r.id),
+    manifestPercent: rollupMap.get(r.id)?.percent ?? null,
+  })));
 });
 
 // ─── POST /projects ───────────────────────────────────────────────────────────
@@ -106,7 +120,7 @@ router.post('/projects', requireAuth, (req: Request, res: Response) => {
   );
 
   const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as ProjectRow;
-  res.status(201).json(projectToOut(row, 0));
+  res.status(201).json(projectToOut(row, 0, { hasManifest: false, manifestPercent: null }));
 });
 
 // ─── GET /project/:id ─────────────────────────────────────────────────────────
@@ -129,8 +143,9 @@ router.get('/project/:id', requireAuth, (req: Request, res: Response) => {
     overrides: JSON.parse(r.overrides_json || '{}') as ProjectOverrides,
   }));
 
+  const manifestInfo = getSingleProjectManifestInfo(db, row.id);
   const detail: ProjectDetailOut = {
-    ...projectToOut(row, assets.length),
+    ...projectToOut(row, assets.length, manifestInfo),
     assets,
   };
 
@@ -167,7 +182,8 @@ router.patch('/project/:id', requireAuth, (req: Request, res: Response) => {
 
   const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(row.id) as ProjectRow;
   const assetCount = (db.prepare('SELECT COUNT(*) as cnt FROM project_assets WHERE project_id = ?').get(row.id) as { cnt: number }).cnt;
-  res.json(projectToOut(updated, assetCount));
+  const manifestInfo = getSingleProjectManifestInfo(db, row.id);
+  res.json(projectToOut(updated, assetCount, manifestInfo));
 });
 
 // ─── DELETE /project/:id ──────────────────────────────────────────────────────

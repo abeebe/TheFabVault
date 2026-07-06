@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Download, Trash2, Tag, FolderInput, Edit2, FileBox,
-  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders, RefreshCw, LayoutGrid, Heart,
+  Image, File, MoreVertical, CheckSquare, Square, FolderPlus, Sliders, RefreshCw, LayoutGrid, Heart, Boxes,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { TagBadge, TagInput } from './TagInput.js';
@@ -30,6 +30,12 @@ interface AssetCardProps {
   onEditOverrides?: () => void;
   projects?: ProjectOut[];
   onAddToProject?: (projectId: string) => void;
+  // Ungrouped tab (build manifest): a second, more destructive remove
+  // option alongside plain "remove from project" — also trashes the asset.
+  onTrashFromProject?: () => void;
+  // Ungrouped tab (build manifest): opens a picker to place this asset
+  // into a sub-assembly, moving it out of the ungrouped pool.
+  onOpenAssignToSubAssembly?: () => void;
 }
 
 function getFileIcon(mime: string, filename: string) {
@@ -54,6 +60,7 @@ export function AssetCard({
   onDelete,
   projectMode, hasOverrides, onEditOverrides,
   projects, onAddToProject,
+  onTrashFromProject, onOpenAssignToSubAssembly,
 }: AssetCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -357,12 +364,22 @@ export function AssetCard({
                   </div>
                 )}
                 {projectMode && (
-                  <button
-                    onClick={() => { onDelete?.(); setConfirmDelete(false); setMenuOpen(false); }}
-                    className="w-full text-left px-2 py-1.5 rounded text-xs text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 mb-2"
-                  >
-                    Confirm remove
-                  </button>
+                  <div className="flex flex-col gap-1 mb-2">
+                    <button
+                      onClick={() => { onDelete?.(); setConfirmDelete(false); setMenuOpen(false); }}
+                      className="w-full text-left px-2 py-1.5 rounded text-xs text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20"
+                    >
+                      Remove from project
+                    </button>
+                    {onTrashFromProject && (
+                      <button
+                        onClick={() => { onTrashFromProject(); setConfirmDelete(false); setMenuOpen(false); }}
+                        className="w-full text-left px-2 py-1.5 rounded text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                      >
+                        Remove and trash
+                      </button>
+                    )}
+                  </div>
                 )}
                 <button
                   onClick={() => setConfirmDelete(false)}
@@ -374,6 +391,14 @@ export function AssetCard({
             ) : (
               /* ── Normal menu ── */
               <>
+                {projectMode && onOpenAssignToSubAssembly && (
+                  <button
+                    onClick={() => { onOpenAssignToSubAssembly(); setMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
+                  >
+                    <Boxes size={14} /> Add to sub-assembly...
+                  </button>
+                )}
                 {projectMode && onEditOverrides && (
                   <>
                     <button

@@ -297,7 +297,18 @@ export function Sidebar({
                     >
                       <Layers size={13} className="flex-shrink-0 text-gray-400" />
                       <span className="truncate">{p.name}</span>
-                      <span className="ml-auto text-[10px] text-gray-400">{p.assetCount}</span>
+                      {/* Manifest percent badge — shown only when this
+                          project has a build manifest. A second, smaller
+                          badge before the existing asset-count badge; no
+                          icon change on the row itself, since the badge
+                          alone signals "this project has a manifest"
+                          (Reid's UX spec, 4.2). */}
+                      {p.hasManifest && p.manifestPercent !== null && (
+                        <span className="ml-auto text-[10px] text-accent font-medium">{p.manifestPercent}%</span>
+                      )}
+                      <span className={`text-[10px] text-gray-400 ${p.hasManifest && p.manifestPercent !== null ? '' : 'ml-auto'}`}>
+                        {p.assetCount}
+                      </span>
                     </button>
                   ))
                 )}

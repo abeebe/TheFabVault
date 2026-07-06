@@ -391,6 +391,15 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
           />
         ) : selectedProjectId ? (
           <ProjectView
+            // Keyed on projectId so switching projects fully remounts the
+            // view instead of reusing the same instance. Without this,
+            // the previous project's header/manifest can flash on screen
+            // while the new project's data is still loading (found while
+            // removing the over-eager `loading` spinner guard, which used
+            // to mask this). Same-project manifest edits don't change this
+            // key, so ManifestView's drill-down state (currentNodeId /
+            // breadcrumbPath) still survives edits as expected.
+            key={selectedProjectId}
             projectId={selectedProjectId}
             folders={folders}
             onDeleted={() => { setSelectedProjectId(null); refreshProjects(); }}

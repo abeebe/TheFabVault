@@ -1,22 +1,23 @@
 import { useState, useEffect, useCallback } from 'react';
-import {
-  ChevronDown, ChevronRight, Pencil, Trash2, Plus, FolderOpen, X,
-  Check, Search, FileBox, Image, File,
-} from 'lucide-react';
+import { Pencil, Trash2, Plus, FolderOpen, X } from 'lucide-react';
 import { useProjectDetail } from '../hooks/useProjects.js';
+import { useManifest } from '../hooks/useManifest.js';
 import { AssetGrid } from './AssetGrid.js';
 import { AssetOverridesModal } from './AssetOverridesModal.js';
-import { TagInput } from './TagInput.js';
+import { AssetPicker } from './AssetPicker.js';
+import { ManifestView } from './ManifestView.js';
+import { AssignToSubAssemblyModal } from './AssignToSubAssemblyModal.js';
 import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
 import { PrinterSettingsForm, LaserSettingsForm, VinylSettingsForm } from './SettingsForm.js';
 import type {
-  AssetOut, FolderOut, ProjectAssetOut, ProjectOverrides,
+  FolderOut, ProjectAssetOut, ProjectOverrides,
   PrinterSettings, LaserSettings, VinylSettings,
 } from '../types/index.js';
 import { api } from '../lib/api.js';
 
 type SettingsTab = 'printer' | 'laser' | 'vinyl';
+type ContentTab = 'manifest' | 'ungrouped';
 
 interface Props {
   projectId: string;
@@ -26,7 +27,13 @@ interface Props {
 }
 
 export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }: Props) {
-  const { project, loading, refresh, removeAsset, updateOverrides } = useProjectDetail(projectId);
+  const { project, refresh, removeAsset, updateOverrides } = useProjectDetail(projectId);
+  // One manifest fetch shared by both the Manifest tab and the Ungrouped
+  // tab's "Add to sub-assembly" picker (Reid's UX spec, section 7 — the
+  // whole tree loads once per project, not once per tab).
+  const {
+    manifest, loading: manifestLoading, error: manifestError, refresh: refreshManifest,
+  } = useManifest(project?.hasManifest ? projectId : null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('printer');
@@ -39,6 +46,16 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
   const [overridesAsset, setOverridesAsset] = useState<ProjectAssetOut | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addAssetMode, setAddAssetMode] = useState(false);
+  const [contentTab, setContentTab] = useState<ContentTab>('manifest');
+  const [assignTarget, setAssignTarget] = useState<string[] | null>(null); // ungrouped asset ids being assigned
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [creatingFirstSubAssembly, setCreatingFirstSubAssembly] = useState(false);
+  const [firstSubAssemblyName, setFirstSubAssemblyName] = useState('');
+
+  const bannerKey = `tfv-manifest-banner-dismissed-${projectId}`;
+  useEffect(() => {
+    try { setBannerDismissed(localStorage.getItem(bannerKey) === '1'); } catch { /* ignore */ }
+  }, [bannerKey]);
 
   // Local settings copies for editing
   const [printerDraft, setPrinterDraft] = useState<PrinterSettings>({});
@@ -96,13 +113,71 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
     onProjectUpdated();
   }, [removeAsset, onProjectUpdated]);
 
+  // Ungrouped tab's own remove action: remove-from-project, with an
+  // option to also trash the asset (reuses the existing deleted_at
+  // soft-delete). Handles errant imports and folder-overlap dupes without
+  // a manifest detour (PRD, "ungrouped pool has its own remove action").
+  const handleTrashFromProject = useCallback(async (id: string) => {
+    await removeAsset(id);
+    try {
+      await api.assets.delete(id);
+    } catch (err) {
+      console.error('[ProjectView] Failed to trash asset after removing from project:', err);
+    }
+    onProjectUpdated();
+  }, [removeAsset, onProjectUpdated]);
+
   const handleUpdateOverrides = useCallback(async (overrides: ProjectOverrides) => {
     if (!overridesAsset) return;
     await updateOverrides(overridesAsset.id, overrides);
     setOverridesAsset(null);
   }, [overridesAsset, updateOverrides]);
 
-  if (loading || !project) {
+  async function handleManifestChanged() {
+    await refresh(); // project header (percent-printed, ungrouped count)
+    onProjectUpdated(); // sidebar's per-project percent badge
+  }
+
+  async function handleAssignToSubAssembly(subAssemblyId: string) {
+    if (!assignTarget) return;
+    await api.manifest.addParts(subAssemblyId, assignTarget);
+    setAssignTarget(null);
+    await refresh();
+    await refreshManifest();
+    onProjectUpdated();
+  }
+
+  async function handleCreateFirstSubAssembly() {
+    const name = firstSubAssemblyName.trim();
+    if (!name || !project) return;
+    await api.manifest.createSubAssembly(project.id, { name });
+    setCreatingFirstSubAssembly(false);
+    setFirstSubAssemblyName('');
+    await refresh();
+    await refreshManifest();
+    onProjectUpdated();
+  }
+
+  function dismissBanner() {
+    setBannerDismissed(true);
+    try { localStorage.setItem(bannerKey, '1'); } catch { /* ignore */ }
+  }
+
+  // Deliberately NOT `loading || !project`. useProjectDetail flips `loading`
+  // true on every background refresh too (every manifest edit round-trips
+  // through handleManifestChanged -> refresh()), and this guard used to
+  // swap the ENTIRE subtree for a spinner on each one -- unmounting
+  // ManifestView and wiping its local currentNodeId/breadcrumbPath/
+  // printNextOpen state on remount. That kicked Build Mode back to the
+  // project root and silently closed any open modal on every single edit.
+  // `!project` alone still covers the real "nothing to render yet" case:
+  // project starts as null and only a fetch failure or the pre-fetch state
+  // leaves it null, so the initial-load spinner is unaffected -- verified
+  // by tracing useProjectDetail (initial state project=null, loading=false;
+  // the mount effect's refresh() sets loading=true before project is ever
+  // populated, so this render still has !project true regardless of the
+  // dropped loading clause).
+  if (!project) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <Spinner size="lg" />
@@ -115,6 +190,12 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
     { id: 'laser', label: 'Laser' },
     { id: 'vinyl', label: 'Vinyl' },
   ];
+
+  // First-time enablement banner (Reid's UX spec, 4.13) — a project with
+  // files but no manifest yet has no other way to discover this feature.
+  // One-time dismiss per project, not permanently account-wide, since
+  // this is a one-shot nudge, not a recurring notice.
+  const showBanner = !project.hasManifest && project.assetCount > 0 && !bannerDismissed;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -211,50 +292,167 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
             </span>
           )}
         </div>
-      </div>
 
-      {/* Breadcrumb bar */}
-      <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-        <span className="text-gray-900 dark:text-gray-100 font-medium">{project.name}</span>
-        <div className="flex-1" />
-        <span className="text-xs">{project.assetCount} {project.assetCount === 1 ? 'file' : 'files'}</span>
-        <button
-          onClick={() => setAddAssetMode(true)}
-          className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover"
-        >
-          <Plus size={13} />
-          Add files
-        </button>
-      </div>
-
-      {/* Asset grid */}
-      <div className="flex-1 overflow-y-auto p-5">
-        {project.assets.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-48 text-gray-400">
-            <FolderOpen size={40} className="mb-3 opacity-30" />
-            <p className="text-sm">No files in this project yet.</p>
-            <button
-              onClick={() => setAddAssetMode(true)}
-              className="mt-3 text-sm text-accent hover:text-accent-hover"
-            >
-              Add files from vault
-            </button>
+        {/* Manifest summary line — only once a manifest exists. Kept,
+            unmodified below this point for projects with zero
+            sub_assemblies (PRD's "kept as-is" guarantee, made visually
+            true, not just true in the database). */}
+        {project.hasManifest && (
+          <div className="mt-3 flex items-center gap-2">
+            {project.manifestPercent === null ? (
+              <>
+                <div className="h-1.5 w-32 rounded-full bg-gray-100 dark:bg-gray-700 border border-dashed border-gray-300 dark:border-gray-600 flex-shrink-0" />
+                <span className="text-xs text-gray-400">No parts placed yet</span>
+              </>
+            ) : (
+              <>
+                <div className="h-1.5 w-32 rounded-full bg-gray-100 dark:bg-gray-700 overflow-hidden flex-shrink-0">
+                  <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, project.manifestPercent)}%` }} />
+                </div>
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {project.manifestPercent}% printed
+                  {project.assetCount > 0 && ` · ${project.assetCount} file${project.assetCount === 1 ? '' : 's'} still ungrouped`}
+                </span>
+              </>
+            )}
           </div>
-        ) : (
-          <AssetGrid
-            assets={project.assets}
-            folders={folders}
-            loading={false}
-            onUpdate={(updated) => {
-              refresh();
-            }}
-            onDelete={handleRemoveAsset}
-            projectMode
-            onEditOverrides={(asset) => setOverridesAsset(asset as ProjectAssetOut)}
-            projectAssetOverrides={Object.fromEntries(project.assets.map((a) => [a.id, a.overrides]))}
-          />
         )}
       </div>
+
+      {project.hasManifest ? (
+        <>
+          {/* Tab strip */}
+          <div className="px-5 pt-2 flex items-center gap-1 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <button
+              onClick={() => setContentTab('manifest')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
+                contentTab === 'manifest'
+                  ? 'bg-accent text-white'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              Manifest
+            </button>
+            <button
+              onClick={() => setContentTab('ungrouped')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
+                contentTab === 'ungrouped'
+                  ? 'bg-accent text-white'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              Ungrouped
+              <span className={`text-[10px] px-1.5 py-0 rounded-full ${contentTab === 'ungrouped' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'}`}>
+                {project.assetCount}
+              </span>
+            </button>
+            <div className="flex-1" />
+            <button
+              onClick={() => setAddAssetMode(true)}
+              className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover pb-2"
+            >
+              <Plus size={13} /> Add files
+            </button>
+          </div>
+
+          {contentTab === 'manifest' ? (
+            <ManifestView
+              project={project}
+              manifest={manifest}
+              loading={manifestLoading}
+              error={manifestError}
+              refresh={refreshManifest}
+              onManifestChanged={handleManifestChanged}
+            />
+          ) : (
+            <div className="flex-1 overflow-y-auto p-5">
+              {project.assets.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-48 text-gray-400">
+                  <FolderOpen size={40} className="mb-3 opacity-30" />
+                  <p className="text-sm">Everything is organized into the manifest.</p>
+                </div>
+              ) : (
+                <AssetGrid
+                  assets={project.assets}
+                  folders={folders}
+                  loading={false}
+                  onUpdate={() => refresh()}
+                  onDelete={handleRemoveAsset}
+                  onTrashFromProject={handleTrashFromProject}
+                  projectMode
+                  onEditOverrides={(asset) => setOverridesAsset(asset as ProjectAssetOut)}
+                  projectAssetOverrides={Object.fromEntries(project.assets.map((a) => [a.id, a.overrides]))}
+                  subAssemblies={manifest?.subAssemblies ?? []}
+                  onOpenAssignToSubAssembly={(assetIds) => setAssignTarget(assetIds)}
+                />
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* Breadcrumb bar — unchanged from the pre-manifest flat path */}
+          <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <span className="text-gray-900 dark:text-gray-100 font-medium">{project.name}</span>
+            <div className="flex-1" />
+            <span className="text-xs">{project.assetCount} {project.assetCount === 1 ? 'file' : 'files'}</span>
+            <button
+              onClick={() => setAddAssetMode(true)}
+              className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover"
+            >
+              <Plus size={13} />
+              Add files
+            </button>
+          </div>
+
+          {showBanner && (
+            <div className="mx-5 mt-3 flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-accent/10 border border-accent/30 flex-shrink-0">
+              <p className="text-sm text-gray-700 dark:text-gray-200">
+                This project has {project.assetCount} file{project.assetCount === 1 ? '' : 's'}. Break it into sub-assemblies to track build progress by section.
+              </p>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setCreatingFirstSubAssembly(true)}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-accent text-white hover:bg-accent-hover whitespace-nowrap"
+                >
+                  Create first sub-assembly
+                </button>
+                <button onClick={dismissBanner} className="p-1 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Asset grid */}
+          <div className="flex-1 overflow-y-auto p-5">
+            {project.assets.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-48 text-gray-400">
+                <FolderOpen size={40} className="mb-3 opacity-30" />
+                <p className="text-sm">No files in this project yet.</p>
+                <button
+                  onClick={() => setAddAssetMode(true)}
+                  className="mt-3 text-sm text-accent hover:text-accent-hover"
+                >
+                  Add files from vault
+                </button>
+              </div>
+            ) : (
+              <AssetGrid
+                assets={project.assets}
+                folders={folders}
+                loading={false}
+                onUpdate={() => refresh()}
+                onDelete={handleRemoveAsset}
+                onTrashFromProject={handleTrashFromProject}
+                projectMode
+                onEditOverrides={(asset) => setOverridesAsset(asset as ProjectAssetOut)}
+                projectAssetOverrides={Object.fromEntries(project.assets.map((a) => [a.id, a.overrides]))}
+              />
+            )}
+          </div>
+        </>
+      )}
 
       {/* Settings modal */}
       {settingsOpen && (
@@ -296,7 +494,7 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
         </Modal>
       )}
 
-      {/* Overrides modal */}
+      {/* Overrides modal (flat/Ungrouped-tab assets) */}
       {overridesAsset && project && (
         <AssetOverridesModal
           project={project}
@@ -329,259 +527,53 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
       {/* Add assets picker */}
       {addAssetMode && project && (
         <AssetPicker
-          projectId={project.id}
           existingAssetIds={new Set(project.assets.map((a) => a.id))}
+          onAdd={(ids) => api.projects.addAssets(project.id, ids)}
           onDone={() => { setAddAssetMode(false); refresh(); onProjectUpdated(); }}
           onClose={() => setAddAssetMode(false)}
         />
       )}
-    </div>
-  );
-}
 
-/* ── Asset Picker Modal ── */
+      {/* Assign-to-sub-assembly modal, triggered from the Ungrouped tab */}
+      {assignTarget && (
+        <AssignToSubAssemblyModal
+          subAssemblies={manifest?.subAssemblies ?? []}
+          assetCount={assignTarget.length}
+          onClose={() => setAssignTarget(null)}
+          onAssign={handleAssignToSubAssembly}
+        />
+      )}
 
-function getFileIcon(filename: string) {
-  const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
-  if (['.stl', '.obj', '.3mf', '.step', '.stp', '.lys', '.ctb', '.photon'].includes(ext)) return <FileBox size={20} className="text-blue-400" />;
-  if (['.png', '.jpg', '.jpeg', '.webp', '.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2'].includes(ext)) return <Image size={20} className="text-green-400" />;
-  return <File size={20} className="text-gray-400" />;
-}
-
-function AssetPicker({
-  projectId,
-  existingAssetIds,
-  onDone,
-  onClose,
-}: {
-  projectId: string;
-  existingAssetIds: Set<string>;
-  onDone: () => void;
-  onClose: () => void;
-}) {
-  const [allAssets, setAllAssets] = useState<AssetOut[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [adding, setAdding] = useState(false);
-  const [searchFilter, setSearchFilter] = useState('');
-  const [page, setPage] = useState(0);
-
-  const PAGE_SIZE = 10;
-
-  useEffect(() => {
-    api.assets.list({ limit: 500 }).then((result) => {
-      setAllAssets(result.items);
-    }).catch((err) => {
-      console.error('[AssetPicker] Failed to load assets:', err);
-    }).finally(() => setLoading(false));
-  }, []);
-
-  // Reset to first page whenever the filter changes so users don't end up
-  // looking at an empty page after narrowing the result set.
-  useEffect(() => { setPage(0); }, [searchFilter]);
-
-  function toggleAsset(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  async function handleAdd() {
-    if (selected.size === 0) return;
-    setAdding(true);
-    try {
-      await api.projects.addAssets(projectId, Array.from(selected));
-      onDone();
-    } catch (err) {
-      console.error('[AssetPicker] Failed to add assets:', err);
-    } finally {
-      setAdding(false);
-    }
-  }
-
-  const available = allAssets.filter((a) => !existingAssetIds.has(a.id));
-  const filtered = searchFilter
-    ? available.filter((a) =>
-        a.filename.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        (a.originalName && a.originalName.toLowerCase().includes(searchFilter.toLowerCase())) ||
-        a.tags.some((t) => t.toLowerCase().includes(searchFilter.toLowerCase()))
-      )
-    : available;
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const currentPage = Math.min(page, totalPages - 1);
-  const pageStart = currentPage * PAGE_SIZE;
-  const pageItems = filtered.slice(pageStart, pageStart + PAGE_SIZE);
-
-  const allPageSelected = pageItems.length > 0 && pageItems.every((a) => selected.has(a.id));
-
-  function toggleSelectAll() {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (allPageSelected) {
-        for (const a of pageItems) next.delete(a.id);
-      } else {
-        for (const a of pageItems) next.add(a.id);
-      }
-      return next;
-    });
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <h3 className="font-semibold text-gray-900 dark:text-white">Add files to project</h3>
-          <button
-            onClick={onClose}
-            className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
-          >
-            <X size={18} className="text-gray-500" />
-          </button>
-        </div>
-
-        {/* Search */}
-        <div className="px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search files..."
-              value={searchFilter}
-              onChange={(e) => setSearchFilter(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/40"
-            />
-          </div>
-          <div className="mt-2 flex items-center justify-between">
-            <button
-              onClick={toggleSelectAll}
-              disabled={pageItems.length === 0}
-              className="text-xs text-accent hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
-            >
-              {allPageSelected
-                ? `Deselect page (${pageItems.length})`
-                : `Select page (${pageItems.length})`}
-            </button>
-            <span className="text-[11px] text-gray-400">
-              {filtered.length > 0
-                ? `Showing ${pageStart + 1}–${Math.min(pageStart + PAGE_SIZE, filtered.length)} of ${filtered.length}`
-                : ''}
-            </span>
-          </div>
-        </div>
-
-        {/* Asset list */}
-        <div className="flex-1 overflow-y-auto px-5 py-3">
-          {loading ? (
-            <div className="flex justify-center py-8">
-              <Spinner size="md" />
+      {/* First sub-assembly creation, triggered from the enablement banner */}
+      {creatingFirstSubAssembly && (
+        <Modal title="Create first sub-assembly" onClose={() => setCreatingFirstSubAssembly(false)}>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Sub-assembly name</label>
+              <input
+                autoFocus
+                value={firstSubAssemblyName}
+                onChange={(e) => setFirstSubAssemblyName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleCreateFirstSubAssembly(); }}
+                placeholder="e.g. Right Foot"
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
+              />
             </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-8 text-gray-400 text-sm">
-              {available.length === 0 ? 'All vault files are already in this project.' : 'No matching files found.'}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setCreatingFirstSubAssembly(false)} className="px-3 py-1.5 text-sm rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateFirstSubAssembly}
+                disabled={!firstSubAssemblyName.trim()}
+                className="px-4 py-1.5 text-sm rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-60"
+              >
+                Create
+              </button>
             </div>
-          ) : (
-            <div className="space-y-1">
-              {pageItems.map((asset) => {
-                const isSelected = selected.has(asset.id);
-                const thumbUrl = api.assets.thumbUrl(asset);
-                return (
-                  <button
-                    key={asset.id}
-                    onClick={() => toggleAsset(asset.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
-                      isSelected
-                        ? 'bg-accent/10 border border-accent/30'
-                        : 'hover:bg-gray-50 dark:hover:bg-gray-700 border border-transparent'
-                    }`}
-                  >
-                    {/* Thumbnail or icon */}
-                    <div className="w-10 h-10 rounded bg-gray-100 dark:bg-gray-700 flex items-center justify-center flex-shrink-0 overflow-hidden">
-                      {asset.thumbStatus === 'done' && thumbUrl ? (
-                        <img src={thumbUrl} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        getFileIcon(asset.filename)
-                      )}
-                    </div>
-
-                    {/* Info */}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                        {asset.originalName || asset.filename}
-                      </p>
-                      <div className="flex gap-1 mt-0.5">
-                        {asset.tags.slice(0, 3).map((t) => (
-                          <span key={t} className="px-1.5 py-0 rounded text-[10px] bg-gray-100 dark:bg-gray-600 text-gray-500 dark:text-gray-300">
-                            {t}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Checkmark */}
-                    <div className={`w-5 h-5 rounded border flex items-center justify-center flex-shrink-0 ${
-                      isSelected
-                        ? 'bg-accent border-accent text-white'
-                        : 'border-gray-300 dark:border-gray-600'
-                    }`}>
-                      {isSelected && <Check size={12} />}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-center gap-2 px-5 py-2 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
-            <button
-              onClick={() => setPage(currentPage - 1)}
-              disabled={currentPage === 0}
-              className="px-2 py-1 text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              ‹ Prev
-            </button>
-            <span className="text-xs text-gray-500 tabular-nums">
-              Page {currentPage + 1} of {totalPages}
-            </span>
-            <button
-              onClick={() => setPage(currentPage + 1)}
-              disabled={currentPage >= totalPages - 1}
-              className="px-2 py-1 text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              Next ›
-            </button>
           </div>
-        )}
-
-        {/* Footer */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <span className="text-xs text-gray-500">
-            {selected.size > 0 ? `${selected.size} file${selected.size !== 1 ? 's' : ''} selected` : `${filtered.length} files available`}
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="px-3 py-1.5 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleAdd}
-              disabled={selected.size === 0 || adding}
-              className="px-4 py-1.5 text-sm rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {adding ? 'Adding…' : `Add ${selected.size > 0 ? selected.size : ''} file${selected.size !== 1 ? 's' : ''}`}
-            </button>
-          </div>
-        </div>
-      </div>
+        </Modal>
+      )}
     </div>
   );
 }
