@@ -53,7 +53,6 @@ export function ImportFolderModal({ files, projectId, targetParentId, targetLabe
   const [excludedKeys, setExcludedKeys] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [dedupDetailOpen, setDedupDetailOpen] = useState(DEDUP_DETAIL_THRESHOLD_DEFAULT_OPEN);
-  const [starting, setStarting] = useState(false);
 
   // ─── Scan phase ─────────────────────────────────────────────────────────────
 
@@ -169,28 +168,44 @@ export function ImportFolderModal({ files, projectId, targetParentId, targetLabe
     });
   }
 
-  async function handleStartImport() {
-    setStarting(true);
-    try {
-      const includedTreeFiles = scanned.filter((s) => {
-        const node = nodeIndex.get(pathKey(s.segments));
-        return node ? !isExcluded(node, excludedKeys) : true;
-      });
-      const included = [...includedTreeFiles, ...flatFiles];
+  function handleStartImport() {
+    const includedTreeFiles = scanned.filter((s) => {
+      const node = nodeIndex.get(pathKey(s.segments));
+      return node ? !isExcluded(node, excludedKeys) : true;
+    });
+    const included = [...includedTreeFiles, ...flatFiles];
+    const resolutions = buildResolutions(included);
 
-      const resolutions = buildResolutions(included);
-      await startImport({
-        projectId,
-        parentSubAssemblyId: targetParentId,
-        folderName: rootFolderName || 'Import',
-        resolutions,
-        newSubAssemblyTotal: totals.includedNewCount,
-        mergedSubAssemblyTotal: totals.includedMergeCount,
-      });
-      onClose();
-    } finally {
-      setStarting(false);
-    }
+    // Fire-and-forget — startImport()'s promise doesn't resolve until the
+    // ENTIRE batch finishes (up to 500 files), so awaiting it here would
+    // freeze this modal on a disabled "Starting…" button for the whole
+    // import while ImportPanel's own full-screen Modal renders underneath
+    // it at the same time (two stacked overlays). importStore is a
+    // module-level external store: ImportPanel (mounted once at the App
+    // root) picks up the running job the instant setState fires inside
+    // startImport, independent of this component's lifecycle, so we can
+    // close immediately and hand off — matching Reid's UX spec, section 8's
+    // "the modal demotes to the pill on Start."
+    //
+    // The .catch() below is a safety net, not a fix for an expected
+    // failure: every per-file error is already caught and recorded inside
+    // startImport itself (see processOne's try/catch in importStore.ts),
+    // so this should never fire. But since we're not awaiting the
+    // returned promise, any error that DID somehow escape that internal
+    // handling would otherwise surface as an unhandled promise rejection
+    // with nothing the user could act on.
+    void startImport({
+      projectId,
+      parentSubAssemblyId: targetParentId,
+      folderName: rootFolderName || 'Import',
+      resolutions,
+      newSubAssemblyTotal: totals.includedNewCount,
+      mergedSubAssemblyTotal: totals.includedMergeCount,
+    }).catch((err) => {
+      console.error('[ImportFolderModal] startImport failed unexpectedly:', err);
+    });
+
+    onClose();
   }
 
   // ─── Render ─────────────────────────────────────────────────────────────────
@@ -307,11 +322,11 @@ export function ImportFolderModal({ files, projectId, targetParentId, targetLabe
         </button>
         <button
           onClick={handleStartImport}
-          disabled={starting || (totals.includedFileCount + includedFlatCount) === 0}
+          disabled={(totals.includedFileCount + includedFlatCount) === 0}
           className="flex items-center gap-1.5 px-4 py-1.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <FolderInput size={14} />
-          {starting ? 'Starting…' : startLabel}
+          {startLabel}
         </button>
       </div>
     </Modal>

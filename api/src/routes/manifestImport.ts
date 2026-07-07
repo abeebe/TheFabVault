@@ -128,40 +128,55 @@ function parseImportTarget(
 // ─── POST /project/:id/import/upload-file ─────────────────────────────────────
 
 router.post('/project/:id/import/upload-file', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
-  const db = getDb();
-  const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
-  if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
+  // Whole-body try/catch — Remy's review found that deleting the target
+  // project mid-import (a real scenario for a large, long-running batch)
+  // throws an FK-violation out of resolveAndPlace with nothing to catch
+  // it, and an uncaught throw in an Express handler crashes the entire
+  // process (no app-wide error middleware exists yet — see index.ts;
+  // that's a separate ticket, this is just making these two handlers not
+  // take the whole API down). The client's per-file processOne() in
+  // importStore.ts already handles an arbitrary HTTP error gracefully
+  // (marks that one file as 'error' and moves on), so a 500 here degrades
+  // to "this file failed" instead of "every open tab is down."
+  try {
+    const db = getDb();
+    const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+    if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
 
-  const target = parseImportTarget(req, res, req.params.id);
-  if (!target) return;
+    const target = parseImportTarget(req, res, req.params.id);
+    if (!target) return;
 
-  // Server-side hash check — see file header comment. findAssetByHash only
-  // matches non-deleted assets: linking a fresh import to a trashed asset
-  // would silently resurrect it into the manifest, which isn't what
-  // "already in the vault" should mean here.
-  const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
-  const existing = findAssetByHash(db, fileHash);
+    // Server-side hash check — see file header comment. findAssetByHash only
+    // matches non-deleted assets: linking a fresh import to a trashed asset
+    // would silently resurrect it into the manifest, which isn't what
+    // "already in the vault" should mean here.
+    const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+    const existing = findAssetByHash(db, fileHash);
 
-  if (existing) {
+    if (existing) {
+      const { subAssemblyId, createdSubAssemblyIds } = resolveAndPlace(
+        db, req.params.id, target.parentSubAssemblyId, target.pathSegments, existing.id,
+      );
+      res.status(200).json({ asset: assetRowToOut(existing), linked: true, subAssemblyId, createdSubAssemblyIds });
+      return;
+    }
+
+    const originalName = req.file.originalname || 'upload';
+    const filename = sanitizeFilename(originalName);
+    const mimeType = req.file.mimetype || mime.lookup(filename) || 'application/octet-stream';
+    const id = uuidv4();
+    const row = await saveUploadedFile(req.file.buffer, id, filename, mimeType, null, [], null, originalName);
+    if (needsThumbnail(filename)) enqueueThumb(id);
+
     const { subAssemblyId, createdSubAssemblyIds } = resolveAndPlace(
-      db, req.params.id, target.parentSubAssemblyId, target.pathSegments, existing.id,
+      db, req.params.id, target.parentSubAssemblyId, target.pathSegments, row.id,
     );
-    res.status(200).json({ asset: assetRowToOut(existing), linked: true, subAssemblyId, createdSubAssemblyIds });
-    return;
+    res.status(201).json({ asset: assetRowToOut(row), linked: false, subAssemblyId, createdSubAssemblyIds });
+  } catch (err) {
+    console.error('[import/upload-file]', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Import failed' });
   }
-
-  const originalName = req.file.originalname || 'upload';
-  const filename = sanitizeFilename(originalName);
-  const mimeType = req.file.mimetype || mime.lookup(filename) || 'application/octet-stream';
-  const id = uuidv4();
-  const row = await saveUploadedFile(req.file.buffer, id, filename, mimeType, null, [], null, originalName);
-  if (needsThumbnail(filename)) enqueueThumb(id);
-
-  const { subAssemblyId, createdSubAssemblyIds } = resolveAndPlace(
-    db, req.params.id, target.parentSubAssemblyId, target.pathSegments, row.id,
-  );
-  res.status(201).json({ asset: assetRowToOut(row), linked: false, subAssemblyId, createdSubAssemblyIds });
 });
 
 // ─── POST /project/:id/import/link-existing ───────────────────────────────────
@@ -172,23 +187,31 @@ router.post('/project/:id/import/upload-file', requireAuth, upload.single('file'
 // placement created.
 
 router.post('/project/:id/import/link-existing', requireAuth, (req: Request, res: Response) => {
-  const db = getDb();
-  const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  // See the whole-body try/catch note on upload-file above — same
+  // FK-violation-on-mid-import-project-delete failure mode applies here
+  // (resolveAndPlace is shared by both handlers).
+  try {
+    const db = getDb();
+    const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
 
-  const { assetId } = req.body as { assetId?: string };
-  if (!assetId) { res.status(400).json({ error: 'assetId is required' }); return; }
-  const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(assetId) as
-    | AssetRow | undefined;
-  if (!asset) { res.status(404).json({ error: 'Asset not found' }); return; }
+    const { assetId } = req.body as { assetId?: string };
+    if (!assetId) { res.status(400).json({ error: 'assetId is required' }); return; }
+    const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(assetId) as
+      | AssetRow | undefined;
+    if (!asset) { res.status(404).json({ error: 'Asset not found' }); return; }
 
-  const target = parseImportTarget(req, res, req.params.id);
-  if (!target) return;
+    const target = parseImportTarget(req, res, req.params.id);
+    if (!target) return;
 
-  const { subAssemblyId, createdSubAssemblyIds } = resolveAndPlace(
-    db, req.params.id, target.parentSubAssemblyId, target.pathSegments, asset.id,
-  );
-  res.status(200).json({ asset: assetRowToOut(asset), linked: true, subAssemblyId, createdSubAssemblyIds });
+    const { subAssemblyId, createdSubAssemblyIds } = resolveAndPlace(
+      db, req.params.id, target.parentSubAssemblyId, target.pathSegments, asset.id,
+    );
+    res.status(200).json({ asset: assetRowToOut(asset), linked: true, subAssemblyId, createdSubAssemblyIds });
+  } catch (err) {
+    console.error('[import/link-existing]', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Import failed' });
+  }
 });
 
 export default router;

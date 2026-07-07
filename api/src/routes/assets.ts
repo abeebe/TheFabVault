@@ -84,7 +84,12 @@ router.post('/check-hash', requireAuth, (req: Request, res: Response) => {
     return;
   }
   const db = getDb();
-  const row = db.prepare('SELECT * FROM assets WHERE file_hash = ? LIMIT 1').get(hash) as AssetRow | undefined;
+  // deleted_at IS NULL — must match findAssetByHash (services/assetUpload.ts),
+  // which link-existing uses. Without this filter, Preview can promise "already
+  // in your vault, will link" for a hash that only matches a TRASHED asset;
+  // Commit then hard-404s that file (link-existing has no bytes to fall back
+  // to a fresh upload), per Remy's review.
+  const row = db.prepare('SELECT * FROM assets WHERE file_hash = ? AND deleted_at IS NULL LIMIT 1').get(hash) as AssetRow | undefined;
   if (!row) {
     res.json({ exists: false });
     return;
