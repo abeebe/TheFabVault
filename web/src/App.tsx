@@ -6,8 +6,10 @@ import { SearchBar } from './components/SearchBar.js';
 import { ThemeToggle } from './components/ThemeToggle.js';
 import { UploadZone } from './components/UploadZone.js';
 import { UploadPanel } from './components/UploadPanel.js';
+import { ImportPanel } from './components/ImportPanel.js';
 import { GlobalDropZone } from './components/GlobalDropZone.js';
 import { setOnUploaded } from './lib/uploadStore.js';
+import { setOnViewManifestRequested } from './lib/importStore.js';
 import { Spinner } from './components/Spinner.js';
 import { Modal } from './components/Modal.js';
 import { ProjectView } from './components/ProjectView.js';
@@ -237,6 +239,22 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
     setOnUploaded(handleUploaded);
     return () => setOnUploaded(null);
   }, [handleUploaded]);
+
+  // Register the folder-import "View manifest" navigation callback (Result
+  // screen, ImportPanel.tsx) — mirrors setOnUploaded's registration above.
+  // Inlined rather than referencing handleProjectSelect so this effect can
+  // register once at mount (state setters are stable across renders; no
+  // dependency-array churn from a non-memoized handler).
+  useEffect(() => {
+    setOnViewManifestRequested((projectId) => {
+      setSelectedProjectId(projectId);
+      setSelectedSetId(null);
+      setSelectedFolderId(null);
+      setSelectedTags([]);
+      setSearchQuery('');
+    });
+    return () => setOnViewManifestRequested(null);
+  }, []);
 
   // Wrap removeAsset so deleting (trashing) an asset also refreshes sidebar
   // project counts — the deleted asset may have been a member of a project.
@@ -628,6 +646,10 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
 
       {/* Upload progress panel — mounted at root so it survives view changes */}
       <UploadPanel />
+
+      {/* Folder-import progress panel — same reasoning, mounted at root so
+          a large import survives navigating away from its project. */}
+      <ImportPanel />
 
       {/* Auto-detect Sets modal */}
       <SetSuggestions

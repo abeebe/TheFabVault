@@ -136,7 +136,11 @@ export function cancelDupes(): void {
 // memory and lets us report incremental progress via the optional
 // `onProgress` callback. Uses js-sha256 because Web Crypto's `digest`
 // is one-shot only.
-async function sha256Hex(
+//
+// Exported so lib/importStore.ts (folder-tree import, Bet 2) can reuse
+// this verbatim for its own Scan-phase hashing pass instead of a second,
+// divergent implementation — same reasoning as reusing checkHash() as-is.
+export async function sha256Hex(
   file: File,
   onProgress?: (bytesHashed: number) => void,
 ): Promise<string> {

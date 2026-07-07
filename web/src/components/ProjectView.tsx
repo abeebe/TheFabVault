@@ -7,6 +7,7 @@ import { AssetOverridesModal } from './AssetOverridesModal.js';
 import { AssetPicker } from './AssetPicker.js';
 import { ManifestView } from './ManifestView.js';
 import { AssignToSubAssemblyModal } from './AssignToSubAssemblyModal.js';
+import { ImportFolderButton } from './ImportFolderModal.js';
 import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
 import { PrinterSettingsForm, LaserSettingsForm, VinylSettingsForm } from './SettingsForm.js';
@@ -15,6 +16,7 @@ import type {
   PrinterSettings, LaserSettings, VinylSettings,
 } from '../types/index.js';
 import { api } from '../lib/api.js';
+import { subscribeProjectImports } from '../lib/importStore.js';
 
 type SettingsTab = 'printer' | 'laser' | 'vinyl';
 type ContentTab = 'manifest' | 'ungrouped';
@@ -137,6 +139,21 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
     await refresh(); // project header (percent-printed, ungrouped count)
     onProjectUpdated(); // sidebar's per-project percent badge
   }
+
+  // A folder import (lib/importStore.ts) may finish while this project is
+  // no longer the selected view (Aaron navigated away while a large
+  // import ran in the background pill), so this can't rely on the Result
+  // screen's own refresh calls alone — subscribe directly so the manifest
+  // and project header catch up whenever this project is the one that
+  // just got imported into, whether or not Aaron is watching.
+  useEffect(() => {
+    return subscribeProjectImports(projectId, () => {
+      refresh();
+      refreshManifest();
+      onProjectUpdated();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   async function handleAssignToSubAssembly(subAssemblyId: string) {
     if (!assignTarget) return;
@@ -391,7 +408,10 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
         </>
       ) : (
         <>
-          {/* Breadcrumb bar — unchanged from the pre-manifest flat path */}
+          {/* Breadcrumb bar — unchanged from the pre-manifest flat path,
+              plus the flagship folder-import entry point (Reid's UX spec,
+              section 3): reachable the instant a project is created,
+              before a single file exists in it. */}
           <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
             <span className="text-gray-900 dark:text-gray-100 font-medium">{project.name}</span>
             <div className="flex-1" />
@@ -403,6 +423,14 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
               <Plus size={13} />
               Add files
             </button>
+            <ImportFolderButton
+              projectId={project.id}
+              targetParentId={null}
+              targetLabel="Ungrouped"
+              existingSubAssemblies={[]}
+              label="Import folder..."
+              className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover cursor-pointer"
+            />
           </div>
 
           {showBanner && (
@@ -417,6 +445,14 @@ export function ProjectView({ projectId, folders, onDeleted, onProjectUpdated }:
                 >
                   Create first sub-assembly
                 </button>
+                <ImportFolderButton
+                  projectId={project.id}
+                  targetParentId={null}
+                  targetLabel="Ungrouped"
+                  existingSubAssemblies={[]}
+                  label="Import folder..."
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-accent/40 text-accent hover:bg-accent/10 whitespace-nowrap cursor-pointer"
+                />
                 <button onClick={dismissBanner} className="p-1 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                   <X size={14} />
                 </button>

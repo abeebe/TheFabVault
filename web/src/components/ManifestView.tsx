@@ -11,6 +11,7 @@ import { PrintNextModal } from './PrintNextModal.js';
 import { DeleteSubAssemblyConfirmModal } from './DeleteSubAssemblyConfirmModal.js';
 import { AssetOverridesModal } from './AssetOverridesModal.js';
 import { ModelViewer } from './ModelViewer.js';
+import { ImportFolderButton } from './ImportFolderModal.js';
 import { Spinner } from './Spinner.js';
 import type {
   ProjectDetailOut, SubAssemblyOut, SubAssemblyPartOut, AssetOut, ManifestOut,
@@ -266,6 +267,14 @@ export function ManifestView({ project, manifest, loading, error, refresh, onMan
                 >
                   + Add parts
                 </button>
+                <ImportFolderButton
+                  projectId={project.id}
+                  targetParentId={currentNode.id}
+                  targetLabel={currentNode.name}
+                  existingSubAssemblies={subAssemblies}
+                  label="+ Import folder"
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer"
+                />
                 <button
                   onClick={() => setPrintNextOpen(true)}
                   className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -283,7 +292,15 @@ export function ManifestView({ project, manifest, loading, error, refresh, onMan
         )}
 
         {!currentNode && (
-          <div className="flex items-center justify-end mb-3">
+          <div className="flex items-center justify-end gap-3 mb-3">
+            <ImportFolderButton
+              projectId={project.id}
+              targetParentId={null}
+              targetLabel="Ungrouped"
+              existingSubAssemblies={subAssemblies}
+              label="Import folder..."
+              className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-accent cursor-pointer"
+            />
             <button onClick={() => setOrganizeOpen(true)} className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-accent">
               <LayoutList size={13} /> Organize...
             </button>

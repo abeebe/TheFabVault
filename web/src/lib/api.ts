@@ -5,6 +5,7 @@ import type {
   PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
   MountSlotStatus, MountConfig, DuplicatesReport, VersionOut,
   OrphansReport, ManifestOut, SubAssemblyOut, SubAssemblyPartOut,
+  ImportPlacementResult,
 } from '../types/index.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
@@ -317,6 +318,66 @@ export const api = {
 
     removePart: (subAssemblyId: string, assetId: string): Promise<void> =>
       apiFetch(`/sub-assembly/${subAssemblyId}/part/${assetId}`, { method: 'DELETE' }),
+
+    // Folder-tree import (Bet 2) — routes/manifestImport.ts. One call per
+    // file, matching the existing upload worker-pool's per-file shape so
+    // Commit-phase progress is observable file-by-file (Reid's UX spec,
+    // section 7), not one opaque batch call.
+    importUploadFile: (
+      projectId: string,
+      file: File,
+      opts: {
+        pathSegments: string[];
+        parentSubAssemblyId: string | null;
+        onProgress?: (loaded: number, total: number) => void;
+      },
+    ): Promise<ImportPlacementResult> => {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('pathSegments', JSON.stringify(opts.pathSegments));
+      if (opts.parentSubAssemblyId) fd.append('parentSubAssemblyId', opts.parentSubAssemblyId);
+
+      if (!opts.onProgress) {
+        return apiFetch(`/project/${projectId}/import/upload-file`, { method: 'POST', body: fd });
+      }
+
+      // XHR path for upload progress — same pattern as assets.upload above.
+      return new Promise<ImportPlacementResult>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const token = getToken();
+        xhr.open('POST', `${API_BASE}/project/${projectId}/import/upload-file`);
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) opts.onProgress!(e.loaded, e.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status === 401) {
+            localStorage.removeItem('mv_token');
+            window.dispatchEvent(new Event('mv:unauthorized'));
+            reject(new Error('Unauthorized'));
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText) as ImportPlacementResult); }
+            catch (err) { reject(err); }
+          } else {
+            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload aborted'));
+        xhr.send(fd);
+      });
+    },
+
+    importLinkExisting: (
+      projectId: string,
+      body: { assetId: string; pathSegments: string[]; parentSubAssemblyId: string | null },
+    ): Promise<ImportPlacementResult> =>
+      apiFetch(`/project/${projectId}/import/link-existing`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
 
   sets: {
