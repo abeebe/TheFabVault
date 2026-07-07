@@ -19,6 +19,7 @@ import {
 } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
 import { extractMeta } from '../services/metaExtract.js';
+import { saveUploadedFile, needsThumbnail, findAssetByHash } from '../services/assetUpload.js';
 import type { AssetOut, AssetRow, FolderRow, VersionRow, VersionOut } from '../types/index.js';
 
 const router = Router();
@@ -27,17 +28,6 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
 });
-
-const THUMB_ELIGIBLE_EXTS = new Set([
-  '.stl', '.obj', '.3mf',
-  '.svg', '.dxf', '.pdf', '.lbrn', '.lbrn2',
-  '.png', '.jpg', '.jpeg', '.webp',
-  '.gcode', '.gc', '.g',
-]);
-
-function needsThumbnail(filename: string): boolean {
-  return THUMB_ELIGIBLE_EXTS.has(path.extname(filename).toLowerCase());
-}
 
 function toOut(row: AssetRow): AssetOut {
   const tags: string[] = JSON.parse(row.tags_json || '[]');
@@ -78,51 +68,10 @@ function toVersionOut(row: VersionRow): VersionOut {
   };
 }
 
-async function saveUploadedFile(
-  buffer: Buffer,
-  assetId: string,
-  filename: string,
-  mimeType: string,
-  folderId: string | null,
-  tags: string[],
-  notes: string | null,
-  originalName: string | null,
-  sourcePath: string | null = null,
-): Promise<AssetRow> {
-  const db = getDb();
-
-  const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
-
-  db.prepare(
-    `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, notes, source_path, thumb_status, meta_json, file_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    assetId, filename, originalName, mimeType, buffer.length,
-    folderId ?? null, JSON.stringify(tags), notes ?? null, sourcePath,
-    needsThumbnail(filename) ? 'pending' : 'none', '{}', fileHash,
-  );
-
-  const dest = assetFilePath(assetId, filename);
-  fs.writeFileSync(dest, buffer);
-
-  const size = fs.statSync(dest).size;
-  db.prepare('UPDATE assets SET size = ? WHERE id = ?').run(size, assetId);
-
-  // Run metadata extraction in the background so large 3D files don't block
-  // the upload response. The row is returned immediately with meta_json='{}'
-  // and updated once extraction finishes.
-  void extractMeta(dest)
-    .then((meta) => {
-      getDb()
-        .prepare('UPDATE assets SET meta_json = ? WHERE id = ?')
-        .run(JSON.stringify(meta), assetId);
-    })
-    .catch((err) => {
-      console.warn(`[assets] Meta extraction failed for ${assetId}:`, err);
-    });
-
-  return db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow;
-}
+// saveUploadedFile / needsThumbnail live in services/assetUpload.ts now —
+// shared with the folder-import batch endpoints (routes/manifestImport.ts)
+// so a genuinely-new file is created exactly the same way regardless of
+// whether it arrived via the single-file upload button or a folder import.
 
 // ─── POST /check-hash ─────────────────────────────────────────────────────────
 // Check if a file with a given SHA-256 hash already exists in the vault.

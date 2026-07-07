@@ -208,6 +208,22 @@ export interface ManifestOut {
   ungroupedCount: number;
 }
 
+// ─── Folder-tree import (Bet 2) ────────────────────────────────────────────────
+// Response shape shared by both POST /project/:id/import/upload-file and
+// POST /project/:id/import/link-existing (routes/manifestImport.ts).
+
+export interface ImportPlacementResult {
+  asset: AssetOut;
+  // false only for a genuinely-new file (upload-file, no hash match).
+  // link-existing always returns true.
+  linked: boolean;
+  subAssemblyId: string | null;
+  // Ids of any sub-assembly nodes newly created while resolving this
+  // file's path — empty when every level already existed. Lets the Commit
+  // UI show a live "N of M sub-assemblies created" count without guessing.
+  createdSubAssemblyIds: string[];
+}
+
 // ─── Misc ─────────────────────────────────────────────────────────────────────
 
 export interface LoginResponse {
