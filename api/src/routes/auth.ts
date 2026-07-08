@@ -11,13 +11,39 @@ const router = Router();
 // ─── Login rate limiting ─────────────────────────────────────────────────────
 // In-memory sliding-window limiter, per source IP. No new dependency
 // (no express-rate-limit/Redis) — this is a single-process, single-admin,
-// LAN/Tailscale-only app, so an in-memory map is the right scope. Note:
-// if the app is ever put behind a proxy without `app.set('trust proxy', …)`
-// configured to match the actual proxy chain, req.ip may collapse to one
-// upstream address for all clients — that's an infra-config concern
-// separate from this diff, not fixed here.
-const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const LOGIN_MAX_ATTEMPTS = 10;
+// LAN/Tailscale-only app, so an in-memory map is the right scope.
+//
+// req.ip currently reports the raw TCP peer address — there is no
+// `app.set('trust proxy', …)` anywhere in index.ts (Express default:
+// trust proxy = false). Behind NPM that collapses every real client onto
+// NPM's one address, so the attempt budget is effectively shared across
+// all legitimate users rather than per-attacker — coarser than ideal,
+// but SAFE: with trust proxy off, the app ignores X-Forwarded-For
+// entirely, so nothing can forge that header to dodge the limiter.
+//
+// DO NOT "fix" this by turning on trust proxy on its own. docker-
+// compose.production.yml also publishes the api container's port
+// directly on the host, independent of the NPM/web layer (tracked as
+// backlog #2060 — unauthenticated /internal/asset-raw disclosure via
+// that same exposure). While #2060 is open, a LAN-local client can
+// bypass NPM and hit this Express app directly; if trust proxy trusted
+// X-Forwarded-For from that path, the same client could forge a fresh
+// IP on every login attempt and fully defeat this limiter — a net
+// regression, not a hardening. Vera's ruling on re-review (see
+// Reports/vera-fabvault-auth-migration-reverify-2026-07-08.md, "Ruling
+// on the req.ip/trust-proxy question"): once #2060's direct-port
+// exposure is closed (host stops publishing the raw api port; only NPM
+// can reach this app), pin `app.set('trust proxy', '10.10.5.16')` — NPM's
+// exact address, never a bare boolean or `1` — in the SAME change that
+// closes #2060. Until then, leave trust proxy unset; that is the safer
+// of the two configurations given the current compose topology, not a
+// gap to close opportunistically on its own.
+//
+// LOGIN_WINDOW_MS/LOGIN_MAX_ATTEMPTS are exported so the test suite
+// (__tests__/auth.test.ts) asserts against the real threshold instead of
+// a hardcoded duplicate that could silently drift from this file.
+export const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+export const LOGIN_MAX_ATTEMPTS = 10;
 const loginAttempts = new Map<string, number[]>();
 
 function checkRateLimit(ip: string): boolean {
