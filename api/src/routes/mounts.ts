@@ -28,14 +28,23 @@ router.get('/admin/mounts', requireAdmin, (_req: Request, res: Response) => {
     const bySlot: Record<number, MountConfig> = {};
     for (const c of configs) bySlot[c.slot] = c;
 
-    // Return status for all 3 slots (including unconfigured ones)
+    // Return status for all 3 slots (including unconfigured ones).
+    // Redact the plaintext share password — it was previously returned
+    // as-is on every GET (browser memory, dev tools, any XSS on the
+    // admin page). Only mountShare() (server-side, below) ever needs
+    // the real value; the UI only needs to know whether one is set.
     const slots = ([1, 2, 3] as MountSlot[]).map((slot) => {
       const cfg = bySlot[slot] ?? null;
+      let safeCfg: (Omit<MountConfig, 'password'> & { hasPassword: boolean }) | null = null;
+      if (cfg) {
+        const { password, ...rest } = cfg;
+        safeCfg = { ...rest, hasPassword: !!password };
+      }
       return {
         slot,
         mountPoint: getMountPoint(slot),
         mounted: status[slot] ?? false,
-        config: cfg,
+        config: safeCfg,
       };
     });
 
@@ -73,8 +82,8 @@ router.post('/admin/mounts', requireAdmin, async (req: Request, res: Response) =
   try {
     const db = getDb();
     const existing = db
-      .prepare('SELECT id FROM mount_configs WHERE slot = ?')
-      .get(slot) as { id: string } | undefined;
+      .prepare('SELECT id, password FROM mount_configs WHERE slot = ?')
+      .get(slot) as { id: string; password: string | null } | undefined;
 
     const enabledVal = enabled === false || enabled === 0 ? 0 : 1;
 
@@ -96,6 +105,14 @@ router.post('/admin/mounts', requireAdmin, async (req: Request, res: Response) =
     }
 
     if (existing) {
+      // The GET response no longer returns the real password (redacted —
+      // see above), so the admin UI can no longer prefill it on edit. A
+      // blank password field on an UPDATE now means "leave it unchanged"
+      // rather than "clear it" — otherwise every edit that doesn't retype
+      // the password (renaming the slot, flipping enabled, etc.) would
+      // silently wipe the stored share credential. To intentionally clear
+      // a password, delete and recreate the mount slot.
+      const passwordToStore = password ? password : existing.password;
       db.prepare(`
         UPDATE mount_configs
         SET name = ?, type = ?, host = ?, remote_path = ?,
@@ -104,7 +121,7 @@ router.post('/admin/mounts', requireAdmin, async (req: Request, res: Response) =
         WHERE slot = ?
       `).run(
         name, type, host, remote_path,
-        username ?? null, password ?? null, mount_opts ?? null, enabledVal, roleVal,
+        username ?? null, passwordToStore, mount_opts ?? null, enabledVal, roleVal,
         slot,
       );
     } else {

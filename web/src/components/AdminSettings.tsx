@@ -147,7 +147,11 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
         host: existing.config.host,
         remote_path: existing.config.remote_path,
         username: existing.config.username ?? '',
-        password: existing.config.password ?? '',
+        // The server no longer returns the real password (redacted — see
+        // api/src/routes/mounts.ts). Always start blank on edit; leaving
+        // it blank on save now means "keep the existing password"
+        // (see the placeholder text on the input below), not "clear it".
+        password: '',
         mount_opts: existing.config.mount_opts ?? '',
         enabled: existing.config.enabled === 1,
         role: existing.config.role ?? 'import',
@@ -617,7 +621,11 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                                             password: e.target.value,
                                           }))
                                         }
-                                        placeholder="leave blank for guest"
+                                        placeholder={
+                                          mounts.find((m) => m.slot === editingSlot)?.config?.hasPassword
+                                            ? 'leave blank to keep existing password'
+                                            : 'leave blank for guest'
+                                        }
                                         className="w-full px-2.5 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent"
                                       />
                                     </div>

@@ -18,15 +18,21 @@ function getStorageDir(): string {
   return process.env.STORAGE_DIR ?? './data/storage';
 }
 
+// Auth (username/password/JWT secret) intentionally does NOT live here.
+// AUTH_USERNAME/AUTH_PASSWORD are read directly (once, at boot) only by
+// db.ts's one-time seed function — they are bootstrap input, not ongoing
+// config. The JWT secret is DB-persisted and resolved via db.ts's
+// getJwtSecret(); there is no literal-string fallback anywhere (that was
+// the 'changeme-replace-in-production' hardcoded secret this migration
+// removes — see Reports/vera-fabvault-auth-migration-security-review-2026-07-08.md,
+// "Hardcoded fallback JWT signing secret"). Keeping auth resolution out of
+// this plain config object on purpose: it removes the shape that let
+// `config.authEnabled` become a silent fail-open switch. Auth is now
+// always enforced by requireAuth/requireAdmin (api/src/auth.ts) checking
+// a live `users` row — there's no boolean gate here to short-circuit.
 export const config = {
   port: parseInt(process.env.PORT ?? '3000', 10),
-  jwtSecret: process.env.JWT_SECRET ?? 'changeme-replace-in-production',
   jwtTtl: parseInt(process.env.JWT_TTL ?? '43200', 10),
-  authUsername: process.env.AUTH_USERNAME ?? '',
-  authPassword: process.env.AUTH_PASSWORD ?? '',
-  get authEnabled() {
-    return !!(this.authUsername && this.authPassword);
-  },
   get storageDir() {
     return getStorageDir();
   },

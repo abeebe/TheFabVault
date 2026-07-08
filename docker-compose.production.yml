@@ -9,10 +9,19 @@
 #   /app/data     → /var/lib/fabvault/db   (ext4 local disk — SQLite requires POSIX locking)
 #
 # Required env vars (set in Portainer stack environment):
-#   AUTH_USERNAME, AUTH_PASSWORD, JWT_SECRET, JWT_TTL
+#   AUTH_USERNAME, AUTH_PASSWORD — one-time bootstrap only (migration v13).
+#     Seed the initial admin into the `users` table on first boot only;
+#     ignored on every later boot once that row exists. Harmless to leave
+#     set, or remove after the first successful-seed log line. JWT_TTL
+#     stays a plain env var (losing it just forces re-login, not a lockout).
+#   JWT_TTL
 #   CORS_ORIGINS, VITE_API_URL (baked into web image at build time by GHA)
 #   API_PORT (default: 3005), WEB_PORT (default: 8085)
 #   IMPORT_MOUNT_ON_STARTUP, IMPORT_MOUNT_EXTS, IMPORT_MAX_MB, IMPORT_MOUNT_PATHS
+#
+# JWT_SECRET is no longer required — if unset, one is generated and
+# persisted in the DB (system_config.jwtSecret) on first boot. There is
+# no hardcoded fallback secret in the app (removed in migration v13).
 #
 # GHA secrets required:
 #   PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_STACK_ID, PORTAINER_ENDPOINT_ID

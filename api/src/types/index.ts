@@ -261,6 +261,19 @@ export interface HealthResponse {
 
 // ─── DB row types ─────────────────────────────────────────────────────────────
 
+// Admin users (migration v13 — env-to-DB auth migration). Single role
+// today ('admin'); the CHECK constraint exists so a future multi-user
+// pass doesn't need a breaking migration, but the API surface is
+// single-admin for now (no users-list UI, no invite flow, no RBAC).
+export interface UserRow {
+  id: string;
+  username: string;
+  password_hash: string; // 'scrypt:N:r:p:saltHex:hashHex' — see passwords.ts
+  role: 'admin';
+  created_at: number;
+  updated_at: number;
+}
+
 export interface AssetRow {
   id: string;
   filename: string;
