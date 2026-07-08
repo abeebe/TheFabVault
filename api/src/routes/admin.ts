@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { requireAdmin } from '../auth.js';
-import { getDb } from '../db.js';
+import { adminExists, getDb } from '../db.js';
 import { config } from '../config.js';
 import { getStorageBreakdown, formatBytes } from '../services/storageStats.js';
 import { assetFilePath, thumbExists } from '../services/fileStore.js';
@@ -50,7 +50,11 @@ router.get('/admin/config', requireAdmin, (_req: Request, res: Response) => {
       },
       config: {
         maxUploadMb: config.importMaxMb,
-        authEnabled: config.authEnabled,
+        // This route is requireAdmin-gated, so reaching it already implies
+        // an admin is authenticated — adminExists() will always be true
+        // here in practice. Reported via the real check anyway rather than
+        // a hardcoded literal, for an honest diagnostic value.
+        authEnabled: adminExists(),
         corsOrigins: config.corsOrigins,
       },
     });

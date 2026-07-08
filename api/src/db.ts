@@ -1,9 +1,14 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { config } from './config.js';
+import { hashPassword } from './passwords.js';
+import type { UserRow } from './types/index.js';
 
 let _db: Database.Database | null = null;
+let _jwtSecret: string | null = null;
 
 const MIGRATIONS: string[] = [
   // v1: full initial schema
@@ -164,6 +169,23 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_sub_assemblies_parent     ON sub_assemblies(parent_id);
   CREATE INDEX IF NOT EXISTS idx_sub_assembly_parts_sa     ON sub_assembly_parts(sub_assembly_id);
   CREATE INDEX IF NOT EXISTS idx_sub_assembly_parts_asset  ON sub_assembly_parts(asset_id);`,
+  // v13: admin users — env-to-DB auth migration. Moves AUTH_USERNAME/
+  // AUTH_PASSWORD off the stack env (a Portainer redeploy wiping the
+  // `environment:` block previously caused a fail-OPEN state — see
+  // Reports/kit-fabvault-env-to-db-auth-scoping-2026-07-08.md §0 and
+  // Reports/vera-fabvault-auth-migration-security-review-2026-07-08.md).
+  // `role` is CHECK-constrained to a single value today (this app has
+  // one admin, no multi-user concept elsewhere in the schema) so a
+  // future multi-user pass doesn't need a breaking migration — no
+  // users-list UI, invite flow, or RBAC is being added in this pass.
+  `CREATE TABLE IF NOT EXISTS users (
+    id            TEXT    PRIMARY KEY,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    role          TEXT    NOT NULL DEFAULT 'admin' CHECK(role IN ('admin')),
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
+  );`,
 ];
 
 function runMigrations(db: Database.Database): void {
@@ -175,14 +197,137 @@ function runMigrations(db: Database.Database): void {
   }
 }
 
+// ─── Auth bootstrap (migration v13) ────────────────────────────────────────
+//
+// Runs once, synchronously, inside getDb() right after migrations — i.e.
+// before the HTTP server's listen callback returns control to the event
+// loop, so no request can be dispatched before this has completed.
+//
+// Deliberately NOT modeled on the getStorageDir() try/catch-fall-through
+// pattern above: that pattern is correct for storageDir (worst case: wrong
+// folder) and wrong for anything auth-shaped (worst case: wide open). Both
+// functions below only ever produce two outcomes — succeed, or leave the
+// state such that every protected route denies — never a silent bypass.
+
+/**
+ * One-time seed of the initial admin from env, only when `users` is
+ * empty. Idempotent: once a row exists, the DB is the source of truth
+ * and this is a no-op on every subsequent boot, regardless of what's in
+ * AUTH_USERNAME/AUTH_PASSWORD env (they can be left in place — harmless
+ * — or removed after the log line below confirms the seed happened).
+ *
+ * Never logs the seeded username or password — only that a seed did or
+ * did not happen. (Kit's original scoping doc contradicted itself here:
+ * §3's sample logged the username, §5.3 said never log it. Resolved:
+ * never log it.)
+ */
+function seedAdminIfNeeded(db: Database.Database): void {
+  const { c } = db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number };
+  if (c > 0) return; // DB already has an admin — it is the source of truth, env is ignored
+
+  const envUser = process.env.AUTH_USERNAME;
+  const envPass = process.env.AUTH_PASSWORD;
+  if (envUser && envPass) {
+    try {
+      const hash = hashPassword(envPass);
+      db.prepare(
+        'INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)'
+      ).run(uuidv4(), envUser, hash);
+      console.log('[db] Seeded initial admin from env (one-time). DB is now the source of truth for auth.');
+    } catch (err) {
+      console.error('[db] Failed to seed initial admin from env — no admin exists, all protected routes will deny:', err);
+    }
+  } else {
+    console.warn('[db] No admin user exists in the DB and AUTH_USERNAME/AUTH_PASSWORD are not set — no admin can log in and all protected routes will deny. Set both once to seed, then they can be left in place (ignored) or removed.');
+  }
+}
+
+/**
+ * Resolve the JWT signing secret and cache it in-memory for the life of
+ * the process: (1) system_config.jwtSecret if present, (2) generate via
+ * crypto.randomBytes(64) and persist if the DB has none, (3) hard
+ * failure — throw, refuse to start — if neither is possible. There is
+ * no literal-string fallback anywhere in this path (the old
+ * `'changeme-replace-in-production'` default in config.ts is deleted,
+ * not left alongside this as a leftover escape hatch).
+ */
+function resolveJwtSecret(db: Database.Database): string {
+  const existing = db
+    .prepare('SELECT value FROM system_config WHERE key = ?')
+    .get('jwtSecret') as { value: string } | undefined;
+  if (existing?.value) return existing.value;
+
+  const generated = crypto.randomBytes(64).toString('hex');
+  db.prepare(`
+    INSERT INTO system_config (key, value, updated_at)
+    VALUES ('jwtSecret', ?, unixepoch())
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()
+  `).run(generated);
+  console.log('[db] Generated and persisted a new JWT signing secret (first boot).');
+  return generated;
+}
+
+/** Throws if called before getDb() has run at least once (should never
+ * happen in practice — getDb() resolves this synchronously on first
+ * call, and every caller of getJwtSecret() goes through a route that
+ * only runs after the server is already up). Never returns a literal
+ * default. */
+export function getJwtSecret(): string {
+  getDb(); // ensures _jwtSecret is populated
+  if (!_jwtSecret) {
+    throw new Error('[db] JWT secret not resolved — DB not initialized');
+  }
+  return _jwtSecret;
+}
+
+/**
+ * Fail-closed: true only when we can positively confirm at least one
+ * admin row exists. Any DB read error resolves to false (treated as
+ * "not configured"), never true. Used only for informational/UX
+ * surfaces (health check, login's "not configured yet" response) — it
+ * does NOT gate requireAuth/requireAdmin, which check token validity
+ * against a live users row directly and have no bypass branch at all.
+ */
+export function adminExists(): boolean {
+  try {
+    const db = getDb();
+    const { c } = db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number };
+    return c > 0;
+  } catch (err) {
+    console.error('[db] adminExists() DB read failed — treating as false (fail closed):', err);
+    return false;
+  }
+}
+
+/**
+ * Fail-closed: any DB read error returns null (no match), same as a
+ * genuine "no such user" — never throws out to a caller that might
+ * treat an exception as "skip the check."
+ */
+export function getUserByUsername(username: string): UserRow | null {
+  try {
+    const db = getDb();
+    const row = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as
+      | UserRow
+      | undefined;
+    return row ?? null;
+  } catch (err) {
+    console.error('[db] getUserByUsername() DB read failed — treating as no match (fail closed):', err);
+    return null;
+  }
+}
+
 export function getDb(): Database.Database {
   if (!_db) {
     fs.mkdirSync(config.dataDir, { recursive: true });
     const dbPath = path.join(config.dataDir, 'thefabricatorsvault.db');
-    _db = new Database(dbPath);
-    _db.pragma('journal_mode = WAL');
-    _db.pragma('foreign_keys = ON');
-    runMigrations(_db);
+    const db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    _jwtSecret = resolveJwtSecret(db);
+    seedAdminIfNeeded(db);
+    _db = db;
     console.log(`[db] Connected: ${dbPath}`);
   }
   return _db;

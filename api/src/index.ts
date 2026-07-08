@@ -6,7 +6,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
-import { getDb, closeDb } from './db.js';
+import { adminExists, getDb, closeDb } from './db.js';
 import { requireAuth } from './auth.js';
 import authRouter from './routes/auth.js';
 import assetsRouter from './routes/assets.js';
@@ -41,9 +41,12 @@ app.use(express.urlencoded({ extended: true }));
 const staticDir = path.join(__dirname, 'static');
 app.use('/static', express.static(staticDir));
 
-// Health check (for Docker healthcheck, no auth required)
+// Health check (for Docker healthcheck, no auth required).
+// authRequired is always true — see routes/auth.ts's /health for the
+// full rationale (kept here for API-shape parity; this handler wins
+// over authRouter's duplicate since it's registered first).
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, authRequired: config.authEnabled });
+  res.json({ ok: true, authRequired: true });
 });
 
 // Internal: serve raw asset files for the Puppeteer thumbnail renderer.
@@ -88,11 +91,14 @@ app.use((_req, res) => {
 // Start server
 const server = app.listen(config.port, () => {
   console.log(`[api] TheFabricatorsVault API listening on port ${config.port}`);
-  console.log(`[api] Auth: ${config.authEnabled ? 'enabled' : 'DISABLED'}`);
-  console.log(`[api] Storage: ${config.storageDir}`);
 
-  // Initialize DB
+  // Initialize DB (this also resolves/persists the JWT secret and runs
+  // the one-time admin seed — see db.ts getDb()). Auth is now always
+  // enforced; the only variable is whether an admin exists yet to log
+  // in as. Never logs a username or any secret, only yes/no.
   const db = getDb();
+  console.log(`[api] Auth: always enforced (admin configured: ${adminExists() ? 'yes' : 'no — set AUTH_USERNAME/AUTH_PASSWORD and restart to seed'})`);
+  console.log(`[api] Storage: ${config.storageDir}`);
 
   // Set port for Puppeteer renderer URL
   setServerPort(config.port);

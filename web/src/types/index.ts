@@ -303,7 +303,10 @@ export interface MountConfig {
   host: string;
   remote_path: string;
   username: string | null;
-  password: string | null;
+  // The real password is never sent to the client (redacted server-side —
+  // see api/src/routes/mounts.ts GET /admin/mounts). hasPassword tells the
+  // UI whether a password is currently stored, without exposing it.
+  hasPassword: boolean;
   mount_opts: string | null;
   enabled: number;
   role: 'import' | 'library';
