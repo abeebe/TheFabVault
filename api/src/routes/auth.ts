@@ -16,8 +16,11 @@ const router = Router();
 // configured to match the actual proxy chain, req.ip may collapse to one
 // upstream address for all clients — that's an infra-config concern
 // separate from this diff, not fixed here.
-const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const LOGIN_MAX_ATTEMPTS = 10;
+// Exported so the test suite (__tests__/auth.test.ts) asserts against the
+// real threshold instead of a hardcoded duplicate that could silently
+// drift from this file.
+export const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+export const LOGIN_MAX_ATTEMPTS = 10;
 const loginAttempts = new Map<string, number[]>();
 
 function checkRateLimit(ip: string): boolean {
