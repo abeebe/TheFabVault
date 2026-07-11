@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { adminExists, getDb, closeDb } from './db.js';
 import { requireAuth } from './auth.js';
+import { requireLoopback } from './internalAccess.js';
 import authRouter from './routes/auth.js';
 import assetsRouter from './routes/assets.js';
 import foldersRouter from './routes/folders.js';
@@ -26,6 +27,17 @@ import { ensureMountPoints, remountAll } from './services/mountManager.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+
+// Trust NPM's proxy address (and only NPM's) for X-Forwarded-For.
+// Pinned here in the same change that closes backlog #2060 — that
+// pairing is Vera's required coupling, not incidental; see the
+// rate-limiter comment in routes/auth.ts for the full mechanism,
+// including why the *exact* address string (never a bare `true`/`1`)
+// keeps this safe even though docker-compose.production.yml still
+// publishes the api container's port directly on the host. The other
+// half of #2060 — the unauthenticated /internal/asset-raw disclosure —
+// is closed immediately below by requireLoopback.
+app.set('trust proxy', '10.10.5.16');
 
 // CORS
 app.use(cors({
@@ -50,8 +62,13 @@ app.get('/health', (_req, res) => {
 });
 
 // Internal: serve raw asset files for the Puppeteer thumbnail renderer.
-// Localhost-only, no auth — only the renderer page on the same host uses this.
-app.get('/internal/asset-raw/:id/:filename', (req, res) => {
+// Loopback-only, no token — requireLoopback (internalAccess.ts) enforces
+// this by checking the raw TCP peer address, not just a comment; see
+// backlog #2060 (Vera, HIGH) for why the old comment-only version was a
+// real disclosure — the API port is published directly on the host by
+// docker-compose.production.yml, so this route was reachable by anyone
+// on the LAN with zero auth before this guard existed.
+app.get('/internal/asset-raw/:id/:filename', requireLoopback, (req, res) => {
   const filePath = assetFilePath(req.params.id, req.params.filename);
   res.sendFile(filePath, (err: any) => {
     if (err && !res.headersSent) {

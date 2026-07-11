@@ -77,9 +77,16 @@ async function bootApp(seedAdmin: { username: string; password: string } | null)
 
   const app = express();
   app.use(express.json());
-  // Deliberately no `app.set('trust proxy', …)` — matches the app's real
-  // default (see the coupling note at the rate limiter in routes/auth.ts
-  // and #2060). req.ip below is the real loopback socket address.
+  // Deliberately no `app.set('trust proxy', …)` on this minimal test
+  // app — it does not import index.ts (see file-header rationale
+  // above), so it never picks up production's '10.10.5.16' pinning
+  // (see the coupling note at the rate limiter in routes/auth.ts and
+  // #2060) even implicitly. That's fine for what this suite asserts:
+  // every fetch() below connects directly over 127.0.0.1, so req.ip is
+  // the real loopback socket address either way — trust-proxy
+  // resolution only diverges from the raw socket address for requests
+  // whose immediate peer matches the trusted address, which this suite
+  // never simulates.
   app.use('/', authRouterMod.default);
   app.use('/', mountsRouterMod.default);
   app.get('/protected/ping', authMod.requireAuth, (_req, res) => res.json({ ok: true }));
