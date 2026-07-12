@@ -186,6 +186,16 @@ const MIGRATIONS: string[] = [
     created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
   );`,
+  // v14: source_mtime_ms — filesystem mtime (ms since epoch) observed the
+  // last time a mount-scan reconciled this asset against its source_path.
+  // NULL for assets with no source_path (plain upload/drag-drop/folder
+  // import) and, once, for every pre-existing mount-imported asset until
+  // its first post-migration scan establishes a baseline. Lets
+  // scanSingleMount() skip re-hashing a known path when the OS-reported
+  // mtime hasn't moved since the last scan, instead of reading+hashing
+  // every file on every pass (services/mountImport.ts; feasibility Q1,
+  // Reports/sloane-prd-thefabvault-file-versioning-2026-07-11.md).
+  `ALTER TABLE assets ADD COLUMN source_mtime_ms INTEGER;`,
 ];
 
 function runMigrations(db: Database.Database): void {

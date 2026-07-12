@@ -8,6 +8,7 @@ import { getDb } from '../db.js';
 import { assetFilePath, assetDir, cleanupAsset } from './fileStore.js';
 import { enqueueThumb } from './thumbGen.js';
 import { extractMeta } from './metaExtract.js';
+import { archiveAndReplaceAssetFile } from './assetVersion.js';
 import { config } from '../config.js';
 import type { ScanResult, AssetRow } from '../types/index.js';
 
@@ -19,6 +20,12 @@ const DEFAULT_EXTS = new Set([
 ]);
 
 const THUMB_EXTS = new Set(['.stl', '.obj', '.3mf', '.svg', '.dxf', '.pdf', '.lbrn', '.lbrn2', '.png', '.jpg', '.jpeg', '.webp', '.gcode', '.gc', '.g']);
+
+// System-authored asset_versions.notes marker for versions created by the
+// mount rescan (as opposed to an explicit VersionPanel upload's
+// user-authored note, or blank). Free-text, not a schema column — see
+// services/assetVersion.ts header for why.
+export const AUTO_VERSION_NOTE = 'Auto-versioned: NAS rescan detected content change';
 
 function parseAllowedExts(raw: string): Set<string> | null {
   if (!raw.trim()) return null; // null = use defaults
@@ -50,21 +57,42 @@ function moveFile(src: string, dst: string): void {
   }
 }
 
+/**
+ * Mtime pre-filter (Sloane's PRD feasibility Q1): decide whether a
+ * known-path file needs to be re-read and re-hashed at all, based purely
+ * on a cheap fs.statSync() mtime comparison against the mtime captured
+ * the last time this asset was reconciled.
+ *
+ * Returns true (skip re-hash) only when we HAVE a prior baseline AND it
+ * exactly matches the current mtime. Any other case — no baseline yet
+ * (pre-existing asset from before this column existed, or a brand-new
+ * import whose baseline hasn't landed for some reason) or a baseline
+ * that doesn't match — falls through to "needs a hash check," which is
+ * the safe default: at worst it costs one redundant hash, never a
+ * missed content change.
+ */
+export function mtimeUnchanged(baselineMtimeMs: number | null, currentMtimeMs: number): boolean {
+  return baselineMtimeMs !== null && baselineMtimeMs === currentMtimeMs;
+}
+
 /** Scan a single mount point and import any new files found */
 async function scanSingleMount(mountPath: string): Promise<ScanResult> {
   if (!fs.existsSync(mountPath) || !fs.statSync(mountPath).isDirectory()) {
     // Not mounted or not a directory — silently skip
-    return { imported: 0, skipped: 0, failed: 0 };
+    return { imported: 0, versioned: 0, skipped: 0, failed: 0 };
   }
 
   const allowedExts = parseAllowedExts(config.importMountExts) ?? DEFAULT_EXTS;
   const maxBytes = config.importMaxMb * 1024 * 1024;
   const db = getDb();
 
-  // Build set of already-imported source paths
-  const existingPaths = new Set<string>(
-    (db.prepare("SELECT source_path FROM assets WHERE source_path IS NOT NULL").all() as { source_path: string }[])
-      .map((r) => r.source_path)
+  // Map of already-imported source paths -> their full asset row. Needed
+  // (not just a Set of paths) so a known-path hit can be reconciled
+  // against its current file_hash/source_mtime_ms without a second query
+  // per file inside the loop.
+  const existingByPath = new Map<string, AssetRow>(
+    (db.prepare("SELECT * FROM assets WHERE source_path IS NOT NULL").all() as AssetRow[])
+      .map((row) => [row.source_path as string, row])
   );
 
   // Walk the mount directory
@@ -76,6 +104,7 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
   });
 
   let imported = 0;
+  let versioned = 0;
   let skipped = 0;
   let failed = 0;
 
@@ -91,12 +120,79 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
     }
 
     const absPath = path.resolve(filePath);
+    const existing = existingByPath.get(absPath);
 
-    // Already imported
-    if (existingPaths.has(absPath)) {
-      skipped++;
+    // ─── Already-imported path: reconcile instead of blind-skip ──────────
+    if (existing) {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(absPath);
+      } catch {
+        // Vanished/unreadable mid-scan — leave the existing asset row
+        // untouched, don't guess.
+        failed++;
+        continue;
+      }
+
+      const mtimeMs = Math.round(stat.mtimeMs);
+
+      if (mtimeUnchanged(existing.source_mtime_ms, mtimeMs)) {
+        // Cheapest correct path: mtime matches the last-known baseline,
+        // so the bytes have not changed — skip without reading/hashing.
+        skipped++;
+        continue;
+      }
+
+      if (stat.size > maxBytes) {
+        console.warn(`[mountImport] Skipping re-hash (too large): ${absPath}`);
+        failed++;
+        continue;
+      }
+
+      let buf: Buffer;
+      try {
+        buf = fs.readFileSync(absPath);
+      } catch (err) {
+        console.error(`[mountImport] Failed to read for rescan ${absPath}:`, err);
+        failed++;
+        continue;
+      }
+      const newHash = crypto.createHash('sha256').update(buf).digest('hex');
+
+      if (existing.file_hash !== null && existing.file_hash === newHash) {
+        // mtime moved (touch, remount metadata churn, etc.) but content
+        // is byte-identical — correct no-op. Update the baseline so
+        // future scans don't pay the hash cost again until it actually
+        // changes, and count it exactly as today: skipped.
+        db.prepare('UPDATE assets SET source_mtime_ms = ? WHERE id = ?').run(mtimeMs, existing.id);
+        skipped++;
+        continue;
+      }
+
+      // Content genuinely changed (or this asset never captured a hash
+      // in the first place, e.g. an old hash-read failure at import
+      // time — treated as "must version," never as "assume unchanged").
+      // Trashed assets are inert to the scanner (matches today's
+      // behavior: a trashed row's source_path was already permanently
+      // "known" and never touched again) — a content change there is
+      // still just a skip, not an auto-version of a file Aaron deleted.
+      if (existing.deleted_at !== null) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        archiveAndReplaceAssetFile(db, existing, buf, path.basename(absPath), AUTO_VERSION_NOTE);
+        db.prepare('UPDATE assets SET source_mtime_ms = ? WHERE id = ?').run(mtimeMs, existing.id);
+        versioned++;
+      } catch (err) {
+        console.error(`[mountImport] Auto-version failed for ${absPath}:`, err);
+        failed++;
+      }
       continue;
     }
+
+    // ─── Genuinely new path — import exactly as before ────────────────────
 
     let stat: fs.Stats;
     try {
@@ -135,9 +231,11 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
       // Hash failure is non-fatal — asset is still importable
     }
 
+    const mtimeMs = Math.round(stat.mtimeMs);
+
     db.prepare(
-      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status, meta_json, file_hash)
-       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '{}', ?)`
+      `INSERT INTO assets (id, filename, original_name, mime, size, folder_id, tags_json, source_path, thumb_status, meta_json, file_hash, source_mtime_ms)
+       VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, '{}', ?, ?)`
     ).run(
       id,
       filename,
@@ -148,6 +246,7 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
       absPath,
       THUMB_EXTS.has(ext) ? 'pending' : 'none',
       fileHash,
+      mtimeMs,
     );
 
     try {
@@ -165,7 +264,10 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
         enqueueThumb(id);
       }
 
-      existingPaths.add(absPath);
+      // Keep the in-memory map consistent for the rest of this pass (glob
+      // shouldn't yield the same absolute path twice, but this matches
+      // the original Set.add() behavior exactly rather than assuming).
+      existingByPath.set(absPath, db.prepare('SELECT * FROM assets WHERE id = ?').get(id) as AssetRow);
       imported++;
     } catch (err) {
       console.error(`[mountImport] Failed to copy ${absPath}:`, err);
@@ -175,8 +277,8 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
     }
   }
 
-  console.log(`[mountImport] ${mountPath} done — imported: ${imported}, skipped: ${skipped}, failed: ${failed}`);
-  return { imported, skipped, failed };
+  console.log(`[mountImport] ${mountPath} done — imported: ${imported}, versioned: ${versioned}, skipped: ${skipped}, failed: ${failed}`);
+  return { imported, versioned, skipped, failed };
 }
 
 /**
@@ -186,7 +288,7 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
 export async function scanMountImports(): Promise<ScanResult> {
   const paths = config.importMountPaths;
   if (!paths.length) {
-    return { imported: 0, skipped: 0, failed: 0 };
+    return { imported: 0, versioned: 0, skipped: 0, failed: 0 };
   }
 
   const results = await Promise.allSettled(paths.map(scanSingleMount));
@@ -195,6 +297,7 @@ export async function scanMountImports(): Promise<ScanResult> {
     (acc, r) => {
       if (r.status === 'fulfilled') {
         acc.imported += r.value.imported;
+        acc.versioned += r.value.versioned;
         acc.skipped += r.value.skipped;
         acc.failed += r.value.failed;
       } else {
@@ -203,9 +306,16 @@ export async function scanMountImports(): Promise<ScanResult> {
       }
       return acc;
     },
-    { imported: 0, skipped: 0, failed: 0 },
+    { imported: 0, versioned: 0, skipped: 0, failed: 0 },
   );
 }
+
+// Exported for tests only — scanSingleMount() is the real entry point used
+// by scanMountImports(), but the mount-rescan versioning tests exercise it
+// directly against a temp mount dir + isolated DB (see
+// __tests__/mountImportVersioning.test.ts) rather than going through the
+// multi-mount fan-out.
+export { scanSingleMount };
 
 function ensureFolderPath(db: ReturnType<typeof getDb>, relDir: string): string {
   const parts = relDir.split(path.sep).filter(Boolean);

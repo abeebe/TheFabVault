@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Settings, Download, File, X, Plus, Layers, ChevronDown, ChevronRight, Box, Zap, Trash2, Heart } from 'lucide-react';
+import { Settings, Download, File, X, Plus, Layers, ChevronDown, ChevronRight, Box, Zap, Trash2, Heart, RefreshCw } from 'lucide-react';
 import { FolderTree } from './FolderTree.js';
 import { TagBadge } from './TagInput.js';
 import { api } from '../lib/api.js';
@@ -93,7 +93,7 @@ export function Sidebar({
   onFavoritesToggle,
 }: SidebarProps) {
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [scanResult, setScanResult] = useState<{ imported: number; versioned: number; skipped: number } | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [setsExpanded, setSetsExpanded] = useState(true);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
@@ -437,6 +437,27 @@ export function Sidebar({
             </span>
           )}
         </button>
+
+        {/* Mount rescan — the scan-result now distinguishes imported
+            (genuinely new) / versioned (existing asset, content changed)
+            / skipped (existing asset, unchanged), so a re-slice landing
+            (or silently not landing) is visible instead of an invisible
+            no-op (Sloane's PRD 4.1 + UI fork). */}
+        <button
+          onClick={handleScan}
+          disabled={scanning}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+        >
+          <RefreshCw size={14} className={scanning ? 'animate-spin' : ''} />
+          {scanning ? 'Scanning mounts…' : 'Scan mounts'}
+        </button>
+        {scanResult && (
+          <div className="px-3 text-[10px] text-gray-500 dark:text-gray-400 flex items-center justify-between gap-2">
+            <span>{scanResult.imported} new</span>
+            <span>{scanResult.versioned} versioned</span>
+            <span>{scanResult.skipped} unchanged</span>
+          </div>
+        )}
 
         {/* Network / Admin settings */}
         <button

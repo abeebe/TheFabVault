@@ -292,6 +292,7 @@ export interface AssetRow {
   deleted_at: number | null;
   rating: number | null;
   is_favorite: number;
+  source_mtime_ms: number | null;
 }
 
 export interface VersionRow {
@@ -350,6 +351,10 @@ export interface SetAssetRow {
 
 export interface ScanResult {
   imported: number;
+  // Existing source_path, content hash changed since last scan — the
+  // scanner auto-versioned it (archived prior bytes, replaced in place).
+  versioned: number;
+  // Existing source_path, content unchanged (or filtered by extension).
   skipped: number;
   failed: number;
 }

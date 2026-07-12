@@ -3,7 +3,6 @@ import multer from 'multer';
 import archiver from 'archiver';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
 import { requireAuth } from '../auth.js';
@@ -20,6 +19,7 @@ import {
 import { enqueueThumb } from '../services/thumbGen.js';
 import { extractMeta } from '../services/metaExtract.js';
 import { saveUploadedFile, needsThumbnail, findAssetByHash } from '../services/assetUpload.js';
+import { archiveAndReplaceAssetFile } from '../services/assetVersion.js';
 import type { AssetOut, AssetRow, FolderRow, VersionRow, VersionOut } from '../types/index.js';
 
 const router = Router();
@@ -519,44 +519,17 @@ router.post('/asset/:id/version', requireAuth, upload.single('file'), async (req
   if (!asset) { res.status(404).json({ error: 'Not found' }); return; }
 
   const notes = (req.body.notes as string | undefined) ?? null;
-  const versionId = uuidv4();
 
-  // Determine next version number
-  const { maxVer } = db.prepare(
-    'SELECT COALESCE(MAX(version_num), 0) AS maxVer FROM asset_versions WHERE asset_id = ?'
-  ).get(asset.id) as { maxVer: number };
-  const newVersionNum = maxVer + 1;
+  // Shared with the mount-scan auto-versioning path (services/mountImport.ts)
+  // — see services/assetVersion.ts header for why this is extracted.
+  const { asset: updated } = archiveAndReplaceAssetFile(
+    db,
+    asset,
+    req.file.buffer,
+    req.file.originalname || asset.filename,
+    notes,
+  );
 
-  // Archive the current file as a version entry
-  const currentFilePath = assetFilePath(asset.id, asset.filename);
-  const archivePath = versionFilePath(asset.id, versionId, asset.filename);
-  if (fs.existsSync(currentFilePath)) {
-    fs.copyFileSync(currentFilePath, archivePath);
-  }
-
-  db.prepare(
-    `INSERT INTO asset_versions (id, asset_id, version_num, filename, size, file_hash, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(versionId, asset.id, newVersionNum, asset.filename, asset.size, asset.file_hash, notes);
-
-  // Replace the current file with the new upload
-  const newFilename = sanitizeFilename(req.file.originalname || asset.filename);
-  const newHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
-  const newPath = assetFilePath(asset.id, newFilename);
-  fs.writeFileSync(newPath, req.file.buffer);
-
-  // Remove old file if the filename changed
-  if (newFilename !== asset.filename && fs.existsSync(currentFilePath)) {
-    try { fs.unlinkSync(currentFilePath); } catch {}
-  }
-
-  db.prepare(
-    `UPDATE assets SET filename = ?, size = ?, file_hash = ?, thumb_status = ? WHERE id = ?`
-  ).run(newFilename, req.file.buffer.length, newHash, needsThumbnail(newFilename) ? 'pending' : 'none', asset.id);
-
-  if (needsThumbnail(newFilename)) enqueueThumb(asset.id);
-
-  const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(asset.id) as AssetRow;
   res.json({ asset: toOut(updated) });
 });
 

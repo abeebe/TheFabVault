@@ -46,6 +46,8 @@ router.get('/admin/config', requireAdmin, (_req: Request, res: Response) => {
         assetsFormatted: formatBytes(breakdown.assets),
         thumbnails: breakdown.thumbnails,
         thumbnailsFormatted: formatBytes(breakdown.thumbnails),
+        versions: breakdown.versions,
+        versionsFormatted: formatBytes(breakdown.versions),
         assetCount: breakdown.assetCount,
       },
       config: {

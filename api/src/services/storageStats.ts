@@ -3,28 +3,46 @@ import path from 'path';
 import { STORAGE_DIR, THUMBS_DIR } from './fileStore.js';
 import { getDb } from '../db.js';
 
+export interface DirSizeResult {
+  total: number;
+  // Bytes under any directory named "versions" — asset_versions archive
+  // copies live at <STORAGE_DIR>/<assetId>/versions/... (see
+  // fileStore.ts#versionDir). Folded into the same recursive pass as
+  // `total` rather than a second walk (Sloane's PRD feasibility Q5) —
+  // STORAGE_DIR can hold large 3D files, so a second full pass over it
+  // isn't free the way re-walking THUMBS_DIR (small JPEGs) would be.
+  versions: number;
+}
+
 /**
- * Recursively calculate total storage usage for a directory
+ * Single recursive walk of a directory that sums total bytes AND, in the
+ * same pass, buckets out how many of those bytes sit under a `versions/`
+ * subdirectory at any depth.
  */
-export function calculateDirectorySize(dirPath: string): number {
-  let totalSize = 0;
+export function walkDirectorySize(dirPath: string, insideVersions = false): DirSizeResult {
+  let total = 0;
+  let versions = 0;
 
   try {
     if (!fs.existsSync(dirPath)) {
-      return 0;
+      return { total: 0, versions: 0 };
     }
 
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
 
     for (const entry of entries) {
       const fullPath = path.join(dirPath, entry.name);
+      const nowInsideVersions = insideVersions || entry.name === 'versions';
 
       try {
         if (entry.isDirectory()) {
-          totalSize += calculateDirectorySize(fullPath);
+          const sub = walkDirectorySize(fullPath, nowInsideVersions);
+          total += sub.total;
+          versions += sub.versions;
         } else if (entry.isFile()) {
           const stat = fs.statSync(fullPath);
-          totalSize += stat.size;
+          total += stat.size;
+          if (nowInsideVersions) versions += stat.size;
         }
       } catch (err) {
         // Skip files we can't access
@@ -33,26 +51,38 @@ export function calculateDirectorySize(dirPath: string): number {
     }
   } catch (err) {
     console.error(`[storageStats] Failed to read directory ${dirPath}:`, err);
-    return 0;
+    return { total: 0, versions: 0 };
   }
 
-  return totalSize;
+  return { total, versions };
 }
 
 /**
- * Get storage breakdown including assets, thumbnails, and total
+ * Recursively calculate total storage usage for a directory
+ */
+export function calculateDirectorySize(dirPath: string): number {
+  return walkDirectorySize(dirPath).total;
+}
+
+/**
+ * Get storage breakdown including assets, thumbnails, version archives,
+ * and total.
  */
 export function getStorageBreakdown(): {
   total: number;
   assets: number;
   thumbnails: number;
+  versions: number;
   assetCount: number;
   percentUsed?: number;
 } {
   const db = getDb();
 
-  // Calculate directory sizes
-  const assetsSize = calculateDirectorySize(STORAGE_DIR);
+  // Single walk of STORAGE_DIR gets both the total and the versions/
+  // sub-bucket. THUMBS_DIR is a separate (small) tree, walked on its own
+  // exactly as before — that second call is pre-existing, not something
+  // this change adds.
+  const assetsWalk = walkDirectorySize(STORAGE_DIR);
   const thumbnailsSize = calculateDirectorySize(THUMBS_DIR);
 
   // Get asset count from DB
@@ -62,9 +92,10 @@ export function getStorageBreakdown(): {
   const assetCount = countResult.count;
 
   return {
-    total: assetsSize,
-    assets: assetsSize,
+    total: assetsWalk.total,
+    assets: assetsWalk.total,
     thumbnails: thumbnailsSize,
+    versions: assetsWalk.versions,
     assetCount,
   };
 }
