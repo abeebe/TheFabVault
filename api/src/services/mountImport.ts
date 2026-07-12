@@ -42,18 +42,72 @@ function parseAllowedExts(raw: string): Set<string> | null {
 /**
  * Move a file from src to dst.
  * Uses fs.renameSync for zero-copy moves on the same filesystem.
- * Falls back to copy + delete when src and dst are on different devices (EXDEV).
+ * Falls back to copy + best-effort delete when a same-mount rename isn't
+ * possible — either because src/dst are on different devices (EXDEV) or
+ * because the source's mount rejects the write a rename requires
+ * (EROFS/EACCES/EPERM).
+ *
+ * Root-cause note (production EROFS-on-every-scanned-file, found at the
+ * versioning-feature deploy): IMPORT_MOUNT_PATHS is used for two
+ * different documented source semantics that this function can't tell
+ * apart from a path string alone —
+ *   1. INSTALLATION.md's "NAS / Mount Import": a writable drop-folder
+ *      staging mount. Files are meant to be CONSUMED — moved into vault
+ *      storage, removed from the source. This is the behavior this
+ *      function has always implemented.
+ *   2. The mount-rescan auto-versioning reconcile path added alongside
+ *      AUTO_VERSION_NOTE below: a PERMANENT NAS source, rescanned in
+ *      place for content changes. Every shipped compose file
+ *      (docker-compose.production/bindmount/nfs/smb.yml) mounts
+ *      IMPORT_MOUNT_PATHS `:ro` by default, which is only compatible
+ *      with semantic 2 — the source must never be deleted.
+ * A file already known to the scanner (existing source_path in `assets`)
+ * only ever gets reconciled via archiveAndReplaceAssetFile(), which
+ * never touches the source path at all (see assetVersion.ts) — that
+ * half of the feature was always safe against a `:ro` mount. But a
+ * GENUINELY NEW file — including every file on a fresh deploy, since
+ * nothing has a tracked source_path yet — still goes through this
+ * function, which used to treat a failed unlink as fatal: it rethrew,
+ * scanSingleMount()'s catch counted the whole file as `failed`, and the
+ * already-copied file + its new `assets` row were rolled back
+ * (cleanupAsset + DELETE). That's how a source mount being read-only
+ * turned into 100% of scanned files erroring and zero ever importing —
+ * the auto-versioning reconcile path had no files to ever reconcile,
+ * because nothing could get past this first-import step to become
+ * "known" in the first place.
+ *
+ * Fix: removing the source is best-effort only. The copy into vault
+ * storage has already succeeded by the time we'd attempt the unlink, so
+ * a source we can't delete degrades to "imported as a copy, original
+ * left in place on the NAS" — never a reason to discard a successful
+ * import. This matches every other cleanup-unlink in this codebase
+ * (assetVersion.ts, routes/assets.ts) already being try/catch
+ * best-effort; this was the one call site that wasn't. Semantic 1 (the
+ * writable staging drop-folder) is unaffected — a writable mount's
+ * unlink still succeeds and the source still gets removed exactly as
+ * INSTALLATION.md documents.
  */
 function moveFile(src: string, dst: string): void {
   try {
     fs.renameSync(src, dst);
+    return;
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-      fs.copyFileSync(src, dst);
-      fs.unlinkSync(src);
-    } else {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EXDEV = genuinely different filesystems. EROFS/EACCES/EPERM = a
+    // same-mount rename was blocked because the source can't be
+    // written to (read-only mount, or a permission-restricted one) —
+    // both fall back to copy below rather than failing the import.
+    if (code !== 'EXDEV' && code !== 'EROFS' && code !== 'EACCES' && code !== 'EPERM') {
       throw err;
     }
+  }
+
+  fs.copyFileSync(src, dst);
+
+  try {
+    fs.unlinkSync(src);
+  } catch (unlinkErr: unknown) {
+    console.warn(`[mountImport] Could not remove source after copy — leaving original in place (read-only or permission-restricted mount?): ${src}`, unlinkErr);
   }
 }
 
