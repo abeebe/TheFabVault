@@ -238,6 +238,8 @@ export interface HealthResponse {
 
 export interface ScanResult {
   imported: number;
+  // Existing source_path, content changed since last scan — auto-versioned.
+  versioned: number;
   skipped: number;
   failed: number;
 }
@@ -251,6 +253,8 @@ export interface StorageStats {
   assetsFormatted: string;
   thumbnails: number;
   thumbnailsFormatted: string;
+  versions: number;
+  versionsFormatted: string;
   assetCount: number;
 }
 

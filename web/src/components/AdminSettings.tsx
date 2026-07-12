@@ -328,7 +328,7 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                         style={{ width: `${Math.min(percentUsed, 100)}%` }}
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="grid grid-cols-3 gap-3 text-xs">
                       <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded">
                         <p className="text-gray-600 dark:text-gray-400">Assets</p>
                         <p className="font-semibold text-gray-900 dark:text-white">
@@ -339,6 +339,16 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                         <p className="text-gray-600 dark:text-gray-400">Thumbnails</p>
                         <p className="font-semibold text-gray-900 dark:text-white">
                           {config.storage.thumbnailsFormatted}
+                        </p>
+                      </div>
+                      {/* Version archives — distinct byte figure so Aaron
+                          can see how much of the vault is current files
+                          vs. version history (Sloane's PRD fork 3, Option
+                          A: visibility only, no auto-prune). */}
+                      <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                        <p className="text-gray-600 dark:text-gray-400">Version archives</p>
+                        <p className="font-semibold text-gray-900 dark:text-white">
+                          {config.storage.versionsFormatted}
                         </p>
                       </div>
                     </div>
