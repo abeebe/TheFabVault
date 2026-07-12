@@ -58,18 +58,31 @@ function moveFile(src: string, dst: string): void {
 }
 
 /**
- * Mtime pre-filter (Sloane's PRD feasibility Q1): decide whether a
- * known-path file needs to be re-read and re-hashed at all, based purely
- * on a cheap fs.statSync() mtime comparison against the mtime captured
- * the last time this asset was reconciled.
+ * Mtime pre-filter (Sloane's PRD feasibility Q1): one half of the check
+ * that decides whether a known-path file needs to be re-read and
+ * re-hashed at all. Compares a cheap fs.statSync() mtime against the
+ * mtime captured the last time this asset was reconciled.
  *
- * Returns true (skip re-hash) only when we HAVE a prior baseline AND it
- * exactly matches the current mtime. Any other case — no baseline yet
- * (pre-existing asset from before this column existed, or a brand-new
- * import whose baseline hasn't landed for some reason) or a baseline
- * that doesn't match — falls through to "needs a hash check," which is
- * the safe default: at worst it costs one redundant hash, never a
- * missed content change.
+ * Returns true only when we HAVE a prior baseline AND it exactly matches
+ * the current mtime. Any other case — no baseline yet (pre-existing
+ * asset from before this column existed, or a brand-new import whose
+ * baseline hasn't landed for some reason) or a baseline that doesn't
+ * match — falls through to "needs a hash check," which is the safe
+ * default: at worst it costs one redundant hash, never a missed content
+ * change.
+ *
+ * NOT sufficient on its own to conclude "unchanged" — see the call site
+ * in scanSingleMount(), which additionally requires the file's size to
+ * match (Remy's peer review, Finding 1, 2026-07-11: a timestamp-
+ * preserving copy/sync tool — `cp -p`, `rsync -a`/`-t`, a re-export
+ * pipeline that intentionally carries the source mtime forward — can
+ * re-stamp the exact prior mtime on materially different content,
+ * which an mtime-only check would silently miss forever, since a match
+ * also never refreshes the baseline). Kept as a standalone named
+ * function (rather than folding size into it) because mtime-vs-size are
+ * two independently meaningful, independently testable signals, and the
+ * call site reads more honestly as "mtime AND size" than as one opaque
+ * predicate.
  */
 export function mtimeUnchanged(baselineMtimeMs: number | null, currentMtimeMs: number): boolean {
   return baselineMtimeMs !== null && baselineMtimeMs === currentMtimeMs;
@@ -136,9 +149,17 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
 
       const mtimeMs = Math.round(stat.mtimeMs);
 
-      if (mtimeUnchanged(existing.source_mtime_ms, mtimeMs)) {
-        // Cheapest correct path: mtime matches the last-known baseline,
-        // so the bytes have not changed — skip without reading/hashing.
+      // Cheapest correct path: mtime AND size both match the last-known
+      // baseline — skip without reading/hashing. Size is free here
+      // (already in `stat` from the statSync above) and closes the real
+      // gap an mtime-only check has: a timestamp-preserving copy/sync
+      // tool can re-stamp the exact prior mtime on different content,
+      // and a re-slice/re-export virtually always changes byte size
+      // even when it doesn't change the mtime handling. Requiring BOTH
+      // to match is still a pure metadata check — no extra I/O — and
+      // still correctly falls through to a real hash check whenever
+      // either signal moved.
+      if (mtimeUnchanged(existing.source_mtime_ms, mtimeMs) && existing.size === stat.size) {
         skipped++;
         continue;
       }
@@ -281,33 +302,77 @@ async function scanSingleMount(mountPath: string): Promise<ScanResult> {
   return { imported, versioned, skipped, failed };
 }
 
+// In-process guard against overlapping scans (Remy's peer review,
+// Finding 2, 2026-07-11). Both real production entry points —
+// index.ts's fire-and-forget startup scan and the (now, as of this PR,
+// actually-wired-up) manual "Scan mounts" button hitting POST
+// /import/scan — call scanMountImports() directly, with nothing
+// preventing a second call from starting while the first is still
+// walking a large mount. Traced consequence if unguarded: scan B builds
+// its existingByPath snapshot before scan A's already-in-flight loop
+// finishes, then A versions an asset, then B (working off its now-stale
+// cached file_hash/size) re-reads the same file, sees a hash mismatch
+// against its stale snapshot, and versions it AGAIN — producing an
+// asset_versions row whose recorded metadata (copied from B's stale
+// snapshot) doesn't match what it actually archived (A's already-new
+// content). Does not lose data or create a duplicate assets row, but
+// does corrupt a version-history entry, which is exactly the kind of
+// untrustworthy state this whole feature exists to eliminate.
+//
+// A single module-level in-flight promise closes this: a second caller
+// that arrives while a scan is running gets the SAME result instead of
+// starting a second overlapping pass. Scoped to the whole
+// scanMountImports() call (not per-mount) because both real call sites
+// always scan every configured mount together — there's no scenario in
+// this app where two DIFFERENT mounts need to scan concurrently badly
+// enough to justify per-mount locking, and a single guard is simpler to
+// reason about correctly.
+let inFlightScan: Promise<ScanResult> | null = null;
+
 /**
  * Scan all configured import mount paths in parallel.
  * Paths that aren't mounted or don't exist are silently skipped.
  */
 export async function scanMountImports(): Promise<ScanResult> {
+  if (inFlightScan) {
+    console.log('[mountImport] Scan already in progress — reusing the in-flight result instead of starting a second overlapping scan.');
+    return inFlightScan;
+  }
+
   const paths = config.importMountPaths;
   if (!paths.length) {
     return { imported: 0, versioned: 0, skipped: 0, failed: 0 };
   }
 
-  const results = await Promise.allSettled(paths.map(scanSingleMount));
+  const run = (async (): Promise<ScanResult> => {
+    const results = await Promise.allSettled(paths.map(scanSingleMount));
 
-  return results.reduce<ScanResult>(
-    (acc, r) => {
-      if (r.status === 'fulfilled') {
-        acc.imported += r.value.imported;
-        acc.versioned += r.value.versioned;
-        acc.skipped += r.value.skipped;
-        acc.failed += r.value.failed;
-      } else {
-        console.error('[mountImport] Scan error:', r.reason);
-        acc.failed++;
-      }
-      return acc;
-    },
-    { imported: 0, versioned: 0, skipped: 0, failed: 0 },
-  );
+    return results.reduce<ScanResult>(
+      (acc, r) => {
+        if (r.status === 'fulfilled') {
+          acc.imported += r.value.imported;
+          acc.versioned += r.value.versioned;
+          acc.skipped += r.value.skipped;
+          acc.failed += r.value.failed;
+        } else {
+          console.error('[mountImport] Scan error:', r.reason);
+          acc.failed++;
+        }
+        return acc;
+      },
+      { imported: 0, versioned: 0, skipped: 0, failed: 0 },
+    );
+  })();
+
+  inFlightScan = run;
+  try {
+    return await run;
+  } finally {
+    // Release the guard once this run settles (success or failure) so
+    // the NEXT genuinely-sequential scan isn't stuck reusing a stale
+    // completed result.
+    inFlightScan = null;
+  }
 }
 
 // Exported for tests only — scanSingleMount() is the real entry point used

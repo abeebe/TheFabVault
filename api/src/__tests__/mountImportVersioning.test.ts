@@ -255,6 +255,59 @@ describe('scanSingleMount — acceptance criterion 1: content change at a known 
     expect(result.versioned).toBe(1);
     expect(countAssetVersions(fx, asset.id)).toBe(1);
   });
+
+  // ─── Remy's peer-review Finding 1 (HIGH), 2026-07-11 ──────────────────
+  // Remy reproduced this directly against the real scanSingleMount(): a
+  // timestamp-preserving copy/sync tool (cp -p, rsync -a/-t, a re-export
+  // pipeline that intentionally carries the source mtime forward) can
+  // re-stamp the EXACT prior mtime on materially different content. An
+  // mtime-only pre-filter treats that as "unchanged" and skips forever —
+  // the same silent-no-op bug this whole feature exists to eliminate,
+  // just reintroduced at the pre-filter layer. Fix: also require size to
+  // match before trusting the mtime match.
+  it('a re-slice whose mtime is re-stamped to the exact prior value (cp -p / rsync -t style) is still detected and versioned, because size no longer matches', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1 content');
+    await fx.scanSingleMount(fx.mountDir);
+    const before = getAssetBySourcePath(fx, path.resolve(filePath));
+    const originalMtimeMs = before.source_mtime_ms!;
+
+    // Materially different content, different size — but re-stamp the
+    // mtime back to the EXACT baseline value, exactly like a
+    // timestamp-preserving copy would.
+    const newContent = 'v2 content, re-sliced with a materially different byte count';
+    expect(Buffer.byteLength(newContent)).not.toBe(before.size); // fixture sanity check
+    fs.writeFileSync(filePath, newContent);
+    const restamped = new Date(originalMtimeMs);
+    fs.utimesSync(filePath, restamped, restamped);
+    expect(Math.round(fs.statSync(filePath).mtimeMs)).toBe(originalMtimeMs); // fixture sanity check — mtime genuinely unchanged
+
+    const result = await fx.scanSingleMount(fx.mountDir);
+    expect(result).toEqual({ imported: 0, versioned: 1, skipped: 0, failed: 0 });
+
+    const after = getAssetBySourcePath(fx, path.resolve(filePath));
+    expect(after.id).toBe(before.id); // same asset row, zero duplicates
+    expect(after.file_hash).toBe(crypto.createHash('sha256').update(newContent).digest('hex'));
+    expect(after.size).toBe(Buffer.byteLength(newContent));
+    expect(countAssetVersions(fx, after.id)).toBe(1); // the original content was archived, not silently dropped
+  });
+
+  it('an mtime re-stamped to the exact prior value on genuinely byte-identical content still resolves to a skip (the size check does not introduce a false positive)', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1 content');
+    await fx.scanSingleMount(fx.mountDir);
+    const before = getAssetBySourcePath(fx, path.resolve(filePath));
+
+    fs.writeFileSync(filePath, 'v1 content'); // byte-identical
+    const restamped = new Date(before.source_mtime_ms!);
+    fs.utimesSync(filePath, restamped, restamped);
+
+    const result = await fx.scanSingleMount(fx.mountDir);
+    expect(result).toEqual({ imported: 0, versioned: 0, skipped: 1, failed: 0 });
+    expect(countAssetVersions(fx, before.id)).toBe(0);
+  });
 });
 
 describe('scanSingleMount — trashed assets are inert to the scanner', () => {
@@ -296,5 +349,87 @@ describe('scanMountImports — aggregate reducer carries the versioned bucket', 
 
     const second = await fx.scanMountImports();
     expect(second).toEqual({ imported: 0, versioned: 1, skipped: 0, failed: 0 });
+  });
+});
+
+// ─── Remy's peer-review Finding 2 (MEDIUM), 2026-07-11 ───────────────────
+// Both real production entry points (the fire-and-forget startup scan and
+// the — as of this PR — actually-wired-up manual "Scan mounts" button)
+// call scanMountImports() with nothing preventing a second call from
+// starting while the first is still walking a mount. Traced consequence:
+// scan B's existingByPath snapshot goes stale mid-scan-A, and B can
+// re-version an asset A already versioned, producing an asset_versions
+// row whose recorded metadata doesn't match what it actually archived.
+// Fix: a module-level in-flight promise so a second concurrent call
+// reuses the first call's result instead of starting an overlapping pass.
+describe('scanMountImports — overlapping-scan guard', () => {
+  it('two scanMountImports() calls fired without awaiting between them share one in-flight run instead of racing', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1');
+    process.env.IMPORT_MOUNT_PATHS = fx.mountDir;
+
+    const p1 = fx.scanMountImports();
+    const p2 = fx.scanMountImports(); // fired before p1 has been awaited
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    // Both callers got the exact same result object — proof they shared
+    // one run rather than two independent (and potentially racing) passes.
+    expect(r1).toBe(r2);
+    expect(r1).toEqual({ imported: 1, versioned: 0, skipped: 0, failed: 0 });
+
+    // Only one asset row exists — a second overlapping pass did not
+    // reprocess the same file independently.
+    const totalAssets = (fx.db.prepare('SELECT COUNT(*) as n FROM assets').get() as { n: number }).n;
+    expect(totalAssets).toBe(1);
+  });
+
+  it('does not corrupt a version-history entry the way an unguarded overlap would: a content change picked up by an in-flight scan is versioned exactly once, not twice, when a second call arrives mid-scan', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1');
+    await fx.scanSingleMount(fx.mountDir); // establish the known asset first
+    const before = getAssetBySourcePath(fx, path.resolve(filePath));
+
+    fs.writeFileSync(filePath, 'v2, re-sliced');
+    bumpMtime(filePath);
+    process.env.IMPORT_MOUNT_PATHS = fx.mountDir;
+
+    // Two "concurrent" callers hitting the changed file at once — before
+    // the guard, this is exactly Remy's traced scenario (scan B stale-
+    // reads scan A's in-progress work).
+    const [r1, r2] = await Promise.all([fx.scanMountImports(), fx.scanMountImports()]);
+    expect(r1).toBe(r2);
+    expect(r1).toEqual({ imported: 0, versioned: 1, skipped: 0, failed: 0 });
+
+    const after = getAssetBySourcePath(fx, path.resolve(filePath));
+    expect(countAssetVersions(fx, after.id)).toBe(1); // not 2
+
+    // The single archived version's recorded metadata matches what it
+    // actually archived (the true original content) — the exact
+    // consistency property Remy's traced race would have broken.
+    const version = fx.db.prepare('SELECT * FROM asset_versions WHERE asset_id = ?').get(after.id) as {
+      id: string; file_hash: string | null;
+    };
+    expect(version.file_hash).toBe(before.file_hash);
+    const { versionFilePath } = await import('../services/fileStore.js');
+    expect(fs.readFileSync(versionFilePath(after.id, version.id, before.filename), 'utf-8')).toBe('v1');
+  });
+
+  it('the guard releases after a scan completes — a later, genuinely sequential scan is not stuck reusing a stale finished result', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1');
+    process.env.IMPORT_MOUNT_PATHS = fx.mountDir;
+
+    const first = await fx.scanMountImports();
+    expect(first.imported).toBe(1);
+
+    fs.writeFileSync(filePath, 'v2');
+    bumpMtime(filePath);
+
+    const second = await fx.scanMountImports();
+    expect(second.versioned).toBe(1); // genuinely re-ran, not a cached first-run result
   });
 });

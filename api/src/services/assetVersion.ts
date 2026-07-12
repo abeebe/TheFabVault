@@ -28,6 +28,36 @@
 // better-sqlite3 throws synchronously, the transaction rolls back, and
 // the orphaned archive copy is removed below — a loud failure, never a
 // silent lost-archive or corrupted asset row.
+//
+// Transactional scope (Remy's peer review, Finding 3, 2026-07-11): the
+// asset_versions INSERT and the final `assets` UPDATE are one
+// db.transaction() together (not two separate, unguarded writes as in
+// the pre-review version of this function). Remy traced that with them
+// split, a late failure on the UPDATE (e.g. a WAL I/O hiccup) after the
+// live file had already been overwritten could leave the asset_versions
+// row committed while the assets row still described the pre-change
+// state — and flagged that this was inherited from the original
+// pre-extraction endpoint (not a regression this file introduced), but
+// that the new unattended scanner call site changes who's watching when
+// it happens: a human clicking "upload new version" would see an error
+// toast; a scanner running unattended would just leave it for the next
+// pass to build on top of. The live-file write is sequenced INSIDE the
+// transaction closure (a side effect, not a SQL statement) specifically
+// so it happens BEFORE the UPDATE it needs to be consistent with — if
+// anything after it throws, better-sqlite3 rolls back both SQL writes
+// and the catch below removes the orphaned archive copy, so the net
+// state is "as if this call never started," not "half-applied."
+//
+// Residual, not engineered away here: fs writes are not part of the SQL
+// transaction and can't be rolled back by it. If fs.writeFileSync
+// itself succeeds and the UPDATE immediately after it then throws, the
+// live file already has the new bytes while the assets row (rolled
+// back) still describes the old ones — a real but narrow window
+// (basically just the gap between two sequential in-process statements,
+// not the wider one that existed before this fix), accepted as residual
+// risk for a Small-appetite bet rather than solved with a staging-file/
+// two-phase-commit scheme, which would be new architecture, not a cheap
+// tightening.
 // See api/src/__tests__/assetVersion.test.ts for the tests backing this.
 
 import fs from 'fs';
@@ -70,12 +100,16 @@ export function archiveAndReplaceAssetFile(
   const currentFilePath = assetFilePath(asset.id, asset.filename);
   const archivePath = versionFilePath(asset.id, versionId, asset.filename);
 
-  // Archive prior bytes to versions/ BEFORE any DB write — if this
-  // throws (disk full, permissions), nothing below runs and no
-  // asset_versions row is created pointing at bytes that don't exist.
+  // Archive prior bytes to versions/ BEFORE anything else — if this
+  // throws (disk full, permissions), nothing below runs: no DB write,
+  // no live-file mutation.
   if (fs.existsSync(currentFilePath)) {
     fs.copyFileSync(currentFilePath, archivePath);
   }
+
+  const newFilename = sanitizeFilename(requestedFilename);
+  const newHash = crypto.createHash('sha256').update(newBuffer).digest('hex');
+  const newPath = assetFilePath(asset.id, newFilename);
 
   let versionNum: number;
   try {
@@ -90,34 +124,30 @@ export function archiveAndReplaceAssetFile(
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       ).run(versionId, asset.id, num, asset.filename, asset.size, asset.file_hash, notes);
 
+      // Side effects inside the transaction closure, sequenced before
+      // the UPDATE they need to be consistent with — see this file's
+      // header comment (Finding 3). If either throws, better-sqlite3
+      // rolls back the INSERT above (and the UPDATE never runs).
+      fs.writeFileSync(newPath, newBuffer);
+      if (newFilename !== asset.filename && fs.existsSync(currentFilePath)) {
+        try { fs.unlinkSync(currentFilePath); } catch { /* best effort */ }
+      }
+
+      db.prepare(
+        `UPDATE assets SET filename = ?, size = ?, file_hash = ?, thumb_status = ? WHERE id = ?`
+      ).run(newFilename, newBuffer.length, newHash, needsThumbnail(newFilename) ? 'pending' : 'none', asset.id);
+
       return num;
     })();
   } catch (err) {
     // Roll back the archive copy too — don't strand an orphaned version
     // file on disk with no asset_versions row pointing at it. The SQL
-    // transaction above already rolled itself back; the asset row and
-    // live file are untouched (we haven't gotten to them yet).
+    // transaction above already rolled back the INSERT/UPDATE; the
+    // asset row (if the throw happened before the UPDATE ran) still
+    // describes its pre-call state.
     try { if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath); } catch { /* best effort */ }
     throw err;
   }
-
-  // Same order as the pre-extraction route: write new bytes, unlink the
-  // old file if renamed, THEN update the assets row. Not crash-atomic
-  // with the file write (pre-existing characteristic, not something
-  // this bet is fixing) — preserved as-is rather than reordered, so the
-  // explicit VersionPanel flow's observable behavior is unchanged.
-  const newFilename = sanitizeFilename(requestedFilename);
-  const newHash = crypto.createHash('sha256').update(newBuffer).digest('hex');
-  const newPath = assetFilePath(asset.id, newFilename);
-  fs.writeFileSync(newPath, newBuffer);
-
-  if (newFilename !== asset.filename && fs.existsSync(currentFilePath)) {
-    try { fs.unlinkSync(currentFilePath); } catch { /* best effort */ }
-  }
-
-  db.prepare(
-    `UPDATE assets SET filename = ?, size = ?, file_hash = ?, thumb_status = ? WHERE id = ?`
-  ).run(newFilename, newBuffer.length, newHash, needsThumbnail(newFilename) ? 'pending' : 'none', asset.id);
 
   if (needsThumbnail(newFilename)) enqueueThumb(asset.id);
 
