@@ -520,8 +520,8 @@ router.post('/asset/:id/version', requireAuth, upload.single('file'), async (req
 
   const notes = (req.body.notes as string | undefined) ?? null;
 
-  // Shared with the mount-scan auto-versioning path (services/mountImport.ts)
-  // — see services/assetVersion.ts header for why this is extracted.
+  // See services/assetVersion.ts header for why archiveAndReplaceAssetFile
+  // is extracted as shared logic rather than inlined here.
   const { asset: updated } = archiveAndReplaceAssetFile(
     db,
     asset,

@@ -81,8 +81,7 @@ describe('normalizeSegmentName', () => {
   it('trims leading/trailing whitespace and nothing else', () => {
     expect(normalizeSegmentName('  Right Foot  ')).toBe('Right Foot');
     expect(normalizeSegmentName('Right Foot')).toBe('Right Foot');
-    // Case-sensitive by design — mirrors mountImport.ts's ensureFolderPath,
-    // which does no case normalization either.
+    // Case-sensitive by design — no case normalization is applied.
     expect(normalizeSegmentName('right foot')).toBe('right foot');
   });
 });

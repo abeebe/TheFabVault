@@ -236,14 +236,6 @@ export interface HealthResponse {
   authRequired: boolean;
 }
 
-export interface ScanResult {
-  imported: number;
-  // Existing source_path, content changed since last scan — auto-versioned.
-  versioned: number;
-  skipped: number;
-  failed: number;
-}
-
 // ─── Admin ────────────────────────────────────────────────────────────────────
 
 export interface StorageStats {
@@ -264,7 +256,6 @@ export interface AdminConfig {
   dataDirPath: string;
   storage: StorageStats;
   config: {
-    maxUploadMb: number;
     authEnabled: boolean;
     corsOrigins: string[];
   };

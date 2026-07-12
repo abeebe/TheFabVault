@@ -1,6 +1,6 @@
 // Tests for the shared archive-and-replace mechanism
-// (services/assetVersion.ts) that both POST /asset/:id/version and the
-// mount-scan auto-versioning path (services/mountImport.ts) call.
+// (services/assetVersion.ts) behind POST /asset/:id/version (the
+// VersionPanel's explicit "upload new version" action).
 //
 // Why the vi.resetModules() + fresh DATA_DIR/STORAGE_DIR-per-fixture
 // style instead of the in-memory-DB style used by
@@ -163,10 +163,10 @@ describe('archiveAndReplaceAssetFile', () => {
     // archiveAndReplaceAssetFile has no `await` anywhere in its body — it
     // is 100% synchronous (better-sqlite3 + sync fs calls). Scheduling
     // both calls via Promise.resolve().then() simulates two "concurrent"
-    // async callers (e.g. a manual VersionPanel upload racing a mount
-    // scan) without being able to actually interleave them: Node's
-    // run-to-completion semantics guarantee the first .then() callback's
-    // entire synchronous body finishes before the second one starts.
+    // async callers without being able to actually interleave them:
+    // Node's run-to-completion semantics guarantee the first .then()
+    // callback's entire synchronous body finishes before the second one
+    // starts.
     // That's the structural argument in assetVersion.ts's header comment,
     // pinned here as an executable proof rather than left as a claim.
     const fx = await bootFixture();

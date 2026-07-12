@@ -35,7 +35,7 @@ A self-hosted digital asset vault for makers, hackers, and hobbyists. Organize y
 - Per-file setting overrides on top of project defaults
 
 **Storage & Import**
-- NAS / network mount import — point the API at a mounted share; files are moved into storage (zero-copy rename), preserving folder structure
+- Folder-tree project import — pick a local folder in the browser, preview the tree, and commit it into a project's build manifest (dedup by content hash across the whole vault)
 - Configurable storage root — point `STORAGE_DIR` at any path, including a NAS mount
 - Bulk download — download any selection as a ZIP archive
 - Duplicate detection — find duplicates by filename or exact content hash (SHA-256)
@@ -224,7 +224,7 @@ TheFabricatorsVault/
 ├── api/                  # Express API server
 │   └── src/
 │       ├── routes/       # assets, folders, projects, auth, admin, thumbs
-│       ├── services/     # fileStore, thumbGen, mountImport, metaExtract, storageStats
+│       ├── services/     # fileStore, thumbGen, metaExtract, storageStats
 │       ├── auth.ts       # JWT middleware
 │       ├── config.ts     # environment config
 │       └── db.ts         # SQLite + versioned migrations

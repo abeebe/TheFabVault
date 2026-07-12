@@ -17,7 +17,6 @@
     "dotenv": "17.4.2",
     "dxf-parser": "1.1.2",
     "express": "4.19.2",
-    "glob": "13.0.6",
     "jsonwebtoken": "9.0.3",
     "mime-types": "3.0.2",
     "multer": "1.4.5-lts.1",

@@ -1,5 +1,5 @@
 import type {
-  AssetOut, FolderOut, LoginResponse, HealthResponse, ScanResult,
+  AssetOut, FolderOut, LoginResponse, HealthResponse,
   ProjectOut, ProjectDetailOut, ProjectOverrides,
   SetOut, SetDetailOut, SetSuggestion,
   PrinterSettings, LaserSettings, VinylSettings, AdminConfig,
@@ -424,10 +424,6 @@ export const api = {
 
     empty: (): Promise<{ ok: boolean; deleted: number }> =>
       apiFetch('/trash', { method: 'DELETE' }),
-  },
-
-  import: {
-    scan: (): Promise<ScanResult> => apiFetch('/import/scan', { method: 'POST' }),
   },
 
   mounts: {
