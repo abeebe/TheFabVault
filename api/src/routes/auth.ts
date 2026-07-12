@@ -13,31 +13,38 @@ const router = Router();
 // (no express-rate-limit/Redis) — this is a single-process, single-admin,
 // LAN/Tailscale-only app, so an in-memory map is the right scope.
 //
-// req.ip currently reports the raw TCP peer address — there is no
-// `app.set('trust proxy', …)` anywhere in index.ts (Express default:
-// trust proxy = false). Behind NPM that collapses every real client onto
-// NPM's one address, so the attempt budget is effectively shared across
-// all legitimate users rather than per-attacker — coarser than ideal,
-// but SAFE: with trust proxy off, the app ignores X-Forwarded-For
-// entirely, so nothing can forge that header to dodge the limiter.
+// UPDATE (#2060 closed, this commit): index.ts now sets
+// `app.set('trust proxy', '10.10.5.16')` — NPM's exact address. req.ip
+// below now reflects X-Forwarded-For for traffic that genuinely arrived
+// via NPM (per-client granularity instead of every legitimate user
+// collapsing onto NPM's one address, which was the old coarseness this
+// comment used to warn about), while traffic from anywhere else still
+// resolves to the raw TCP peer address, exactly as before.
 //
-// DO NOT "fix" this by turning on trust proxy on its own. docker-
-// compose.production.yml also publishes the api container's port
-// directly on the host, independent of the NPM/web layer (tracked as
-// backlog #2060 — unauthenticated /internal/asset-raw disclosure via
-// that same exposure). While #2060 is open, a LAN-local client can
-// bypass NPM and hit this Express app directly; if trust proxy trusted
-// X-Forwarded-For from that path, the same client could forge a fresh
-// IP on every login attempt and fully defeat this limiter — a net
-// regression, not a hardening. Vera's ruling on re-review (see
-// Reports/vera-fabvault-auth-migration-reverify-2026-07-08.md, "Ruling
-// on the req.ip/trust-proxy question"): once #2060's direct-port
-// exposure is closed (host stops publishing the raw api port; only NPM
-// can reach this app), pin `app.set('trust proxy', '10.10.5.16')` — NPM's
-// exact address, never a bare boolean or `1` — in the SAME change that
-// closes #2060. Until then, leave trust proxy unset; that is the safer
-// of the two configurations given the current compose topology, not a
-// gap to close opportunistically on its own.
+// Why pinning the *exact* address is safe even though docker-
+// compose.production.yml still publishes the api container's port
+// directly on the host (independent of the NPM/web layer — that
+// broader exposure is a separate, still-open matter; see
+// Reports/kit-thefabvault-trust-proxy-2060-assessment-2026-07-08.md):
+// Express's trust-proxy resolution (proxy-addr) walks the address chain
+// starting at the immediate socket peer and only continues into
+// X-Forwarded-For while each hop it has walked so far is itself
+// trusted. A client that bypasses NPM and hits this Express app
+// directly has a socket peer address that is never '10.10.5.16', so
+// that walk stops at the very first hop — X-Forwarded-For is never
+// consulted for that request, and req.ip is that client's own real
+// address. There's no way to forge a fresh IP on every login attempt
+// through this path. A bare `true`/`1` (trust every hop) would NOT have
+// this property — that is what actually would have "fully defeat[ed]
+// this limiter," not trust-proxy in general — which is why the exact-
+// string form is load-bearing, not cosmetic. Do not loosen this to a
+// boolean, a wildcard, or a CIDR broader than NPM's single address.
+//
+// The other half of #2060 — the unauthenticated raw-file disclosure —
+// is closed independently in this same commit by requireLoopback
+// (internalAccess.ts) gating GET /internal/asset-raw/:id/:filename in
+// index.ts; that fix does not depend on trust-proxy at all (it reads
+// req.socket.remoteAddress directly, deliberately not req.ip).
 //
 // LOGIN_WINDOW_MS/LOGIN_MAX_ATTEMPTS are exported so the test suite
 // (__tests__/auth.test.ts) asserts against the real threshold instead of
