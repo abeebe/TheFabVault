@@ -171,7 +171,10 @@ In addition to uploads, TheFabricatorsVault can scan a directory for existing fi
 - Files are **moved** into `STORAGE_DIR/<uuid>/filename`, not copied
 - On the same filesystem, this is an instant rename — zero data duplication
 - Across different filesystems (e.g., scanning a separate NAS share into local storage), the file is copied then the source is deleted
+- If the source can't be deleted (a read-only mount — see the note below on rescanning a permanent NAS source), the file is still imported as a copy and the original is left in place; this is not an error
 - Files already imported are tracked by their original absolute path and are never imported twice
+
+> **Read-only / permanent NAS sources:** if you mount your import path `:ro` (recommended when you want TheFabricatorsVault to treat it as a permanent reference — e.g. to pair with rescan-and-auto-version, see [Manual Re-scan](#manual-re-scan)) rather than a drop folder, new files are imported as copies instead of moves, since the source can't be deleted. Once a file is imported, later rescans detect in-place content changes at that same source path and auto-version them without ever needing to write to the source.
 
 ### Setup
 

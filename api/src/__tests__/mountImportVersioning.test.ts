@@ -126,6 +126,123 @@ describe('scanSingleMount — genuinely new files', () => {
   });
 });
 
+// ─── Production regression, found at the versioning-feature deploy,
+// 2026-07-11 ─────────────────────────────────────────────────────────────
+// Holt's live deploy verification hit EROFS on every scanned file: the
+// real docker-compose.production.yml (and every other shipped compose
+// variant — bindmount/nfs/smb) mounts IMPORT_MOUNT_PATHS `:ro`, but
+// moveFile()'s post-copy fs.unlinkSync(src) on a genuinely-new-file
+// import treated a failed delete as fatal, rethrowing and rolling back
+// the whole import. Sage's QA had only ever run scanSingleMount()
+// against a writable test mount, so this never got exercised against
+// the actual declared-read-only contract before it shipped.
+//
+// These tests remove write permission on the mount directory itself
+// (verified below to be real OS enforcement — this test process runs as
+// a non-root user, so chmod actually blocks unlink/rename the same way
+// a `:ro` bind mount blocks them in production) rather than mocking fs,
+// matching this suite's existing philosophy of exercising the real
+// code path scanSingleMount() runs in production.
+describe('scanSingleMount — read-only mount (production regression, deploy 2026-07-11)', () => {
+  it('imports a genuinely new file from an unwritable mount as a copy instead of failing, leaving the source in place', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1 content');
+
+    // Simulate a read-only NAS mount by removing write permission on the
+    // mount directory. Existing file *content* can still be rewritten in
+    // place (the file's own mode is untouched) — modeling an external
+    // process (the real NAS / a slicer) writing to the share while this
+    // container only ever has read-only access to it.
+    fs.chmodSync(fx.mountDir, 0o555);
+
+    try {
+      const result = await fx.scanSingleMount(fx.mountDir);
+
+      // Before the fix: EROFS/EACCES on the post-copy unlink rethrew,
+      // scanSingleMount()'s catch counted the file as `failed`, and the
+      // already-copied file + its new assets row were rolled back
+      // (cleanupAsset + DELETE) — imported: 0, failed: 1, on EVERY file,
+      // matching exactly what Holt found in production.
+      expect(result).toEqual({
+        imported: 1, versioned: 0, skipped: 0, failed: 0,
+      });
+
+      // The whole point: the source was never deleted (it couldn't be —
+      // the mount is read-only) but the import still succeeded as a copy.
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('v1 content');
+
+      const asset = getAssetBySourcePath(fx, path.resolve(filePath));
+      expect(asset.file_hash).toBe(crypto.createHash('sha256').update('v1 content').digest('hex'));
+
+      const { assetFilePath } = await import('../services/fileStore.js');
+      expect(fs.readFileSync(assetFilePath(asset.id, asset.filename), 'utf-8')).toBe('v1 content');
+    } finally {
+      // Restore write permission before the fixture's afterEach tries to
+      // rmSync the mount dir — a still-read-only dir would fail cleanup.
+      fs.chmodSync(fx.mountDir, 0o700);
+    }
+  });
+
+  it('answers the open question directly: a genuine re-slice on a read-only mount DOES get detected and auto-versioned, once the file is known', async () => {
+    const fx = await bootFixture();
+    const filePath = path.join(fx.mountDir, 'part.cdr');
+    fs.writeFileSync(filePath, 'v1 content');
+
+    // Lock the mount down BEFORE the first scan and leave it read-only
+    // for the whole test — this models the real target scenario: a
+    // permanent, always-:ro NAS source (not a writable mount that
+    // happens to get locked down mid-session). With the fix, the first
+    // scan imports as a copy and leaves `filePath` in place (proven by
+    // the previous test) — unlike a writable mount, where the existing
+    // "genuinely new files" test confirms the source is moved away and
+    // would no longer exist for a rewrite below.
+    fs.chmodSync(fx.mountDir, 0o555);
+
+    try {
+      const first = await fx.scanSingleMount(fx.mountDir);
+      expect(first).toEqual({
+        imported: 1, versioned: 0, skipped: 0, failed: 0,
+      });
+      const before = getAssetBySourcePath(fx, path.resolve(filePath));
+
+      // Re-slice the file in place — rewriting an EXISTING file's bytes
+      // needs write permission on the FILE, not the directory, so this
+      // still succeeds with the dir read-only, matching how a real NAS
+      // is written to out-of-band while this container only ever has
+      // :ro access to it.
+      fs.writeFileSync(filePath, 'v2 content, re-sliced');
+      bumpMtime(filePath);
+
+      const result = await fx.scanSingleMount(fx.mountDir);
+      expect(result).toEqual({
+        imported: 0, versioned: 1, skipped: 0, failed: 0,
+      });
+
+      const after = getAssetBySourcePath(fx, path.resolve(filePath));
+      expect(after.id).toBe(before.id);
+      expect(after.file_hash).toBe(crypto.createHash('sha256').update('v2 content, re-sliced').digest('hex'));
+      expect(countAssetVersions(fx, after.id)).toBe(1);
+
+      // The reconcile/auto-version path never writes to the source at
+      // all (archiveAndReplaceAssetFile only touches internal storage
+      // paths) — proven here against a genuinely unwritable mount dir,
+      // not just by inspection.
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('v2 content, re-sliced');
+
+      const version = fx.db.prepare('SELECT * FROM asset_versions WHERE asset_id = ?').get(after.id) as {
+        id: string; file_hash: string | null;
+      };
+      expect(version.file_hash).toBe(before.file_hash);
+      const { versionFilePath } = await import('../services/fileStore.js');
+      expect(fs.readFileSync(versionFilePath(after.id, version.id, before.filename), 'utf-8')).toBe('v1 content');
+    } finally {
+      fs.chmodSync(fx.mountDir, 0o700);
+    }
+  });
+});
+
 describe('scanSingleMount — acceptance criterion 2: unchanged file at a known path', () => {
   it('resolves to a plain skip with no version and no false positive when a file reappears at the same path with byte-identical content and an identical mtime (mtime pre-filter, Q1: no hash read needed)', async () => {
     const fx = await bootFixture();
