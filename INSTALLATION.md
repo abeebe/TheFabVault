@@ -105,11 +105,6 @@ Your data in `./data/` is persisted via volume mounts and is not affected by reb
 | `CORS_ORIGINS` | `http://localhost` | Comma-separated origins the API allows. Must match how the browser loads the UI. |
 | `STORAGE_DIR` | `./data/storage` | Where asset files and thumbnails are stored. Can be any path — including a NAS mount (see [NAS Storage](#nas-storage) below). |
 | `DATA_DIR` | `./data/db` | Directory for the SQLite database file. |
-| `IMPORT_MOUNT_PATH_HOST` | _(empty)_ | Host path to scan for files to import (see [NAS Import](#nas--mount-import) below). |
-| `IMPORT_MOUNT_PATH` | `/imports` | Container-internal path the host import path is mounted to — do not change. |
-| `IMPORT_MOUNT_ON_STARTUP` | `true` | Automatically scan the import path when the API starts. |
-| `IMPORT_MOUNT_EXTS` | _(empty = defaults)_ | Comma-separated extensions to import. Empty = `stl,obj,3mf,gcode,gc,g,svg,dxf,png,jpg,jpeg,webp`. Use `*` for all. |
-| `IMPORT_MAX_MB` | `512` | Maximum file size to import (in MB). Larger files are skipped. |
 
 ---
 
@@ -158,61 +153,8 @@ services:
 
 With this setup:
 - Files you upload through the web UI go directly to `/mnt/nas/vault/<uuid>/filename`
-- Files imported via mount scan are **moved** into this structure (zero-copy rename if on the same filesystem)
+- Files added via the folder-tree project import (see the in-app Import flow) are moved into this structure the same way
 - No duplication — there is one copy of every file, on the NAS
-
----
-
-## NAS / Mount Import
-
-In addition to uploads, TheFabricatorsVault can scan a directory for existing files and import them into the vault while preserving directory structure as folders.
-
-**How import works:**
-- Files are **moved** into `STORAGE_DIR/<uuid>/filename`, not copied
-- On the same filesystem, this is an instant rename — zero data duplication
-- Across different filesystems (e.g., scanning a separate NAS share into local storage), the file is copied then the source is deleted
-- If the source can't be deleted (a read-only mount — see the note below on rescanning a permanent NAS source), the file is still imported as a copy and the original is left in place; this is not an error
-- Files already imported are tracked by their original absolute path and are never imported twice
-
-> **Read-only / permanent NAS sources:** if you mount your import path `:ro` (recommended when you want TheFabricatorsVault to treat it as a permanent reference — e.g. to pair with rescan-and-auto-version, see [Manual Re-scan](#manual-re-scan)) rather than a drop folder, new files are imported as copies instead of moves, since the source can't be deleted. Once a file is imported, later rescans detect in-place content changes at that same source path and auto-version them without ever needing to write to the source.
-
-### Setup
-
-1. Mount the directory you want to scan on the host:
-
-```bash
-# Example: NFS
-sudo mount -t nfs 192.168.1.50:/volume1/3dprints /mnt/nas/3dprints
-
-# Example: SMB (requires cifs-utils)
-sudo mount -t cifs //192.168.1.50/3dprints /mnt/nas/3dprints -o username=user,password=pass
-```
-
-2. Set the host path in `.env`:
-
-```env
-IMPORT_MOUNT_PATH_HOST=/mnt/nas/3dprints
-IMPORT_MOUNT_ON_STARTUP=true
-```
-
-3. Rebuild and start:
-
-```bash
-docker compose up -d --build
-```
-
-On startup the API will scan the import path, move matching files into `STORAGE_DIR`, create matching vault folders, and queue thumbnails for generation.
-
-> **Tip:** If you want both storage and imports on the same NAS with no data movement at all, set `STORAGE_DIR` to the NAS path (see [NAS Storage](#nas-storage)) and set `IMPORT_MOUNT_PATH_HOST` to a subdirectory or separate folder on that same share. Files will be renamed (not copied) within the NAS.
-
-### Manual Re-scan
-
-Trigger a scan at any time from the **"Scan NAS mount"** button in the sidebar, or via the API:
-
-```bash
-curl -X POST http://localhost:3000/import/scan \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
 
 ---
 

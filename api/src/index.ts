@@ -7,7 +7,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { adminExists, getDb, closeDb } from './db.js';
-import { requireAuth } from './auth.js';
 import { requireLoopback } from './internalAccess.js';
 import authRouter from './routes/auth.js';
 import assetsRouter from './routes/assets.js';
@@ -20,7 +19,6 @@ import setsRouter from './routes/sets.js';
 import adminRouter from './routes/admin.js';
 import mountsRouter from './routes/mounts.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
-import { scanMountImports } from './services/mountImport.js';
 import { assetFilePath } from './services/fileStore.js';
 import { ensureMountPoints, remountAll } from './services/mountManager.js';
 
@@ -89,17 +87,6 @@ app.use('/', setsRouter);
 app.use('/', adminRouter);
 app.use('/', mountsRouter);
 
-// Import scan endpoint
-app.post('/import/scan', requireAuth, async (_req, res) => {
-  try {
-    const result = await scanMountImports();
-    res.json(result);
-  } catch (err) {
-    console.error('[import/scan]', err);
-    res.status(500).json({ error: 'Scan failed' });
-  }
-});
-
 // 404 handler
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -123,20 +110,17 @@ const server = app.listen(config.port, () => {
   // Re-queue any pending thumbnails from before shutdown
   requeuePendingThumbs();
 
-  // Ensure /imports/1,2,3 mount point directories exist
+  // Ensure /imports/1,2,3 mount point directories exist (Admin UI-managed
+  // NFS/SMB "Network Mounts" feature — routes/mounts.ts,
+  // services/mountManager.ts — used for the "library" storage-backend
+  // role and general share mount/unmount. Unrelated to file loading: the
+  // mount-scan auto-import subsystem that used to read from these paths
+  // was removed 2026-07-12 (#2078) — see git history for
+  // services/mountImport.ts if that's ever needed for reference).
   ensureMountPoints();
 
   // Re-mount any NFS/SMB shares configured via the admin UI
-  remountAll(db).then(() => {
-    // Auto-scan mount points on startup (after shares are mounted)
-    if (config.importMountOnStartup) {
-      const paths = config.importMountPaths;
-      if (paths.length) {
-        console.log(`[api] Starting mount import scan: ${paths.join(', ')}`);
-        scanMountImports().catch((err) => console.error('[api] Mount import error:', err));
-      }
-    }
-  }).catch((err) => console.error('[api] remountAll error:', err));
+  remountAll(db).catch((err) => console.error('[api] remountAll error:', err));
 });
 
 // Graceful shutdown

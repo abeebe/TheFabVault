@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
 import archiver from 'archiver';
-import { glob } from 'glob';
 import PQueue from 'p-queue';
 import jwt from 'jsonwebtoken';
 import Database from 'better-sqlite3';
@@ -36,7 +35,7 @@ describe('uuid', () => {
 describe('mime-types', () => {
   it('looks up MIME for known asset extensions', () => {
     // These are the call shapes used in routes/assets.ts and
-    // services/mountImport.ts. If mime-types 3.x ever drops one of
+    // routes/manifestImport.ts. If mime-types 3.x ever drops one of
     // these, the upload pipeline silently returns octet-stream.
     expect(mime.lookup('thing.stl')).toBe('model/stl');
     expect(mime.lookup('thing.obj')).toBe('model/obj');
@@ -69,21 +68,6 @@ describe('archiver', () => {
     const buf = Buffer.concat(chunks);
     // Zip local file header magic — confirms we produced a real zip.
     expect(buf.slice(0, 4).toString('hex')).toBe('504b0304');
-  });
-});
-
-describe('glob', () => {
-  it('finds files matching a pattern in a temp dir', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfv-glob-'));
-    try {
-      fs.writeFileSync(path.join(dir, 'a.stl'), 'x');
-      fs.writeFileSync(path.join(dir, 'b.stl'), 'x');
-      fs.writeFileSync(path.join(dir, 'c.png'), 'x');
-      const matches = await glob('*.stl', { cwd: dir });
-      expect(matches.sort()).toEqual(['a.stl', 'b.stl']);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 

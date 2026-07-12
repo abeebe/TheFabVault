@@ -414,8 +414,8 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                   </button>
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Connect NFS or SMB/CIFS shares directly from the UI. Mounted shares are
-                  automatically scanned for new files on startup. Requires{' '}
+                  Connect NFS or SMB/CIFS shares directly from the UI — set one as the
+                  library storage root, or mount one for manual access. Requires{' '}
                   <span className="font-mono">cap_add: [SYS_ADMIN]</span> in{' '}
                   <span className="font-mono">docker-compose.yml</span>.
                 </p>
@@ -773,7 +773,7 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
               </p>
               <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
                 ⚠️ Existing files will not be automatically moved. You may need to migrate files
-                manually or run an import scan.
+                manually.
               </p>
               <div className="flex gap-3">
                 <button

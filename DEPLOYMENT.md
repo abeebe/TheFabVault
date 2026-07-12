@@ -99,11 +99,6 @@ cp .env.example .env
 | `JWT_TTL` | 43200 | JWT token lifetime in seconds (12 hours) |
 | `STORAGE_DIR` | ./data/storage | Directory for uploaded files |
 | `DATA_DIR` | ./data/db | Directory for database files |
-| `IMPORT_MOUNT_PATH` | - | Path to NAS mount for file imports |
-| `IMPORT_MOUNT_PATH_HOST` | - | Host path for NAS mount (Docker only) |
-| `IMPORT_MOUNT_ON_STARTUP` | true | Auto-scan NAS mount at startup |
-| `IMPORT_MOUNT_EXTS` | stl,obj,3mf,svg,dxf,png,jpg,jpeg,webp,gcode,gc,g | File extensions to import |
-| `IMPORT_MAX_MB` | 512 | Maximum file size per upload in MB |
 
 ### Example Configuration for Development
 
@@ -462,13 +457,6 @@ rm data/db/thefabvault.db-shm
 - Configured in .env via `STORAGE_DIR`, `DATA_DIR`
 - Default: `./data/storage`, `./data/db`
 - Accessible directly from host filesystem
-
-### File Upload Limits
-
-Set `IMPORT_MAX_MB` in `.env` to limit file size:
-```env
-IMPORT_MAX_MB=512  # 512 MB per file
-```
 
 ## Support & Debugging
 

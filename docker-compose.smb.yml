@@ -2,8 +2,7 @@
 #
 # Use this file INSTEAD OF docker-compose.yml when you want Docker itself to manage
 # SMB/CIFS mounts (no SYS_ADMIN capability needed; no Admin UI mount management).
-# Asset storage AND the database live on the SMB server; up to 3 read-only import
-# mounts are supported for scanning.
+# Asset storage AND the database live on the SMB server.
 #
 # Usage:
 #   docker compose -f docker-compose.smb.yml up -d --build
@@ -19,13 +18,19 @@
 #   SMB_DATA_SHARE     — Share path for database     (e.g. fabvault/db)
 #   SMB_USERNAME       — SMB username  (use "guest" for anonymous)
 #   SMB_PASSWORD       — SMB password  (leave blank for guest)
-#
-# Optional per-import overrides (inherit SMB_* by default):
-#   SMB_IMPORT_1_HOST  — override server for import slot 1
-#   SMB_IMPORT_1_SHARE — share path for import slot 1 (e.g. media/3d-prints)
-#   SMB_IMPORT_2_SHARE — share path for import slot 2
-#   SMB_IMPORT_3_SHARE — share path for import slot 3
 #   SMB_VERSION        — SMB/CIFS protocol version (default: 3.0)
+#
+# Historical note (2026-07-12, #2078): this file used to also define up
+# to 3 read-only "import" SMB volumes (fabvault-smb-import-1/2/3, each
+# defaulting to the SAME SMB_STORAGE_SHARE when unset) for the mount-scan
+# auto-import subsystem — that default-to-the-storage-share fallback is
+# exactly the shape of bug that produced ~8,934 spurious asset rows in
+# production on 2026-07-12 via a different compose file with the same
+# self-referencing pattern. The mount-scan subsystem has been removed
+# entirely (see git history for services/mountImport.ts) and the import
+# volumes + IMPORT_MOUNT_* env vars below with it. Loading is done
+# through the interface (browser upload + folder-tree project import)
+# only.
 
 services:
   api:
@@ -45,16 +50,9 @@ services:
       STORAGE_DIR: "/app/storage"
       DATA_DIR: "/app/data"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
-      IMPORT_MOUNT_PATHS: "/imports/1,/imports/2,/imports/3"
-      IMPORT_MOUNT_ON_STARTUP: "${IMPORT_MOUNT_ON_STARTUP:-true}"
-      IMPORT_MOUNT_EXTS: "${IMPORT_MOUNT_EXTS:-}"
-      IMPORT_MAX_MB: "${IMPORT_MAX_MB:-512}"
     volumes:
       - fabvault-smb-storage:/app/storage
       - fabvault-smb-data:/app/data
-      - fabvault-smb-import-1:/imports/1:ro
-      - fabvault-smb-import-2:/imports/2:ro
-      - fabvault-smb-import-3:/imports/3:ro
     stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
@@ -91,25 +89,3 @@ volumes:
       type: cifs
       o: "username=${SMB_USERNAME:-guest},password=${SMB_PASSWORD:-},vers=${SMB_VERSION:-3.0},uid=1000,gid=1000,iocharset=utf8"
       device: "//${SMB_DATA_HOST:-${SMB_STORAGE_HOST}}/${SMB_DATA_SHARE}"
-
-  # ─── Import mounts (read-only) ────────────────────────────────────────────
-  fabvault-smb-import-1:
-    driver: local
-    driver_opts:
-      type: cifs
-      o: "username=${SMB_USERNAME:-guest},password=${SMB_PASSWORD:-},vers=${SMB_VERSION:-3.0},uid=1000,gid=1000,ro,iocharset=utf8"
-      device: "//${SMB_IMPORT_1_HOST:-${SMB_STORAGE_HOST}}/${SMB_IMPORT_1_SHARE:-${SMB_STORAGE_SHARE}}"
-
-  fabvault-smb-import-2:
-    driver: local
-    driver_opts:
-      type: cifs
-      o: "username=${SMB_USERNAME:-guest},password=${SMB_PASSWORD:-},vers=${SMB_VERSION:-3.0},uid=1000,gid=1000,ro,iocharset=utf8"
-      device: "//${SMB_IMPORT_2_HOST:-${SMB_STORAGE_HOST}}/${SMB_IMPORT_2_SHARE:-${SMB_STORAGE_SHARE}}"
-
-  fabvault-smb-import-3:
-    driver: local
-    driver_opts:
-      type: cifs
-      o: "username=${SMB_USERNAME:-guest},password=${SMB_PASSWORD:-},vers=${SMB_VERSION:-3.0},uid=1000,gid=1000,ro,iocharset=utf8"
-      device: "//${SMB_IMPORT_3_HOST:-${SMB_STORAGE_HOST}}/${SMB_IMPORT_3_SHARE:-${SMB_STORAGE_SHARE}}"

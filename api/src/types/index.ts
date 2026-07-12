@@ -348,13 +348,3 @@ export interface SetAssetRow {
 
 // SubAssemblyRow / SubAssemblyPartRow are declared above, alongside their
 // *Out counterparts — see "Build Manifest (sub-assemblies)" section.
-
-export interface ScanResult {
-  imported: number;
-  // Existing source_path, content hash changed since last scan — the
-  // scanner auto-versioned it (archived prior bytes, replaced in place).
-  versioned: number;
-  // Existing source_path, content unchanged (or filtered by extension).
-  skipped: number;
-  failed: number;
-}

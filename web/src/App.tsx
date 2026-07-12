@@ -378,7 +378,6 @@ function AuthenticatedApp({ logout, authRequired }: { logout: () => void; authRe
         onFolderDelete={deleteFolder}
         onAssetsDropToFolder={handleAssetsDropToFolder}
         onAssetsDropToProject={handleAssetsDropToProject}
-        onImportScan={() => { refresh(); refreshFolders(); refreshAssetStats(); refreshProjects(); }}
         onOpenSettings={() => setAdminSettingsOpen(true)}
         onOpenTrash={() => setTrashOpen(true)}
         trashCount={trashCount}

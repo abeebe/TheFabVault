@@ -1,9 +1,17 @@
 // Shared version-archive logic — the "archive current bytes as an
 // asset_versions row, then replace the live file in place" mechanics
-// behind POST /asset/:id/version (routes/assets.ts). Extracted so the
-// mount-scan auto-versioning path (services/mountImport.ts) creates a
-// version exactly the same way an explicit VersionPanel upload does —
-// one archive-and-replace implementation, not two that could drift.
+// behind POST /asset/:id/version (routes/assets.ts), driven by the
+// VersionPanel's explicit "upload new version" action.
+//
+// Historical note: this was originally extracted so a second caller —
+// the mount-rescan auto-versioning path in services/mountImport.ts —
+// could create a version exactly the same way an explicit VersionPanel
+// upload does, without two implementations that could drift. That
+// second caller was removed 2026-07-12 (#2078, mount-scan subsystem
+// decommission — see git history for services/mountImport.ts). This
+// function itself, and the versioning mechanism it backs
+// (asset_versions, migration v9), are untouched and still the only way
+// a new version gets archived-and-replaced.
 // Same extraction rationale as services/assetUpload.ts's
 // saveUploadedFile/findAssetByHash (see that file's header comment).
 //
@@ -80,13 +88,15 @@ export interface ArchiveAndReplaceResult {
  * then replace the live file with newBuffer/requestedFilename and update
  * the assets row in place (same id — never a new asset row).
  *
- * `notes` carries either a user-authored note (explicit VersionPanel
- * upload) or a system-authored origin marker string (mount-scan
- * auto-version) — see mountImport.ts's AUTO_VERSION_NOTE. No schema
- * column for "source" — Sloane's PRD leans on the existing free-text
- * `notes` column rather than a migration for this (fork left to Kit's
- * call; taking the cheaper option since a single-user tool doesn't need
- * a CHECK-constrained source enum to filter by later).
+ * `notes` carries a user-authored note from the explicit VersionPanel
+ * upload, or null. (Previously also carried a system-authored origin
+ * marker string for the mount-rescan auto-version path — see the
+ * historical note in this file's header — but that caller is gone as of
+ * 2026-07-12, #2078.) No schema column for "source" — Sloane's PRD
+ * leans on the existing free-text `notes` column rather than a
+ * migration for this (fork left to Kit's call; taking the cheaper
+ * option since a single-user tool doesn't need a CHECK-constrained
+ * source enum to filter by later).
  */
 export function archiveAndReplaceAssetFile(
   db: Database.Database,

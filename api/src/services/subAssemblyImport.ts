@@ -4,7 +4,8 @@
 //   mapping section: ensureSubAssemblyPath, hash-check ordering, idempotency)
 // Reports/reid-thefabvault-import-ux-2026-07-07.md (the screen this backs)
 //
-// ensureSubAssemblyPath is a direct port of mountImport.ts's
+// ensureSubAssemblyPath was originally a direct port of the (now-removed,
+// 2026-07-12 #2078) mount-scan subsystem's services/mountImport.ts
 // ensureFolderPath — same shape (walk path segments, find-by-name-under-
 // parent-or-create), scoped to a project's sub_assemblies tree instead of
 // the global folders tree. Written once here so both the single-file

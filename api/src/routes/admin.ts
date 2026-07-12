@@ -51,7 +51,6 @@ router.get('/admin/config', requireAdmin, (_req: Request, res: Response) => {
         assetCount: breakdown.assetCount,
       },
       config: {
-        maxUploadMb: config.importMaxMb,
         // This route is requireAdmin-gated, so reaching it already implies
         // an admin is authenticated — adminExists() will always be true
         // here in practice. Reported via the real check anyway rather than

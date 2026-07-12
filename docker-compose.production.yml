@@ -17,7 +17,16 @@
 #   JWT_TTL
 #   CORS_ORIGINS, VITE_API_URL (baked into web image at build time by GHA)
 #   API_PORT (default: 3005), WEB_PORT (default: 8085)
-#   IMPORT_MOUNT_ON_STARTUP, IMPORT_MOUNT_EXTS, IMPORT_MAX_MB, IMPORT_MOUNT_PATHS
+#
+# Historical note (2026-07-12, #2078): this file used to also bind-mount
+# /mnt/fabvault/storage (the SAME host dir as /app/storage) to
+# /imports/1,2,3 for the mount-scan auto-import subsystem. That
+# misconfiguration made the scanner re-import the vault's own storage
+# into itself (~8,934 spurious asset rows on 2026-07-12). The mount-scan
+# subsystem has been removed entirely — see git history for
+# services/mountImport.ts — and the /imports/N binds + IMPORT_MOUNT_*
+# env vars below with it. Loading is done through the interface (browser
+# upload + folder-tree project import) only.
 #
 # JWT_SECRET is no longer required — if unset, one is generated and
 # persisted in the DB (system_config.jwtSecret) on first boot. There is
@@ -43,18 +52,11 @@ services:
       STORAGE_DIR: "/app/storage"
       DATA_DIR: "/app/data"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
-      IMPORT_MOUNT_ON_STARTUP: "${IMPORT_MOUNT_ON_STARTUP:-false}"
-      IMPORT_MOUNT_EXTS: "${IMPORT_MOUNT_EXTS:-}"
-      IMPORT_MAX_MB: "${IMPORT_MAX_MB:-512}"
-      IMPORT_MOUNT_PATHS: "${IMPORT_MOUNT_PATHS:-/imports/1,/imports/2,/imports/3}"
     cap_add:
       - SYS_ADMIN
     volumes:
       - /var/lib/fabvault/db:/app/data
       - /mnt/fabvault/storage:/app/storage
-      - /mnt/fabvault/storage:/imports/1:ro
-      - /mnt/fabvault/storage:/imports/2:ro
-      - /mnt/fabvault/storage:/imports/3:ro
     stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]

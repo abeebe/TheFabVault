@@ -190,11 +190,18 @@ const MIGRATIONS: string[] = [
   // last time a mount-scan reconciled this asset against its source_path.
   // NULL for assets with no source_path (plain upload/drag-drop/folder
   // import) and, once, for every pre-existing mount-imported asset until
-  // its first post-migration scan establishes a baseline. Lets
+  // its first post-migration scan establishes a baseline. Let
   // scanSingleMount() skip re-hashing a known path when the OS-reported
-  // mtime hasn't moved since the last scan, instead of reading+hashing
+  // mtime hadn't moved since the last scan, instead of reading+hashing
   // every file on every pass (services/mountImport.ts; feasibility Q1,
   // Reports/sloane-prd-thefabvault-file-versioning-2026-07-11.md).
+  //
+  // Historical note (2026-07-12, #2078): the mount-scan subsystem that
+  // wrote and read this column was removed entirely (self-import bug —
+  // see Reports/holt-fabvault-*-2026-07-12.md). This column is now
+  // unused/dead for every row going forward — left in place, NOT backed
+  // out with a destructive migration; it's inert and harmless, and every
+  // historical migration in this array stays immutable regardless.
   `ALTER TABLE assets ADD COLUMN source_mtime_ms INTEGER;`,
 ];
 

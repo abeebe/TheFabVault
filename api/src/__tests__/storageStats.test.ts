@@ -6,8 +6,7 @@
 // walkDirectorySize() is pure filesystem math with no DB dependency, so
 // these tests build a synthetic directory tree with fs.mkdtempSync and
 // call it directly — no need for the vi.resetModules()/env-var dance
-// getStorageBreakdown() itself would require (that's exercised at the
-// mountImport integration-test layer instead).
+// getStorageBreakdown() itself would require.
 
 import { describe, expect, it, afterEach } from 'vitest';
 import fs from 'fs';
