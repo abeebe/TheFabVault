@@ -1,4 +1,5 @@
 #!/bin/bash
+# start.sh: non-Docker startup, builds and launches API + Web as background Node processes; used for dev, manual prod deploys, and systemd.
 set -e
 
 # Colors for output
