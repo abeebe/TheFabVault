@@ -1,8 +1,43 @@
+# TheFabVault -- quickstart compose file (published images, no build step)
+#
+# Pulls pre-built images from GHCR. This is the fastest way to run
+# TheFabVault: no Node/npm toolchain, no local build.
+#
+# Images are published for linux/amd64 AND linux/arm64 (Raspberry Pi, Apple
+# Silicon, etc.) -- Docker automatically pulls the manifest that matches
+# your host's architecture, no extra flags needed on either platform.
+#
+# Run it:
+#   docker compose up -d
+#
+# Images are pinned to v0.1.0 for a reproducible, known-good deploy. To move
+# to a newer release once one exists, bump the two "image:" tags below and
+# re-run `docker compose up -d` (pulls the new tag, recreates the containers,
+# keeps your data).
+#
+# IMPORTANT -- read before you deploy to more than one machine:
+# The web image has its API URL (VITE_API_URL) compiled into the browser
+# bundle at build time, not read from this file at container start. The
+# v0.1.0 web image ships with VITE_API_URL=http://localhost:3000, which
+# only works if you open the UI on the SAME machine that runs Docker
+# (http://localhost:8080), or you tunnel/forward to that machine so your
+# browser still sees it as localhost (Tailscale, SSH -L, etc).
+#
+# If you want to reach TheFabVault from another device on your LAN using
+# the server's IP (e.g. http://192.168.1.50:8080), the published web image
+# will not work -- it will try to call http://localhost:3000 from that
+# device's own browser and fail. For that setup, build the web image
+# yourself with your server's IP baked in:
+#   docker compose -f docker-compose.build.yml up -d --build
+# See README.md -> "Build from source" for the full walkthrough.
+#
+# Data persistence: everything lives under ./data/ on the host (bind
+# mounts below), so `docker compose down` (without -v) and image upgrades
+# never touch your files or database.
+
 services:
   api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
+    image: ghcr.io/abeebe/thefabvault-api:v0.1.0
     restart: unless-stopped
     init: true
     ports:
@@ -15,9 +50,9 @@ services:
       JWT_TTL: "${JWT_TTL:-43200}"
       STORAGE_DIR: "/app/storage"
       DATA_DIR: "/app/data"
-      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
-    # SYS_ADMIN lets the API mount NFS/SMB shares inside the container (via Admin UI).
-    # Safe to remove if you don't use the Network Mounts feature.
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:8080}"
+    # SYS_ADMIN lets the API mount NFS/SMB shares inside the container (via
+    # the Admin UI Network Mounts panel). Safe to remove if you don't use it.
     cap_add:
       - SYS_ADMIN
     volumes:
@@ -32,19 +67,10 @@ services:
       start_period: 10s
 
   web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-      args:
-        VITE_API_URL: "${VITE_API_URL:-http://localhost:3000}"
-        # Pass the host's current git short SHA into the build so the
-        # sidebar can show which deploy is live. Set in your shell:
-        #   export VITE_GIT_SHA=$(git rev-parse --short HEAD)
-        # or it falls back to 'dev'.
-        VITE_GIT_SHA: "${VITE_GIT_SHA:-dev}"
+    image: ghcr.io/abeebe/thefabvault-web:v0.1.0
     restart: unless-stopped
     ports:
-      - "${WEB_PORT:-80}:80"
+      - "${WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy

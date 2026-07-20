@@ -1,6 +1,11 @@
 # TheFabVault Deployment Guide
 
-This guide covers deploying TheFabVault in various environments: Docker (recommended), local development, and production non-Docker setups.
+This guide covers building and deploying TheFabVault from source: Docker (recommended), local development, and production non-Docker setups.
+
+> Just want to run the app without building anything? See the README's "Run
+> it (published images)" section: pull two GHCR images and `docker compose
+> up -d`. Everything below builds from source instead, using
+> `docker-compose.build.yml`.
 
 ## Table of Contents
 1. [Prerequisites](#prerequisites)
@@ -41,10 +46,10 @@ cp .env.example .env
 # Edit .env with your settings (especially change AUTH_PASSWORD)
 
 # Start services
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 
 # Check logs
-docker compose logs -f
+docker compose -f docker-compose.build.yml logs -f
 ```
 
 Access the application at `http://localhost:8080` (or your configured WEB_PORT).
@@ -142,29 +147,29 @@ Docker Compose automatically handles:
 
 ```bash
 # Start services in background
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 
 # View logs
-docker compose logs -f api
-docker compose logs -f web
+docker compose -f docker-compose.build.yml logs -f api
+docker compose -f docker-compose.build.yml logs -f web
 
 # Stop services
-docker compose down
+docker compose -f docker-compose.build.yml down
 
 # Remove volumes too (WARNING: deletes all data)
-docker compose down -v
+docker compose -f docker-compose.build.yml down -v
 ```
 
 ### Docker Compose Environment Variables
 
-The `docker-compose.yml` file automatically reads from `.env` and:
+The `docker-compose.build.yml` file automatically reads from `.env` and:
 1. Passes variables to the API container at runtime
 2. Passes `VITE_API_URL` to the web build process (at image build time)
 3. Maps volumes for persistent storage
 
 **Important:** The web image must be rebuilt if you change `VITE_API_URL`:
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 ### Accessing the Application
@@ -435,7 +440,7 @@ rm data/db/thefabvault.db-shm
 
 **Docker:**
 ```
-.env → docker-compose.yml → containers (both at build and runtime)
+.env → docker-compose.build.yml → containers (both at build and runtime)
 ```
 
 **Non-Docker:**
@@ -448,7 +453,7 @@ rm data/db/thefabvault.db-shm
 ### Data Storage
 
 **Docker:**
-- Volumes mapped in docker-compose.yml
+- Volumes mapped in docker-compose.build.yml (or docker-compose.yml for published images)
 - Data persists even when containers stop
 - Location in container: `/app/storage`, `/app/data`
 - Host location: `./data/storage`, `./data/db`

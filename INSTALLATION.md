@@ -1,5 +1,10 @@
 # Installation Guide
 
+> This guide covers building TheFabVault from source. If you just want to run
+> it without touching code, see the README's "Run it (published images)"
+> section instead: pull two GHCR images and `docker compose up -d`, no
+> cloning or building required.
+
 ## Requirements
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) (v2)
@@ -11,8 +16,8 @@
 ## 1. Clone the Repository
 
 ```bash
-git clone https://github.com/youruser/TheFabricatorsVault.git
-cd TheFabricatorsVault
+git clone https://github.com/abeebe/TheFabVault.git
+cd TheFabVault
 ```
 
 ---
@@ -46,7 +51,7 @@ CORS_ORIGINS=http://192.168.1.100:8080
 ## 3. Build and Start
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 The first build takes a few minutes (Puppeteer downloads Chromium). Subsequent starts are fast.
@@ -54,13 +59,13 @@ The first build takes a few minutes (Puppeteer downloads Chromium). Subsequent s
 Check that both containers are running:
 
 ```bash
-docker compose ps
+docker compose -f docker-compose.build.yml ps
 ```
 
 View logs:
 
 ```bash
-docker compose logs -f
+docker compose -f docker-compose.build.yml logs -f
 ```
 
 ---
@@ -81,10 +86,10 @@ Log in with the `AUTH_USERNAME` and `AUTH_PASSWORD` you set in `.env`.
 
 ```bash
 # Stop
-docker compose down
+docker compose -f docker-compose.build.yml down
 
 # Update (after pulling new code)
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 Your data in `./data/` is persisted via volume mounts and is not affected by rebuilds.
@@ -138,7 +143,7 @@ sudo mount -t nfs 192.168.1.50:/volume1/vault /mnt/nas/vault
 sudo mount -t cifs //192.168.1.50/vault /mnt/nas/vault -o username=user,password=pass
 ```
 
-Then in `docker-compose.yml`, add a volume mount so the container can reach it, and set `STORAGE_DIR` to the container-internal path:
+Then in `docker-compose.build.yml` (or `docker-compose.yml` if you are using published images), add a volume mount so the container can reach it, and set `STORAGE_DIR` to the container-internal path:
 
 ```yaml
 services:

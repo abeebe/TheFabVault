@@ -1,0 +1,96 @@
+name: Release
+
+# Builds immutable, versioned images and cuts a GitHub Release. Triggered
+# by pushing a tag like v0.1.0.
+#
+# Multi-arch (linux/amd64 + linux/arm64) via Docker Buildx with QEMU
+# emulation for the arm64 leg. The arm64 build compiles better-sqlite3's
+# native module under emulation -- historically the riskiest step for
+# cross-arch CI builds of this app -- and it is verified working
+# end-to-end (2026-07-20): a full `docker buildx build --platform
+# linux/arm64` of api/Dockerfile ran all stages to completion, including
+# that native compile, and a repeat run returned a clean exit 0 off the
+# shared build cache. No native arm64 runner is required.
+#
+# This is a separate track from deploy.yml on purpose: deploy.yml's :latest
+# and :<sha> tags bake in secrets.VITE_API_URL (Aaron's internal
+# fabvault-api hostname) and feed the live Portainer stack via the
+# portainer-image-watcher poller. Those tags are not safe for a stranger to
+# pull and run, the web bundle would try to call a hostname that only
+# resolves inside Aaron's network.
+#
+# Versioned release images instead bake in a generic VITE_API_URL
+# (http://localhost:3000) so they work out of the box for anyone running
+# `docker compose up -d` with the published docker-compose.yml and opening
+# the UI on the same machine as Docker. See README.md "Run it (published
+# images)" for the caveats of that default.
+#
+# Pushing a new tag never touches the live stack: portainer-image-watcher
+# only watches the :latest tag, not version tags.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for arm64 emulation on this amd64 runner)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/abeebe/thefabvault-api:${{ github.ref_name }}
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VITE_API_URL=http://localhost:3000
+            VITE_GIT_SHA=${{ github.ref_name }}
+          tags: |
+            ghcr.io/abeebe/thefabvault-web:${{ github.ref_name }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TheFabVault ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            Published images for this release (multi-arch: linux/amd64 + linux/arm64):
+
+            - `ghcr.io/abeebe/thefabvault-api:${{ github.ref_name }}`
+            - `ghcr.io/abeebe/thefabvault-web:${{ github.ref_name }}`
+
+            Docker automatically pulls the manifest matching your host's architecture, no extra flags needed on either platform.
+
+            Quickstart: see [README.md](https://github.com/abeebe/TheFabVault/blob/${{ github.ref_name }}/README.md#run-it-published-images).

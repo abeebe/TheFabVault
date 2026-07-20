@@ -1,0 +1,66 @@
+# TheFabVault -- build-from-source compose file (development / customizing the app)
+#
+# Builds both images locally from ./api and ./web instead of pulling from GHCR.
+# Use this if you are changing code, or need a web image baked with a
+# VITE_API_URL other than what the published images ship with (VITE_API_URL is
+# a browser-side value compiled into the web bundle at build time, so it can't
+# be swapped at container-start like a normal runtime env var).
+#
+# Run it:
+#   docker compose -f docker-compose.build.yml up -d --build
+#
+# If you just want to run the app without touching code, use docker-compose.yml
+# instead -- it pulls published, versioned images from GHCR, no build step, and
+# supports both linux/amd64 and linux/arm64 hosts. See README.md -> "Run it
+# (published images)".
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      AUTH_USERNAME: "${AUTH_USERNAME}"
+      AUTH_PASSWORD: "${AUTH_PASSWORD}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_TTL: "${JWT_TTL:-43200}"
+      STORAGE_DIR: "/app/storage"
+      DATA_DIR: "/app/data"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
+    # SYS_ADMIN lets the API mount NFS/SMB shares inside the container (via Admin UI).
+    # Safe to remove if you don't use the Network Mounts feature.
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      - ./data/storage:/app/storage
+      - ./data/db:/app/data
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: "${VITE_API_URL:-http://localhost:3000}"
+        # Pass the host's current git short SHA into the build so the
+        # sidebar can show which deploy is live. Set in your shell:
+        #   export VITE_GIT_SHA=$(git rev-parse --short HEAD)
+        # or it falls back to 'dev'.
+        VITE_GIT_SHA: "${VITE_GIT_SHA:-dev}"
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
