@@ -33,6 +33,7 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
 import { requireAuth } from '../auth.js';
+import { asyncHandler } from '../asyncHandler.js';
 import { getDb } from '../db.js';
 import { sanitizeFilename, thumbExists } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
@@ -127,17 +128,18 @@ function parseImportTarget(
 
 // ─── POST /project/:id/import/upload-file ─────────────────────────────────────
 
-router.post('/project/:id/import/upload-file', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/project/:id/import/upload-file', requireAuth, upload.single('file'), asyncHandler(async (req: Request, res: Response) => {
   // Whole-body try/catch — Remy's review found that deleting the target
   // project mid-import (a real scenario for a large, long-running batch)
   // throws an FK-violation out of resolveAndPlace with nothing to catch
-  // it, and an uncaught throw in an Express handler crashes the entire
-  // process (no app-wide error middleware exists yet — see index.ts;
-  // that's a separate ticket, this is just making these two handlers not
-  // take the whole API down). The client's per-file processOne() in
-  // importStore.ts already handles an arbitrary HTTP error gracefully
-  // (marks that one file as 'error' and moves on), so a 500 here degrades
-  // to "this file failed" instead of "every open tab is down."
+  // it. This local try/catch still gives a specific "Import failed"
+  // message; the asyncHandler wrapper (#2044) plus the app-wide
+  // errorMiddleware in index.ts is the backstop underneath it for
+  // anything this catch doesn't cover, not a replacement for it. The
+  // client's per-file processOne() in importStore.ts already handles an
+  // arbitrary HTTP error gracefully (marks that one file as 'error' and
+  // moves on), so a 500 here degrades to "this file failed" instead of
+  // "every open tab is down."
   try {
     const db = getDb();
     const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
@@ -177,7 +179,7 @@ router.post('/project/:id/import/upload-file', requireAuth, upload.single('file'
     console.error('[import/upload-file]', err);
     if (!res.headersSent) res.status(500).json({ error: 'Import failed' });
   }
-});
+}));
 
 // ─── POST /project/:id/import/link-existing ───────────────────────────────────
 // Used for: (1) a vault-wide dedup match the client already knows about

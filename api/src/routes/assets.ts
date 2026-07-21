@@ -6,6 +6,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import mime from 'mime-types';
 import { requireAuth } from '../auth.js';
+import { asyncHandler } from '../asyncHandler.js';
 import { getDb } from '../db.js';
 import {
   assetFilePath,
@@ -99,7 +100,7 @@ router.post('/check-hash', requireAuth, (req: Request, res: Response) => {
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
 
-router.post('/upload', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/upload', requireAuth, upload.single('file'), asyncHandler(async (req: Request, res: Response) => {
   if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
 
   const originalName = req.file.originalname || 'upload';
@@ -117,11 +118,11 @@ router.post('/upload', requireAuth, upload.single('file'), async (req: Request, 
   if (needsThumbnail(filename)) enqueueThumb(id);
 
   res.status(201).json(toOut(row));
-});
+}));
 
 // ─── POST /upload/batch ───────────────────────────────────────────────────────
 
-router.post('/upload/batch', requireAuth, upload.array('files'), async (req: Request, res: Response) => {
+router.post('/upload/batch', requireAuth, upload.array('files'), asyncHandler(async (req: Request, res: Response) => {
   const files = req.files as Express.Multer.File[] | undefined;
   if (!files || files.length === 0) { res.status(400).json({ error: 'No files provided' }); return; }
 
@@ -139,7 +140,7 @@ router.post('/upload/batch', requireAuth, upload.array('files'), async (req: Req
   }
 
   res.status(201).json(results);
-});
+}));
 
 // ─── GET /assets ──────────────────────────────────────────────────────────────
 
@@ -302,7 +303,7 @@ router.get('/file/:id/:name', requireAuth, (req: Request, res: Response) => {
 
 // ─── POST /asset/:id/extract-meta ─────────────────────────────────────────────
 
-router.post('/asset/:id/extract-meta', requireAuth, async (req: Request, res: Response) => {
+router.post('/asset/:id/extract-meta', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id) as AssetRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
@@ -319,7 +320,7 @@ router.post('/asset/:id/extract-meta', requireAuth, async (req: Request, res: Re
     console.error('[assets] extract-meta error:', err);
     res.status(500).json({ error: 'Extraction failed' });
   }
-});
+}));
 
 // ─── PATCH /asset/:id/meta ────────────────────────────────────────────────────
 
@@ -512,7 +513,7 @@ router.get('/asset/:id/versions', requireAuth, (req: Request, res: Response) => 
 
 // ─── POST /asset/:id/version — upload a new version of an asset ───────────────
 
-router.post('/asset/:id/version', requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/asset/:id/version', requireAuth, upload.single('file'), asyncHandler(async (req: Request, res: Response) => {
   if (!req.file) { res.status(400).json({ error: 'No file provided' }); return; }
   const db = getDb();
   const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
@@ -531,11 +532,11 @@ router.post('/asset/:id/version', requireAuth, upload.single('file'), async (req
   );
 
   res.json({ asset: toOut(updated) });
-});
+}));
 
 // ─── POST /asset/:id/version/:versionId/restore — restore a previous version ──
 
-router.post('/asset/:id/version/:versionId/restore', requireAuth, async (req: Request, res: Response) => {
+router.post('/asset/:id/version/:versionId/restore', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const db = getDb();
   const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as AssetRow | undefined;
   if (!asset) { res.status(404).json({ error: 'Asset not found' }); return; }
@@ -567,7 +568,7 @@ router.post('/asset/:id/version/:versionId/restore', requireAuth, async (req: Re
 
   const updated = db.prepare('SELECT * FROM assets WHERE id = ?').get(asset.id) as AssetRow;
   res.json({ asset: toOut(updated) });
-});
+}));
 
 // ─── DELETE /asset/:id/version/:versionId ─────────────────────────────────────
 

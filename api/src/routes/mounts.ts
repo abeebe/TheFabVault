@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAdmin } from '../auth.js';
+import { asyncHandler } from '../asyncHandler.js';
 import { getDb } from '../db.js';
 import {
   mountShare,
@@ -57,7 +58,7 @@ router.get('/admin/mounts', requireAdmin, (_req: Request, res: Response) => {
 
 // ─── POST /admin/mounts ──────────────────────────────────────────────────────
 // Create or update mount config for a slot
-router.post('/admin/mounts', requireAdmin, async (req: Request, res: Response) => {
+router.post('/admin/mounts', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const { slot, name, type, host, remote_path, username, password, mount_opts, enabled, role } =
     req.body as {
       slot?: number; name?: string; type?: string; host?: string; remote_path?: string;
@@ -166,10 +167,10 @@ router.post('/admin/mounts', requireAdmin, async (req: Request, res: Response) =
     console.error('[mounts] POST /admin/mounts:', err);
     res.status(500).json({ error: 'Failed to save mount config' });
   }
-});
+}));
 
 // ─── DELETE /admin/mounts/:slot ──────────────────────────────────────────────
-router.delete('/admin/mounts/:slot', requireAdmin, async (req: Request, res: Response) => {
+router.delete('/admin/mounts/:slot', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const slot = parseInt(req.params.slot, 10);
   if (![1, 2, 3].includes(slot)) {
     res.status(400).json({ error: 'slot must be 1, 2, or 3' });
@@ -204,10 +205,10 @@ router.delete('/admin/mounts/:slot', requireAdmin, async (req: Request, res: Res
     console.error('[mounts] DELETE /admin/mounts/:slot:', err);
     res.status(500).json({ error: 'Failed to delete mount config' });
   }
-});
+}));
 
 // ─── POST /admin/mounts/:slot/mount ──────────────────────────────────────────
-router.post('/admin/mounts/:slot/mount', requireAdmin, async (req: Request, res: Response) => {
+router.post('/admin/mounts/:slot/mount', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const slot = parseInt(req.params.slot, 10);
   const db = getDb();
   const config = db
@@ -231,10 +232,10 @@ router.post('/admin/mounts/:slot/mount', requireAdmin, async (req: Request, res:
     console.error(`[mounts] Mount failed for slot ${slot}:`, err);
     res.status(500).json({ error: err.message ?? 'Mount failed' });
   }
-});
+}));
 
 // ─── POST /admin/mounts/:slot/unmount ────────────────────────────────────────
-router.post('/admin/mounts/:slot/unmount', requireAdmin, async (req: Request, res: Response) => {
+router.post('/admin/mounts/:slot/unmount', requireAdmin, asyncHandler(async (req: Request, res: Response) => {
   const slot = parseInt(req.params.slot, 10);
 
   try {
@@ -249,6 +250,6 @@ router.post('/admin/mounts/:slot/unmount', requireAdmin, async (req: Request, re
     console.error(`[mounts] Unmount failed for slot ${slot}:`, err);
     res.status(500).json({ error: err.message ?? 'Unmount failed' });
   }
-});
+}));
 
 export default router;

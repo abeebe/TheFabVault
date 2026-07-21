@@ -21,8 +21,17 @@ import mountsRouter from './routes/mounts.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
 import { assetFilePath } from './services/fileStore.js';
 import { ensureMountPoints, remountAll } from './services/mountManager.js';
+import { errorMiddleware } from './errorMiddleware.js';
+import { installProcessGuards } from './processGuards.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Installed before anything else runs (route registration, mount setup,
+// DB init below all happen synchronously after this) so a rejection or
+// throw during boot itself is logged instead of silently killing the
+// process with no trace. See processGuards.ts for the unhandledRejection
+// vs uncaughtException distinction — #2044.
+installProcessGuards();
 
 const app = express();
 
@@ -91,6 +100,14 @@ app.use('/', mountsRouter);
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
+
+// Global error-handling middleware — MUST be mounted last, after every
+// route and after the 404 handler above. Express recognizes it as an
+// error handler by its 4-argument signature (err, req, res, next), not by
+// position, but it only ever sees a request that reached here via
+// next(err) — so registration order doesn't change what it catches, only
+// convention. Backstop for #2044; see errorMiddleware.ts.
+app.use(errorMiddleware);
 
 // Start server
 const server = app.listen(config.port, () => {
