@@ -203,16 +203,175 @@ const MIGRATIONS: string[] = [
   // out with a destructive migration; it's inert and harmless, and every
   // historical migration in this array stays immutable regardless.
   `ALTER TABLE assets ADD COLUMN source_mtime_ms INTEGER;`,
+  // v15: "Local MakerWorld" restructure foundations (Phase A, #2154).
+  // See Reports/derek-thefabvault-makerworld-restructure-plan-2026-07-22.md.
+  //
+  // users table-copy: the only safe SQLite pattern for dropping/altering
+  // a CHECK constraint (SQLite has no ALTER ... DROP CONSTRAINT). This
+  // drops the v13 `role CHECK(role IN ('admin'))` so multi-user
+  // (Phase D) doesn't need a second breaking migration later. Verified
+  // FK-safe before writing this: grepping every migration string v1–v14
+  // above for `REFERENCES users` / `users(` turns up nothing — no table
+  // references `users` yet, so DROP TABLE users (with foreign_keys=ON)
+  // cannot orphan a child row. That stops being true the moment
+  // `models.owner_id` is created a few statements below, which is
+  // exactly why the copy happens FIRST, in this same migration, before
+  // anything is given the chance to point at it.
+  //
+  // role keeps its existing per-row value for every copied user (an
+  // existing admin stays 'admin' — only the DEFAULT for new rows
+  // becomes 'member'). No CHECK on the new role column: valid values
+  // are enforced by services/enumValidators.ts (USER_ROLES) instead —
+  // this migration's whole reason for existing is to not repeat v13's
+  // CHECK mistake on the very column it's fixing.
+  `
+  CREATE TABLE users_new (
+    id            TEXT    PRIMARY KEY,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    role          TEXT    NOT NULL DEFAULT 'member',
+    display_name  TEXT,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  INSERT INTO users_new (id, username, password_hash, role, display_name, disabled, created_at, updated_at)
+    SELECT id, username, password_hash, role, NULL, 0, created_at, updated_at FROM users;
+  DROP TABLE users;
+  ALTER TABLE users_new RENAME TO users;
+
+  -- Curated category tree (self-referential parent_id, same nesting
+  -- pattern as folders.parent_id / sub_assemblies.parent_id). Seeded by
+  -- seedCategoriesIfEmpty() below, alongside seedAdminIfNeeded.
+  CREATE TABLE IF NOT EXISTS categories (
+    id         TEXT    PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    parent_id  TEXT    REFERENCES categories(id) ON DELETE SET NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
+
+  -- The new model-centric core unit. Models reference existing assets
+  -- via the model_files join table below — assets stay the untouched
+  -- file substrate, a model doesn't own its files, it links them.
+  -- visibility is a two-value TEXT enum (public/private, no CHECK —
+  -- see enumValidators.ts) enforced at the query layer once
+  -- services/visibility.ts lands in Phase B; single-user today, so
+  -- every existing/new model defaults to 'public' with no behavior
+  -- change yet.
+  CREATE TABLE IF NOT EXISTS models (
+    id               TEXT    PRIMARY KEY,
+    title            TEXT    NOT NULL,
+    description      TEXT,
+    category_id      TEXT    REFERENCES categories(id) ON DELETE SET NULL,
+    tags_json        TEXT    NOT NULL DEFAULT '[]',
+    owner_id         TEXT    REFERENCES users(id) ON DELETE SET NULL,
+    visibility       TEXT    NOT NULL DEFAULT 'public',
+    cover_asset_id   TEXT    REFERENCES assets(id) ON DELETE SET NULL,
+    source_url       TEXT,
+    source_site      TEXT,
+    source_author    TEXT,
+    license          TEXT,
+    source_folder_id TEXT    REFERENCES folders(id) ON DELETE SET NULL,
+    created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+    deleted_at       INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_models_owner    ON models(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_models_category ON models(category_id);
+  CREATE INDEX IF NOT EXISTS idx_models_deleted  ON models(deleted_at);
+  CREATE INDEX IF NOT EXISTS idx_models_created  ON models(created_at DESC);
+
+  -- Join table: which assets belong to which model, and in what role
+  -- (part/image/doc/other — app-validated, see enumValidators.ts). One
+  -- asset can belong to multiple models. Gallery images are just assets
+  -- with role='image', riding the existing thumbnail pipeline for free.
+  CREATE TABLE IF NOT EXISTS model_files (
+    model_id   TEXT    NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    asset_id   TEXT    NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    role       TEXT    NOT NULL DEFAULT 'part',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    label      TEXT,
+    PRIMARY KEY (model_id, asset_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_model_files_model ON model_files(model_id);
+  CREATE INDEX IF NOT EXISTS idx_model_files_asset ON model_files(asset_id);
+
+  -- Named slicer settings for a model (one model can have several —
+  -- e.g. "PLA, 0.2mm" vs "PETG, 0.28mm"). sliced_asset_id optionally
+  -- points at an already-sliced .gcode/.3mf asset for this profile,
+  -- copying the sets.cover_asset_id ON DELETE SET NULL pattern (v11).
+  CREATE TABLE IF NOT EXISTS print_profiles (
+    id              TEXT    PRIMARY KEY,
+    model_id        TEXT    NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    name            TEXT    NOT NULL,
+    printer         TEXT,
+    material        TEXT,
+    nozzle          TEXT,
+    layer_height    REAL,
+    infill          INTEGER,
+    supports        INTEGER NOT NULL DEFAULT 0,
+    notes           TEXT,
+    settings_json   TEXT    NOT NULL DEFAULT '{}',
+    sliced_asset_id TEXT    REFERENCES assets(id) ON DELETE SET NULL,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+  CREATE INDEX IF NOT EXISTS idx_print_profiles_model ON print_profiles(model_id);`,
 ];
 
-function runMigrations(db: Database.Database): void {
+/**
+ * Applies MIGRATIONS[version..] in order, each in its own transaction.
+ *
+ * Previously (`db.exec(MIGRATIONS[i])` then a separate `db.pragma`
+ * call, no transaction at all) a migration that failed partway through
+ * a multi-statement string — or the process dying between the exec and
+ * the user_version bump — could leave the schema half-applied while
+ * user_version still reported the OLD version. On next boot that
+ * looks identical to "never ran," so runMigrations would replay the
+ * same migration string against a DB that already has some of its
+ * tables/columns, which fails loudly or (worse, for a plain
+ * `ALTER TABLE ... ADD COLUMN` with no IF-NOT-EXISTS guard) is a
+ * migration that can never move forward again.
+ *
+ * Wrapping each migration's exec + version bump in one
+ * `db.transaction()` (immediate-mode: acquires the write lock at BEGIN
+ * rather than on first write, so this can't hit a mid-migration lock
+ * upgrade failure) makes each one atomic: SQLite DDL is fully
+ * transactional, and PRAGMA user_version is itself part of the
+ * transaction it's set in (rolled back along with everything else on
+ * failure). Either the whole migration's schema change AND the version
+ * bump land together, or neither does — user_version and schema always
+ * agree, and a failed migration leaves the DB byte-for-byte as it was
+ * before this call, ready to retry (after a fix) on the next boot.
+ *
+ * `migrations` defaults to the real, immutable MIGRATIONS array — it's
+ * a parameter only so tests can pass a synthetic array (see
+ * __tests__/migrations.test.ts) without ever touching production SQL.
+ */
+export function runMigrations(db: Database.Database, migrations: string[] = MIGRATIONS): void {
   const version = (db.pragma('user_version', { simple: true }) as number) ?? 0;
-  for (let i = version; i < MIGRATIONS.length; i++) {
-    db.exec(MIGRATIONS[i]);
-    db.pragma(`user_version = ${i + 1}`);
-    console.log(`[db] Applied migration ${i + 1}`);
+  for (let i = version; i < migrations.length; i++) {
+    const migrationNum = i + 1;
+    const applyMigration = db.transaction(() => {
+      db.exec(migrations[i]);
+      db.pragma(`user_version = ${migrationNum}`);
+    });
+    try {
+      applyMigration.immediate();
+    } catch (err) {
+      console.error(
+        `[db] Migration ${migrationNum} failed and was rolled back — user_version remains ${i}, schema unchanged:`,
+        err,
+      );
+      throw err;
+    }
+    console.log(`[db] Applied migration ${migrationNum}`);
   }
 }
+
+export { MIGRATIONS };
 
 // ─── Auth bootstrap (migration v13) ────────────────────────────────────────
 //
@@ -247,8 +406,13 @@ function seedAdminIfNeeded(db: Database.Database): void {
   if (envUser && envPass) {
     try {
       const hash = hashPassword(envPass);
+      // role is explicit here, not left to the column DEFAULT: as of
+      // migration v15 the `users` table's default role is 'member' (new
+      // signups, once Phase D adds them, aren't admins by default) — the
+      // very first, env-seeded user must still land as 'admin' or no one
+      // can ever reach requireAdmin-gated routes (mounts config, etc.).
       db.prepare(
-        'INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)'
+        "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, 'admin')"
       ).run(uuidv4(), envUser, hash);
       console.log('[db] Seeded initial admin from env (one-time). DB is now the source of truth for auth.');
     } catch (err) {
@@ -257,6 +421,39 @@ function seedAdminIfNeeded(db: Database.Database): void {
   } else {
     console.warn('[db] No admin user exists in the DB and AUTH_USERNAME/AUTH_PASSWORD are not set — no admin can log in and all protected routes will deny. Set both once to seed, then they can be left in place (ignored) or removed.');
   }
+}
+
+/**
+ * One-time seed of the curated category tree, only when `categories` is
+ * empty — same idempotency shape as seedAdminIfNeeded: once any row
+ * exists (including ones Aaron renamed/reordered/deleted by hand), this
+ * is a permanent no-op and the DB is the source of truth. Top-level only
+ * (parent_id NULL); sub-categories, if any are ever wanted, are a manual
+ * follow-up, not something this seed grows into on its own.
+ */
+const DEFAULT_CATEGORIES = [
+  'Functional',
+  'Toys & Games',
+  'Props & Cosplay',
+  'Household',
+  'Tools',
+  'Decor',
+  'Miniatures',
+  'Signage/2D',
+];
+
+function seedCategoriesIfEmpty(db: Database.Database): void {
+  const { c } = db.prepare('SELECT COUNT(*) AS c FROM categories').get() as { c: number };
+  if (c > 0) return; // DB already has categories — it is the source of truth
+
+  const insert = db.prepare(
+    'INSERT INTO categories (id, name, parent_id, sort_order) VALUES (?, ?, NULL, ?)'
+  );
+  const seedAll = db.transaction((names: string[]) => {
+    names.forEach((name, i) => insert.run(uuidv4(), name, i));
+  });
+  seedAll(DEFAULT_CATEGORIES);
+  console.log(`[db] Seeded ${DEFAULT_CATEGORIES.length} default categories.`);
 }
 
 /**
@@ -344,6 +541,7 @@ export function getDb(): Database.Database {
     runMigrations(db);
     _jwtSecret = resolveJwtSecret(db);
     seedAdminIfNeeded(db);
+    seedCategoriesIfEmpty(db);
     _db = db;
     console.log(`[db] Connected: ${dbPath}`);
   }

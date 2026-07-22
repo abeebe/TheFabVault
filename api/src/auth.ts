@@ -70,6 +70,10 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
+  // Attach the row we already fetched (see types/express.d.ts) so
+  // downstream handlers don't need a second getUserByUsername() lookup
+  // for the common "who is making this request" question.
+  req.user = user;
   next();
 }
 
@@ -106,5 +110,6 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
+  req.user = user;
   next();
 }
