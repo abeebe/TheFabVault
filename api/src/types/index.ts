@@ -354,3 +354,132 @@ export interface SetAssetRow {
 
 // SubAssemblyRow / SubAssemblyPartRow are declared above, alongside their
 // *Out counterparts — see "Build Manifest (sub-assemblies)" section.
+
+// ─── Models ("Local MakerWorld" restructure, migration v15, #2154/#2155) ──────
+//
+// See Reports/derek-thefabvault-makerworld-restructure-plan-2026-07-22.md.
+// A model references existing assets via model_files (role: part/image/
+// doc/other — services/enumValidators.ts) rather than owning file bytes
+// itself; gallery images are just assets with role='image' riding the
+// existing thumbnail pipeline. visibility/role columns are validated at
+// the app layer (enumValidators.ts), never a SQL CHECK — see that
+// module's header for why.
+
+export interface CategoryRow {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  sort_order: number;
+  created_at: number;
+}
+
+export interface CategoryOut {
+  id: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+}
+
+export interface ModelRow {
+  id: string;
+  title: string;
+  description: string | null;
+  category_id: string | null;
+  tags_json: string;
+  owner_id: string | null;
+  visibility: 'public' | 'private';
+  cover_asset_id: string | null;
+  source_url: string | null;
+  source_site: string | null;
+  source_author: string | null;
+  license: string | null;
+  source_folder_id: string | null;
+  created_at: number;
+  updated_at: number;
+  deleted_at: number | null;
+}
+
+export interface ModelFileRow {
+  model_id: string;
+  asset_id: string;
+  role: 'part' | 'image' | 'doc' | 'other';
+  sort_order: number;
+  label: string | null;
+}
+
+export interface PrintProfileRow {
+  id: string;
+  model_id: string;
+  name: string;
+  printer: string | null;
+  material: string | null;
+  nozzle: string | null;
+  layer_height: number | null;
+  infill: number | null;
+  supports: number; // 0/1 — SQLite has no boolean type
+  notes: string | null;
+  settings_json: string;
+  sliced_asset_id: string | null;
+  sort_order: number;
+  created_at: number;
+}
+
+// One linked file inside a model's detail payload — the join row plus
+// the full asset it points at (so the client never needs a second
+// round-trip per file to render a gallery/parts list).
+export interface ModelFileOut {
+  assetId: string;
+  role: 'part' | 'image' | 'doc' | 'other';
+  sortOrder: number;
+  label: string | null;
+  asset: AssetOut;
+}
+
+export interface PrintProfileOut {
+  id: string;
+  modelId: string;
+  name: string;
+  printer: string | null;
+  material: string | null;
+  nozzle: string | null;
+  layerHeight: number | null;
+  infill: number | null;
+  supports: boolean;
+  notes: string | null;
+  settings: Record<string, unknown>;
+  slicedAssetId: string | null;
+  sortOrder: number;
+  createdAt: number;
+}
+
+export interface ModelOut {
+  id: string;
+  title: string;
+  description: string | null;
+  categoryId: string | null;
+  tags: string[];
+  ownerId: string | null;
+  visibility: 'public' | 'private';
+  coverAssetId: string | null;
+  // Resolved thumb URL for coverAssetId (or the first image-role file as
+  // fallback), same pattern as SetOut.coverThumbUrl — null if nothing
+  // usable yet.
+  coverThumbUrl: string | null;
+  sourceUrl: string | null;
+  sourceSite: string | null;
+  sourceAuthor: string | null;
+  license: string | null;
+  sourceFolderId: string | null;
+  // Count of model_files rows joined to a non-deleted asset — mirrors
+  // SetOut.assetCount's rationale (list view needs the count without a
+  // second per-model request).
+  fileCount: number;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt: number | null;
+}
+
+export interface ModelDetailOut extends ModelOut {
+  files: ModelFileOut[];
+  profiles: PrintProfileOut[];
+}

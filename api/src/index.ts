@@ -16,6 +16,7 @@ import projectsRouter from './routes/projects.js';
 import subAssembliesRouter from './routes/subAssemblies.js';
 import manifestImportRouter from './routes/manifestImport.js';
 import setsRouter from './routes/sets.js';
+import modelsRouter from './routes/models.js';
 import adminRouter from './routes/admin.js';
 import mountsRouter from './routes/mounts.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
@@ -93,6 +94,7 @@ app.use('/', projectsRouter);
 app.use('/', subAssembliesRouter);
 app.use('/', manifestImportRouter);
 app.use('/', setsRouter);
+app.use('/', modelsRouter);
 app.use('/', adminRouter);
 app.use('/', mountsRouter);
 
