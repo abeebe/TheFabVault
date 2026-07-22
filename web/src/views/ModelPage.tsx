@@ -10,7 +10,7 @@ import { AssetPicker } from '../components/AssetPicker.js';
 import { TagInput, TagBadge } from '../components/TagInput.js';
 import { Modal } from '../components/Modal.js';
 import { Spinner } from '../components/Spinner.js';
-import { renderMarkdown } from '../lib/markdown.js';
+import { renderMarkdown, isSafeUrl } from '../lib/markdown.js';
 import { api } from '../lib/api.js';
 import type { AssetOut } from '../types/index.js';
 import type {
@@ -573,7 +573,23 @@ export function ModelPage() {
                 {model.sourceSite && <p>Source: {model.sourceSite}</p>}
                 {model.sourceAuthor && <p>Author: {model.sourceAuthor}</p>}
                 {model.sourceUrl && (
-                  <p>URL: <a href={model.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-accent underline">{model.sourceUrl}</a></p>
+                  // sourceUrl is free text (Edit Details modal today;
+                  // third-party import metadata once Phase C lands) --
+                  // same untrusted-input class as a markdown link, so it
+                  // gets the exact same scheme guard, not a second copy
+                  // of the check. Kit's #2157 review caught this
+                  // rendering unchecked (javascript: URLs landed as a
+                  // real clickable anchor); see markdown.test.tsx-style
+                  // regression coverage in ModelPage.test.tsx.
+                  <p>
+                    URL: {isSafeUrl(model.sourceUrl) ? (
+                      <a href={model.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-accent underline">
+                        {model.sourceUrl}
+                      </a>
+                    ) : (
+                      <span title="Unrecognized/unsafe URL scheme -- not rendered as a link">{model.sourceUrl}</span>
+                    )}
+                  </p>
                 )}
                 {model.license && <p>License: {model.license}</p>}
               </div>
@@ -739,6 +755,15 @@ export function ModelPage() {
         <ModelViewer
           asset={previewAsset}
           onClose={() => setPreviewAsset(null)}
+          // Non-blocking note from Kit's #2157 review: this only updates
+          // local previewAsset state (so the open modal reflects an
+          // edit made inside it, e.g. rating/rename), not model.files --
+          // a rename/rating change made here won't show in the Gallery
+          // thumbnail strip or Files rows until the page refetches
+          // (navigate away and back, or any other mutation that
+          // triggers useModel's refresh). Low impact today; worth a
+          // real fix (thread onUpdate through to update model.files
+          // locally, or just call refresh()) if this starts mattering.
           onUpdate={(updated) => setPreviewAsset(updated)}
         />
       )}

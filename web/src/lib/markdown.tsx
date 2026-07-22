@@ -13,7 +13,15 @@ import type { ReactNode } from 'react';
 // -- if richer formatting is ever needed, that's the point to reach for
 // a real library instead of growing this by hand.
 
-function isSafeUrl(url: string): boolean {
+// Exported (not just used internally by renderInline below) because it's
+// the same scheme guard any other raw-href-from-a-user-controlled-field
+// spot needs -- e.g. ModelPage.tsx's "Source attribution" block renders
+// model.sourceUrl (free text in the Edit Details modal, populated from
+// third-party metadata once Phase C's zip import lands) as a real anchor,
+// and needs this exact check, not a second copy of it. Kit's review of
+// #2157 caught that spot rendering unchecked -- see ModelPage.tsx for the
+// fix and the regression test pinning it.
+export function isSafeUrl(url: string): boolean {
   try {
     const parsed = new URL(url, 'https://placeholder.invalid');
     return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:';
