@@ -39,6 +39,7 @@ import {
   MODEL_FILE_ROLES, isModelFileRole, MODEL_VISIBILITY, isModelVisibility,
 } from '../services/enumValidators.js';
 import { isValidSourceUrl } from '../services/urlValidators.js';
+import { visibilityFragment, isVisible, type VisibilityContext } from '../services/visibility.js';
 import type {
   AssetOut, AssetRow, FolderRow,
   ModelRow, ModelOut, ModelDetailOut, ModelFileOut,
@@ -53,6 +54,34 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1 GB
 });
+
+// ─── Visibility / ownership helpers (Phase D3, #2179) ──────────────────────────
+//
+// Two distinct rules thread through this file, per the restructure plan's
+// §8-D authz matrix — don't conflate them:
+//
+//   - READ (visibility): can this caller see the row at all? public rows
+//     to everyone, private rows to their owner + admin. Governs list/
+//     detail/download/like — every place a model that isn't yours but IS
+//     public should still show up. Backed by services/visibility.ts.
+//   - WRITE (ownership): can this caller mutate the row? owner + admin
+//     only, regardless of visibility — a public model is still not
+//     everyone's to edit. Governs PATCH/DELETE on the model itself, file
+//     attach/detach/reorder/cover, and print_profiles create/update/
+//     delete. print_profiles' own GET (list) is READ-gated instead
+//     (#2179 Remy round), matching GET /model/:id's embedded `profiles`
+//     — see that section's own comment.
+//
+// Both deny with 404, never 403 — existence-hiding, same convention as
+// modelImport.ts's isOwnDraftOrAdmin (C2 precedent): a caller can't tell
+// "not yours" apart from "doesn't exist" from the response.
+function visCtx(req: Request): VisibilityContext {
+  return { userId: req.user!.id, isAdmin: req.user!.role === 'admin' };
+}
+
+function isOwnerOrAdmin(row: { owner_id: string | null }, req: Request): boolean {
+  return row.owner_id === req.user!.id || req.user!.role === 'admin';
+}
 
 // ─── toOut helpers ─────────────────────────────────────────────────────────────
 
@@ -271,6 +300,15 @@ router.get('/models', requireAuth, (req: Request, res: Response) => {
   let whereClause = ' WHERE deleted_at IS NULL';
   const whereParams: unknown[] = [];
 
+  // Visibility filter (#2179): spliced into the SQL WHERE clause, not
+  // applied as a post-query JS filter — the total/limit/offset below all
+  // need to reflect the same filtered set, and a JS filter after LIMIT
+  // would silently return fewer than `limit` visible rows on a page that
+  // mixes visible and hidden models.
+  const visFrag = visibilityFragment(visCtx(req));
+  whereClause += ` AND (${visFrag.sql})`;
+  whereParams.push(...visFrag.params);
+
   if (q) {
     whereClause += ' AND (title LIKE ? OR description LIKE ?)';
     const like = `%${q}%`;
@@ -409,7 +447,10 @@ router.post('/models', requireAuth, (req: Request, res: Response) => {
 
 router.get('/model/:id', requireAuth, (req: Request, res: Response) => {
   const detail = loadModelDetail(getDb(), req.params.id, req.user!.id);
-  if (!detail) { res.status(404).json({ error: 'Not found' }); return; }
+  if (!detail || !isVisible({ visibility: detail.visibility, owner_id: detail.ownerId }, visCtx(req))) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
   res.json(detail);
 });
 
@@ -418,7 +459,7 @@ router.get('/model/:id', requireAuth, (req: Request, res: Response) => {
 router.patch('/model/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as ModelRow | undefined;
-  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  if (!row || !isOwnerOrAdmin(row, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const {
     title, description, categoryId, tags, visibility,
@@ -492,8 +533,9 @@ router.patch('/model/:id', requireAuth, (req: Request, res: Response) => {
 
 router.delete('/model/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const row = db.prepare('SELECT id FROM models WHERE id = ?').get(req.params.id) as { id: string } | undefined;
-  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  const row = db.prepare('SELECT id, owner_id FROM models WHERE id = ?').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!row || !isOwnerOrAdmin(row, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   if (req.query.permanent === 'true') {
     db.prepare('DELETE FROM models WHERE id = ?').run(row.id);
@@ -638,8 +680,9 @@ router.get('/models/from-folder/preview', requireAuth, asyncHandler(async (req: 
 
 router.post('/model/:id/files', requireAuth, upload.array('files'), asyncHandler(async (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const roleBody = (req.body.role as string | undefined) ?? 'part';
   if (!isModelFileRole(roleBody)) {
@@ -700,9 +743,9 @@ router.post('/model/:id/files', requireAuth, upload.array('files'), asyncHandler
 
 router.delete('/model/:id/file/:assetId', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id, cover_asset_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
-    | { id: string; cover_asset_id: string | null } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id, cover_asset_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    | { id: string; owner_id: string | null; cover_asset_id: string | null } | undefined;
+  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const r = db.prepare('DELETE FROM model_files WHERE model_id = ? AND asset_id = ?').run(model.id, req.params.assetId);
   if (r.changes === 0) { res.status(404).json({ error: 'File not attached to this model' }); return; }
@@ -721,8 +764,9 @@ router.delete('/model/:id/file/:assetId', requireAuth, (req: Request, res: Respo
 
 router.patch('/model/:id/files/reorder', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { assetIds } = req.body as { assetIds?: string[] };
   if (!Array.isArray(assetIds) || assetIds.length === 0) {
@@ -742,8 +786,9 @@ router.patch('/model/:id/files/reorder', requireAuth, (req: Request, res: Respon
 
 router.patch('/model/:id/cover', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { assetId } = req.body as { assetId?: string | null };
   if (assetId) {
@@ -762,7 +807,7 @@ router.patch('/model/:id/cover', requireAuth, (req: Request, res: Response) => {
 router.get('/model/:id/download', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const model = db.prepare('SELECT * FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as ModelRow | undefined;
-  if (!model) { res.status(404).json({ error: 'Model not found' }); return; }
+  if (!model || !isVisible(model, visCtx(req))) { res.status(404).json({ error: 'Model not found' }); return; }
 
   const parts = db.prepare(
     `SELECT a.* FROM model_files mf
@@ -789,11 +834,26 @@ router.get('/model/:id/download', requireAuth, (req: Request, res: Response) => 
 });
 
 // ─── print_profiles CRUD ───────────────────────────────────────────────────────
-
+//
+// GET (list) is READ-gated (visibility), matching GET /model/:id's
+// embedded `profiles` array exactly — a public model's print profiles
+// are visible to anyone who can see the model, same as its files/likes.
+// (Revised #2179 Remy round: the original cut gated ALL FOUR operations
+// on ownership including this GET, which was an unnecessary asymmetry
+// with the embedded detail view — a non-owner viewing a public model's
+// detail already saw its profiles embedded, just not through this
+// standalone endpoint. Closed that gap rather than keep two different
+// answers to "can this caller see this model's profiles?" depending on
+// which endpoint asked.)
+//
+// POST/PATCH/DELETE stay WRITE-gated (ownership) — creating, editing, or
+// deleting someone else's printer settings is not a visibility question,
+// same as file attach/detach/reorder/cover.
 router.get('/model/:id/profiles', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null; visibility: string } | undefined;
+  if (!model || !isVisible(model, visCtx(req))) { res.status(404).json({ error: 'Not found' }); return; }
   const rows = db.prepare(
     'SELECT * FROM print_profiles WHERE model_id = ? ORDER BY sort_order ASC, created_at ASC'
   ).all(model.id) as PrintProfileRow[];
@@ -802,8 +862,9 @@ router.get('/model/:id/profiles', requireAuth, (req: Request, res: Response) => 
 
 router.post('/model/:id/profiles', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const {
     name, printer, material, nozzle, layerHeight, infill, supports, notes, settings, slicedAssetId,
@@ -847,6 +908,10 @@ router.patch('/profile/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM print_profiles WHERE id = ?').get(req.params.id) as PrintProfileRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  // Ownership lives on the PARENT model — print_profiles itself has no
+  // owner_id column (it's a child row, same shape as model_files).
+  const parent = db.prepare('SELECT owner_id FROM models WHERE id = ?').get(row.model_id) as { owner_id: string | null } | undefined;
+  if (!parent || !isOwnerOrAdmin(parent, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const body = req.body as Partial<{
     name: string;
@@ -897,8 +962,12 @@ router.patch('/profile/:id', requireAuth, (req: Request, res: Response) => {
 
 router.delete('/profile/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const info = db.prepare('DELETE FROM print_profiles WHERE id = ?').run(req.params.id);
-  if (info.changes === 0) { res.status(404).json({ error: 'Not found' }); return; }
+  const row = db.prepare('SELECT model_id FROM print_profiles WHERE id = ?').get(req.params.id) as { model_id: string } | undefined;
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  const parent = db.prepare('SELECT owner_id FROM models WHERE id = ?').get(row.model_id) as { owner_id: string | null } | undefined;
+  if (!parent || !isOwnerOrAdmin(parent, req)) { res.status(404).json({ error: 'Not found' }); return; }
+
+  db.prepare('DELETE FROM print_profiles WHERE id = ?').run(req.params.id);
   res.status(204).end();
 });
 
@@ -913,11 +982,20 @@ router.delete('/profile/:id', requireAuth, (req: Request, res: Response) => {
 // rather than a full model/detail payload — liking is a lightweight,
 // frequent action and the caller (a like button) only ever needs the
 // resulting count + its own state back, not the whole model re-fetched.
+//
+// Gated on VISIBILITY (read), not ownership (#2179) — the whole point of
+// a like is another user liking YOUR public model, so owner-or-admin
+// would be wrong here. A model you can't see (private, not yours) 404s;
+// a public model anyone can like/unlike regardless of who owns it.
+// likeCountFor stays a plain COUNT(*) — it already never reveals WHO
+// liked a model, only how many did, so nothing else needed changing
+// here for the "must not leak" side of the ticket.
 
 router.put('/model/:id/like', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null; visibility: string } | undefined;
+  if (!model || !isVisible(model, visCtx(req))) { res.status(404).json({ error: 'Not found' }); return; }
 
   db.prepare('INSERT OR IGNORE INTO model_likes (model_id, user_id) VALUES (?, ?)').run(model.id, req.user!.id);
 
@@ -926,8 +1004,9 @@ router.put('/model/:id/like', requireAuth, (req: Request, res: Response) => {
 
 router.delete('/model/:id/like', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
-  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null; visibility: string } | undefined;
+  if (!model || !isVisible(model, visCtx(req))) { res.status(404).json({ error: 'Not found' }); return; }
 
   db.prepare('DELETE FROM model_likes WHERE model_id = ? AND user_id = ?').run(model.id, req.user!.id);
 

@@ -30,12 +30,48 @@ import { requireAuth } from '../auth.js';
 import { getDb } from '../db.js';
 import { thumbExists } from '../services/fileStore.js';
 import { MODEL_VISIBILITY, isModelVisibility } from '../services/enumValidators.js';
+import { visibilityFragment, isVisible, type VisibilityContext } from '../services/visibility.js';
 import type {
   CollectionRow, CollectionOut, CollectionDetailOut,
   ModelRow, ModelOut,
 } from '../types/index.js';
 
 const router = Router();
+
+// ─── Visibility / ownership helpers (Phase D3, #2179) ──────────────────────────
+// Same split as routes/models.ts's identical helpers — see that file's
+// comment for the read-vs-write rationale. Duplicated rather than
+// imported across route files, matching this codebase's established
+// convention (see models.ts's own toOut-helpers comment on why).
+function visCtx(req: Request): VisibilityContext {
+  return { userId: req.user!.id, isAdmin: req.user!.role === 'admin' };
+}
+
+function isOwnerOrAdmin(row: { owner_id: string | null }, req: Request): boolean {
+  return row.owner_id === req.user!.id || req.user!.role === 'admin';
+}
+
+// Existence-hiding gate for attaching a model to a collection (#2179
+// Remy round): a model must both EXIST (live, not soft-deleted) and be
+// VISIBLE to this caller to be eligible — a member must not be able to
+// attach another owner's private model to their own collection just by
+// guessing its UUID, even blind (never seeing its title, thumb, or
+// anything else back). Deliberately the same "exists AND visible"
+// standard GET /model/:id itself applies, reused here as the eligibility
+// check for POST /collections' initial modelIds and POST
+// /collection/:id/models' add-members, replacing the old bare
+// existence-only `validId` query both used. An invisible-to-this-caller
+// id is treated exactly like a nonexistent one already was — silently
+// excluded from what gets attached / counted in `added`, not a
+// distinguishing error (this endpoint's existing contract for bogus ids
+// is silent-skip, not a hard failure; extending the SAME contract to
+// cover invisible-to-me ids is the existence-hiding move here, not a new
+// response shape).
+function visibleModelExists(db: ReturnType<typeof getDb>, modelId: string, ctx: VisibilityContext): boolean {
+  const row = db.prepare('SELECT owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL').get(modelId) as
+    { owner_id: string | null; visibility: string } | undefined;
+  return !!row && isVisible(row, ctx);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,30 +141,49 @@ function modelRowToOut(db: ReturnType<typeof getDb>, row: ModelRow, userId: stri
 // coverThumbUrl if it resolves to one, else the first member model
 // (by sort_order) that has a usable one, else null. Same fallback shape
 // as models.ts#resolveCoverThumb / sets.ts#resolveCoverThumb.
-function resolveCollectionCoverThumb(coverModelId: string | null, collectionId: string): string | null {
+//
+// ctx-gated (#2179 Remy round, real finding): the models[] array on a
+// collection's own detail/list response is already visibility-filtered
+// (see GET /collection:id and GET /collections below), but this
+// function used to resolve a thumb from cover_model_id / the raw
+// membership list with NO viewer check at all — so a private model set
+// as a public collection's cover leaked its thumbnail to every viewer
+// even though that same model correctly never appeared in `models[]`.
+// Both branches below now skip any candidate row `!isVisible(row, ctx)`
+// before considering its thumb: the explicit cover_model_id row, AND
+// each fallback candidate in the membership scan (a later, currently-
+// visible member should still win the fallback if an earlier one in
+// sort order is invisible to this viewer — never surface the invisible
+// one's thumb just because it fell through).
+function resolveCollectionCoverThumb(coverModelId: string | null, collectionId: string, ctx: VisibilityContext): string | null {
   const db = getDb();
   if (coverModelId) {
-    const row = db.prepare('SELECT id, cover_asset_id FROM models WHERE id = ? AND deleted_at IS NULL')
-      .get(coverModelId) as { id: string; cover_asset_id: string | null } | undefined;
-    if (row) {
+    const row = db.prepare('SELECT id, cover_asset_id, owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL')
+      .get(coverModelId) as { id: string; cover_asset_id: string | null; owner_id: string | null; visibility: string } | undefined;
+    if (row && isVisible(row, ctx)) {
       const thumb = resolveModelCoverThumb(row.cover_asset_id, row.id);
       if (thumb) return thumb;
     }
   }
   const memberRows = db.prepare(
-    `SELECT m.id, m.cover_asset_id FROM collection_models cm
+    `SELECT m.id, m.cover_asset_id, m.owner_id, m.visibility FROM collection_models cm
      JOIN models m ON m.id = cm.model_id
      WHERE cm.collection_id = ? AND m.deleted_at IS NULL
      ORDER BY cm.sort_order ASC, cm.added_at DESC`
-  ).all(collectionId) as Array<{ id: string; cover_asset_id: string | null }>;
+  ).all(collectionId) as Array<{ id: string; cover_asset_id: string | null; owner_id: string | null; visibility: string }>;
   for (const m of memberRows) {
+    if (!isVisible(m, ctx)) continue;
     const thumb = resolveModelCoverThumb(m.cover_asset_id, m.id);
     if (thumb) return thumb;
   }
   return null;
 }
 
-function collectionToOut(row: CollectionRow, modelCount: number): CollectionOut {
+// ctx threaded through (#2179 Remy round) purely to reach
+// resolveCollectionCoverThumb — see that function's comment. Every call
+// site below already has (or now computes) a VisibilityContext for its
+// own query, so this is a same-request pass-through, not a new lookup.
+function collectionToOut(row: CollectionRow, modelCount: number, ctx: VisibilityContext): CollectionOut {
   return {
     id: row.id,
     name: row.name,
@@ -136,7 +191,7 @@ function collectionToOut(row: CollectionRow, modelCount: number): CollectionOut 
     ownerId: row.owner_id,
     visibility: row.visibility,
     coverModelId: row.cover_model_id,
-    coverThumbUrl: resolveCollectionCoverThumb(row.cover_model_id, row.id),
+    coverThumbUrl: resolveCollectionCoverThumb(row.cover_model_id, row.id, ctx),
     modelCount,
     createdAt: row.created_at,
   };
@@ -154,21 +209,38 @@ function modelCountFor(db: ReturnType<typeof getDb>, collectionId: string): numb
 
 // ─── GET /collections ─────────────────────────────────────────────────────────
 //
-// No visibility filtering yet — same "stored now, enforced in Phase D3"
-// posture as GET /models. requireAuth only.
+// Visibility filtering (#2179): both queries below apply the same
+// visibilityFragment, called once per query rather than once and reused
+// as a single object — each query binds its own params in its own
+// positional order, so a fresh SqlFragment per call site keeps the two
+// independent instead of one query's param list silently drifting if
+// either query's shape changes later. Two DIFFERENT tables get the rule
+// applied: the top-level `collections` row itself (is this collection
+// visible to the caller at all), and separately the joined `models` row
+// per membership (is this MEMBER model visible to the caller) — a
+// visible public collection can still contain another owner's private
+// model, which must not inflate this caller's modelCount (see
+// GET /collection/:id below for the fuller rationale on that call).
 
-router.get('/collections', requireAuth, (_req: Request, res: Response) => {
+router.get('/collections', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const rows = db.prepare('SELECT * FROM collections ORDER BY name COLLATE NOCASE ASC').all() as CollectionRow[];
+  const ctx = visCtx(req);
+
+  const collectionFrag = visibilityFragment(ctx);
+  const rows = db.prepare(
+    `SELECT * FROM collections WHERE ${collectionFrag.sql} ORDER BY name COLLATE NOCASE ASC`
+  ).all(...collectionFrag.params) as CollectionRow[];
+
+  const modelFrag = visibilityFragment(ctx);
   const counts = db.prepare(
     `SELECT cm.collection_id, COUNT(*) AS cnt
      FROM collection_models cm
      JOIN models m ON m.id = cm.model_id
-     WHERE m.deleted_at IS NULL
+     WHERE m.deleted_at IS NULL AND (${modelFrag.sql})
      GROUP BY cm.collection_id`
-  ).all() as { collection_id: string; cnt: number }[];
+  ).all(...modelFrag.params) as { collection_id: string; cnt: number }[];
   const countMap = new Map(counts.map((c) => [c.collection_id, c.cnt]));
-  res.json(rows.map((r) => collectionToOut(r, countMap.get(r.id) ?? 0)));
+  res.json(rows.map((r) => collectionToOut(r, countMap.get(r.id) ?? 0, ctx)));
 });
 
 // ─── POST /collections ────────────────────────────────────────────────────────
@@ -189,6 +261,7 @@ router.post('/collections', requireAuth, (req: Request, res: Response) => {
   }
 
   const db = getDb();
+  const ctx = visCtx(req);
   const id = uuidv4();
   // owner_id is set from req.user, never trusted from the request body
   // — same convention as POST /models.
@@ -200,35 +273,50 @@ router.post('/collections', requireAuth, (req: Request, res: Response) => {
       `INSERT OR IGNORE INTO collection_models (collection_id, model_id, sort_order)
        VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM collection_models WHERE collection_id = ?))`
     );
-    const validId = db.prepare('SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL');
+    // visibleModelExists (#2179 Remy round), not a bare existence check —
+    // see that function's comment: an id the caller can't see is skipped
+    // exactly like a bogus one always was, never attached blind.
     db.transaction(() => {
       for (const mid of modelIds) {
-        if (validId.get(mid)) insertMember.run(id, mid, id);
+        if (visibleModelExists(db, mid, ctx)) insertMember.run(id, mid, id);
       }
     })();
   }
 
   const row = db.prepare('SELECT * FROM collections WHERE id = ?').get(id) as CollectionRow;
-  res.status(201).json(collectionToOut(row, modelCountFor(db, id)));
+  res.status(201).json(collectionToOut(row, modelCountFor(db, id), ctx));
 });
 
 // ─── GET /collection/:id ───────────────────────────────────────────────────────
 
+// Private-model-in-a-public-collection decision (#2179, per routing
+// brief default): FILTER the row out of a non-owner's view rather than
+// include it with a redacted/placeholder title. A member model this
+// caller can't see (private, not theirs, caller not admin) simply
+// doesn't appear in `models` below, and `modelCount` on the returned
+// detail reflects that filtered length — so the same collection can
+// legitimately report a different modelCount to different viewers (the
+// owner/admin sees the true total, everyone else sees only what's
+// visible to them). This is the same choice GET /collections' list-view
+// modelCount above already makes for consistency between list and
+// detail. Accepted trade-off, stated explicitly per the ticket.
 router.get('/collection/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
+  const ctx = visCtx(req);
   const row = db.prepare('SELECT * FROM collections WHERE id = ?').get(req.params.id) as CollectionRow | undefined;
-  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  if (!row || !isVisible(row, ctx)) { res.status(404).json({ error: 'Not found' }); return; }
 
+  const modelFrag = visibilityFragment(ctx);
   const modelRows = db.prepare(
     `SELECT m.* FROM collection_models cm
      JOIN models m ON m.id = cm.model_id
-     WHERE cm.collection_id = ? AND m.deleted_at IS NULL
+     WHERE cm.collection_id = ? AND m.deleted_at IS NULL AND (${modelFrag.sql})
      ORDER BY cm.sort_order ASC, cm.added_at DESC`
-  ).all(row.id) as ModelRow[];
+  ).all(row.id, ...modelFrag.params) as ModelRow[];
 
   const models = modelRows.map((m) => modelRowToOut(db, m, req.user!.id));
   const detail: CollectionDetailOut = {
-    ...collectionToOut(row, models.length),
+    ...collectionToOut(row, models.length, ctx),
     models,
   };
   res.json(detail);
@@ -239,7 +327,7 @@ router.get('/collection/:id', requireAuth, (req: Request, res: Response) => {
 router.patch('/collection/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const row = db.prepare('SELECT * FROM collections WHERE id = ?').get(req.params.id) as CollectionRow | undefined;
-  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+  if (!row || !isOwnerOrAdmin(row, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { name, description, visibility } = req.body as {
     name?: string;
@@ -263,7 +351,7 @@ router.patch('/collection/:id', requireAuth, (req: Request, res: Response) => {
   }
 
   const updated = db.prepare('SELECT * FROM collections WHERE id = ?').get(row.id) as CollectionRow;
-  res.json(collectionToOut(updated, modelCountFor(db, row.id)));
+  res.json(collectionToOut(updated, modelCountFor(db, row.id), visCtx(req)));
 });
 
 // ─── DELETE /collection/:id ─────────────────────────────────────────────────────
@@ -273,17 +361,28 @@ router.patch('/collection/:id', requireAuth, (req: Request, res: Response) => {
 
 router.delete('/collection/:id', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const info = db.prepare('DELETE FROM collections WHERE id = ?').run(req.params.id);
-  if (info.changes === 0) { res.status(404).json({ error: 'Not found' }); return; }
+  const row = db.prepare('SELECT id, owner_id FROM collections WHERE id = ?').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!row || !isOwnerOrAdmin(row, req)) { res.status(404).json({ error: 'Not found' }); return; }
+
+  db.prepare('DELETE FROM collections WHERE id = ?').run(row.id);
   res.status(204).end();
 });
 
 // ─── POST /collection/:id/models — add members ─────────────────────────────────
+//
+// Eligibility is "exists AND visible to this caller" (visibleModelExists,
+// #2179 Remy round), not bare existence — see that function's comment.
+// An id the caller owns/can't-yet-see-but-is-public/is-admin-for passes;
+// an invisible private model silently doesn't count toward `added`, same
+// contract this endpoint already had for a bogus id.
 
 router.post('/collection/:id/models', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const collection = db.prepare('SELECT id FROM collections WHERE id = ?').get(req.params.id) as { id: string } | undefined;
-  if (!collection) { res.status(404).json({ error: 'Not found' }); return; }
+  const ctx = visCtx(req);
+  const collection = db.prepare('SELECT id, owner_id FROM collections WHERE id = ?').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!collection || !isOwnerOrAdmin(collection, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { modelIds } = req.body as { modelIds?: string[] };
   if (!modelIds?.length) { res.status(400).json({ error: 'modelIds required' }); return; }
@@ -292,11 +391,10 @@ router.post('/collection/:id/models', requireAuth, (req: Request, res: Response)
     `INSERT OR IGNORE INTO collection_models (collection_id, model_id, sort_order)
      VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM collection_models WHERE collection_id = ?))`
   );
-  const validId = db.prepare('SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL');
   let added = 0;
   db.transaction(() => {
     for (const mid of modelIds) {
-      if (validId.get(mid)) {
+      if (visibleModelExists(db, mid, ctx)) {
         const r = insertMember.run(collection.id, mid, collection.id);
         if (r.changes > 0) added++;
       }
@@ -309,9 +407,9 @@ router.post('/collection/:id/models', requireAuth, (req: Request, res: Response)
 
 router.delete('/collection/:id/model/:modelId', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const collection = db.prepare('SELECT id, cover_model_id FROM collections WHERE id = ?').get(req.params.id) as
-    | { id: string; cover_model_id: string | null } | undefined;
-  if (!collection) { res.status(404).json({ error: 'Not found' }); return; }
+  const collection = db.prepare('SELECT id, owner_id, cover_model_id FROM collections WHERE id = ?').get(req.params.id) as
+    | { id: string; owner_id: string | null; cover_model_id: string | null } | undefined;
+  if (!collection || !isOwnerOrAdmin(collection, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const r = db.prepare('DELETE FROM collection_models WHERE collection_id = ? AND model_id = ?')
     .run(collection.id, req.params.modelId);
@@ -334,8 +432,9 @@ router.delete('/collection/:id/model/:modelId', requireAuth, (req: Request, res:
 
 router.patch('/collection/:id/models/reorder', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const collection = db.prepare('SELECT id FROM collections WHERE id = ?').get(req.params.id) as { id: string } | undefined;
-  if (!collection) { res.status(404).json({ error: 'Not found' }); return; }
+  const collection = db.prepare('SELECT id, owner_id FROM collections WHERE id = ?').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!collection || !isOwnerOrAdmin(collection, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { modelIds } = req.body as { modelIds?: string[] };
   if (!Array.isArray(modelIds) || modelIds.length === 0) {
@@ -348,15 +447,23 @@ router.patch('/collection/:id/models/reorder', requireAuth, (req: Request, res: 
     modelIds.forEach((mid, i) => update.run(i, collection.id, mid));
   })();
 
+  // Response shape mirrors GET /collection/:id's own visibility-filtered
+  // detail (same modelFrag treatment, same "modelCount may differ per
+  // viewer" acceptance) rather than an unfiltered rebuild — this caller
+  // just proved owner-or-admin on the COLLECTION, which says nothing
+  // about whether every member model is THEIRS too (an admin could be
+  // reordering a collection containing other users' public models).
+  const ctx = visCtx(req);
   const row = db.prepare('SELECT * FROM collections WHERE id = ?').get(collection.id) as CollectionRow;
+  const modelFrag = visibilityFragment(ctx);
   const modelRows = db.prepare(
     `SELECT m.* FROM collection_models cm
      JOIN models m ON m.id = cm.model_id
-     WHERE cm.collection_id = ? AND m.deleted_at IS NULL
+     WHERE cm.collection_id = ? AND m.deleted_at IS NULL AND (${modelFrag.sql})
      ORDER BY cm.sort_order ASC, cm.added_at DESC`
-  ).all(collection.id) as ModelRow[];
+  ).all(collection.id, ...modelFrag.params) as ModelRow[];
   const detail: CollectionDetailOut = {
-    ...collectionToOut(row, modelRows.length),
+    ...collectionToOut(row, modelRows.length, ctx),
     models: modelRows.map((m) => modelRowToOut(db, m, req.user!.id)),
   };
   res.json(detail);
@@ -366,21 +473,35 @@ router.patch('/collection/:id/models/reorder', requireAuth, (req: Request, res: 
 // Mirrors PATCH /model/:id/cover exactly: modelId must already be a
 // member; null clears the cover (falls back to the first member model
 // with a usable thumb, server-side — see resolveCollectionCoverThumb).
+//
+// modelId must ALSO be visible to THIS caller (#2179 Remy round), not
+// just a member — membership alone doesn't prove the caller (owner or
+// admin of the COLLECTION, not necessarily of every member model) can
+// see this particular member. Folded into the same membership query
+// rather than a separate check, and denied with the same existing 400
+// message: whether it fails as "not a member" or "member but invisible
+// to you" is not a distinction this response should make.
 
 router.patch('/collection/:id/cover', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const collection = db.prepare('SELECT id FROM collections WHERE id = ?').get(req.params.id) as { id: string } | undefined;
-  if (!collection) { res.status(404).json({ error: 'Not found' }); return; }
+  const ctx = visCtx(req);
+  const collection = db.prepare('SELECT id, owner_id FROM collections WHERE id = ?').get(req.params.id) as
+    { id: string; owner_id: string | null } | undefined;
+  if (!collection || !isOwnerOrAdmin(collection, req)) { res.status(404).json({ error: 'Not found' }); return; }
 
   const { modelId } = req.body as { modelId?: string | null };
   if (modelId) {
-    const linked = db.prepare('SELECT 1 FROM collection_models WHERE collection_id = ? AND model_id = ?').get(collection.id, modelId);
-    if (!linked) { res.status(400).json({ error: 'Cover model must be a member of the collection' }); return; }
+    const linked = db.prepare(
+      `SELECT m.owner_id, m.visibility FROM collection_models cm
+       JOIN models m ON m.id = cm.model_id
+       WHERE cm.collection_id = ? AND cm.model_id = ?`
+    ).get(collection.id, modelId) as { owner_id: string | null; visibility: string } | undefined;
+    if (!linked || !isVisible(linked, ctx)) { res.status(400).json({ error: 'Cover model must be a member of the collection' }); return; }
   }
   db.prepare('UPDATE collections SET cover_model_id = ? WHERE id = ?').run(modelId || null, collection.id);
 
   const row = db.prepare('SELECT * FROM collections WHERE id = ?').get(collection.id) as CollectionRow;
-  res.json(collectionToOut(row, modelCountFor(db, collection.id)));
+  res.json(collectionToOut(row, modelCountFor(db, collection.id), ctx));
 });
 
 export default router;

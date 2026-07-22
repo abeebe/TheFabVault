@@ -79,3 +79,24 @@ export function visibilityFragment(ctx: VisibilityContext): SqlFragment {
   }
   return { sql: "visibility = 'public'", params: [] };
 }
+
+// Phase D3 addition (#2179): the same rule as visibilityFragment above,
+// evaluated in plain JS against a row already in hand rather than
+// spliced into a WHERE clause. A handful of call sites fetch a single
+// row by id first (GET /model/:id via loadModelDetail's already-built
+// ModelDetailOut, GET /model/:id/download, PUT/DELETE /model/:id/like,
+// GET /collection/:id) and only need a yes/no answer for THAT row, not
+// a query filter — building a throwaway one-row query just to reuse the
+// SQL fragment would be a wasted round-trip when the row's owner_id/
+// visibility are already sitting in memory. Must stay in exact lockstep
+// with visibilityFragment's three branches (admin / public / owner) —
+// see that function's doc for the rule itself; this is not a second
+// definition of the rule, it's the same rule in a second shape.
+export function isVisible(
+  row: { visibility: string; owner_id: string | null },
+  ctx: VisibilityContext,
+): boolean {
+  if (ctx.isAdmin) return true;
+  if (row.visibility === 'public') return true;
+  return ctx.userId !== null && row.owner_id === ctx.userId;
+}
