@@ -247,8 +247,13 @@ router.get('/assets', requireAuth, (req: Request, res: Response) => {
 // is paginated, so its categories would only reflect the current page).
 // Keep the extension lists in sync with web/src/App.tsx#getAssetCategory.
 
-const THREE_D_EXTS = new Set(['.stl', '.obj', '.3mf', '.lys', '.ctb', '.photon']);
-const TWO_D_EXTS = new Set(['.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2']);
+// Exported so services/modelConvert.ts (#2155) can classify a folder's
+// assets into model_files roles using the same 3D-file definition this
+// route already uses for the assets 3dmodel/2d auto-category split — an
+// .stl is a "part" for a model for exactly the reason it's "3dmodel"
+// here; one extension list, not two that could drift apart.
+export const THREE_D_EXTS = new Set(['.stl', '.obj', '.3mf', '.lys', '.ctb', '.photon']);
+export const TWO_D_EXTS = new Set(['.svg', '.dxf', '.cdr', '.ai', '.eps', '.pdf', '.lbrn', '.lbrn2']);
 
 router.get('/asset-stats', requireAuth, (_req: Request, res: Response) => {
   const db = getDb();
