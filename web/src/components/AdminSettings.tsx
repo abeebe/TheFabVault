@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import {
   X, AlertCircle, CheckCircle, Loader,
-  HardDrive, Wifi, WifiOff, Plus, Trash2, RefreshCw, Database, Copy,
+  HardDrive, Wifi, WifiOff, Plus, Trash2, RefreshCw, Database, Copy, FolderInput,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { DuplicatesModal } from './DuplicatesModal.js';
@@ -737,6 +738,20 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                   >
                     <Database size={15} /> Detect Orphans
                   </button>
+                  {/* Bulk folder→model convert wizard (#2170) — a full
+                      page (select → per-folder preview → batch confirm →
+                      results), not another stacked modal, so it's a Link
+                      to /convert rather than a set-state-to-open-modal
+                      button like Duplicates/Orphans above. onClose closes
+                      this modal on navigate so it doesn't linger behind
+                      the wizard page. */}
+                  <Link
+                    to="/convert"
+                    onClick={onClose}
+                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                  >
+                    <FolderInput size={15} /> Bulk Convert Folders to Models
+                  </Link>
                 </div>
               </div>
 

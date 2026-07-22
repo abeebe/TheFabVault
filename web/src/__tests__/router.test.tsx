@@ -21,6 +21,11 @@ const mockAssetsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [
 const mockModelsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [] as unknown[], total: 0 }));
 const mockModelGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as ModelDetailOut));
 const mockCategoriesList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+// /convert (#2170) — defaults keep every pre-existing route test folder-
+// and-preview-free; the wizard smoke test below overrides these per-case.
+const mockFoldersList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+const mockPreviewFromFolder = vi.fn((..._args: unknown[]) => Promise.reject(new Error('not stubbed')));
+const mockFromFolder = vi.fn((..._args: unknown[]) => Promise.reject(new Error('not stubbed')));
 
 const emptyModelDetail: ModelDetailOut = {
   id: 'abc123', title: 'Widget X', description: null, categoryId: null, tags: [],
@@ -46,7 +51,7 @@ vi.mock('../lib/api.js', () => ({
       thumbUrl: () => null,
       fileUrl: () => '',
     },
-    folders: { list: () => Promise.resolve([]) },
+    folders: { list: (...args: unknown[]) => mockFoldersList(...args) },
     projects: { list: () => Promise.resolve([]), addAssets: () => Promise.resolve() },
     sets: { list: () => Promise.resolve([]), addAssets: () => Promise.resolve() },
     trash: { list: () => Promise.resolve({ items: [], total: 0 }) },
@@ -56,6 +61,8 @@ vi.mock('../lib/api.js', () => ({
       create: () => Promise.resolve({ id: 'new1' }),
       coverThumbUrl: () => null,
       downloadUrl: () => '',
+      previewFromFolder: (...args: unknown[]) => mockPreviewFromFolder(...args),
+      fromFolder: (...args: unknown[]) => mockFromFolder(...args),
     },
     categories: {
       list: (...args: unknown[]) => mockCategoriesList(...args),
@@ -73,6 +80,12 @@ beforeEach(() => {
   mockModelGet.mockImplementation(() => Promise.resolve(emptyModelDetail));
   mockCategoriesList.mockClear();
   mockCategoriesList.mockImplementation(() => Promise.resolve([]));
+  mockFoldersList.mockClear();
+  mockFoldersList.mockImplementation(() => Promise.resolve([]));
+  mockPreviewFromFolder.mockClear();
+  mockPreviewFromFolder.mockImplementation(() => Promise.reject(new Error('not stubbed')));
+  mockFromFolder.mockClear();
+  mockFromFolder.mockImplementation(() => Promise.reject(new Error('not stubbed')));
   // Pin an explicit theme so useTheme's 'system' default doesn't depend on
   // matchMedia support in the test environment.
   localStorage.setItem('mv_theme', 'light');
@@ -119,6 +132,15 @@ describe('AppShell routing', () => {
     expect(await screen.findByText('Widget X')).toBeTruthy();
     expect(mockModelGet).toHaveBeenCalledWith('abc123');
     expect(screen.queryByText(/coming soon/i)).toBeNull();
+  });
+
+  it('renders ConvertWizardPage at /convert (#2170)', async () => {
+    mockFoldersList.mockImplementation(() => Promise.resolve([
+      { id: 'f1', name: 'Dragon Prints', parentId: null, createdAt: 0 },
+    ]));
+    renderAt('/convert');
+    expect(await screen.findByText('Bulk Convert Folders to Models')).toBeTruthy();
+    expect(await screen.findByText('Dragon Prints')).toBeTruthy();
   });
 
   it('renders the persistent nav switch on every route', () => {

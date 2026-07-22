@@ -436,6 +436,93 @@ describe('POST /models/from-folder', () => {
   });
 });
 
+describe('GET /models/from-folder/preview — dry run, no writes', () => {
+  it('classifies the same way the real POST would, and writes nothing', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app, 'Dragon Prints');
+    const stl = insertAsset(app, { filename: 'body.stl', folderId, thumbStatus: 'pending' });
+    const img = insertAsset(app, { filename: 'cover.png', folderId, thumbStatus: 'done' });
+    const doc = insertAsset(app, { filename: 'readme.txt', folderId });
+
+    const modelsBefore = (app.db.prepare('SELECT COUNT(*) as c FROM models').get() as { c: number }).c;
+    const filesBefore = (app.db.prepare('SELECT COUNT(*) as c FROM model_files').get() as { c: number }).c;
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(app.token) });
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      folderId: string; folderName: string; suggestedTitle: string; assetCount: number;
+      countsByRole: Record<string, number>; coverAssetId: string; alreadyConverted: boolean;
+      files: Array<{ assetId: string; filename: string; role: string }>;
+    };
+
+    expect(body.folderName).toBe('Dragon Prints');
+    expect(body.suggestedTitle).toBe('Dragon Prints');
+    expect(body.assetCount).toBe(3);
+    expect(body.coverAssetId).toBe(img.id);
+    expect(body.alreadyConverted).toBe(false);
+    expect(body.countsByRole).toEqual({ part: 1, image: 1, doc: 1, other: 0 });
+
+    const roles = new Map(body.files.map((f) => [f.assetId, f.role]));
+    expect(roles.get(stl.id)).toBe('part');
+    expect(roles.get(img.id)).toBe('image');
+    expect(roles.get(doc.id)).toBe('doc');
+
+    // Load-bearing: this is a preview, not a conversion — no rows written.
+    const modelsAfter = (app.db.prepare('SELECT COUNT(*) as c FROM models').get() as { c: number }).c;
+    const filesAfter = (app.db.prepare('SELECT COUNT(*) as c FROM model_files').get() as { c: number }).c;
+    expect(modelsAfter).toBe(modelsBefore);
+    expect(filesAfter).toBe(filesBefore);
+  });
+
+  it('does not 400 on an empty folder — returns a zero-count preview instead', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app, 'Empty');
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(app.token) });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { assetCount: number; files: unknown[]; coverAssetId: string | null };
+    expect(body.assetCount).toBe(0);
+    expect(body.files).toEqual([]);
+    expect(body.coverAssetId).toBeNull();
+  });
+
+  it('404s for an unknown folder', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${uuidv4()}`, { headers: bearer(app.token) });
+    expect(res.status).toBe(404);
+  });
+
+  it('400s when folder_id is missing', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview`, { headers: bearer(app.token) });
+    expect(res.status).toBe(400);
+  });
+
+  it('flags alreadyConverted true once a model has been created from the folder', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app, 'Already Done');
+    insertAsset(app, { filename: 'a.stl', folderId });
+
+    const createRes = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId }),
+    });
+    const created = await createRes.json() as { id: string };
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(app.token) });
+    const body = await res.json() as { alreadyConverted: boolean; existingModelIds: string[] };
+    expect(body.alreadyConverted).toBe(true);
+    expect(body.existingModelIds).toEqual([created.id]);
+  });
+
+  it('denies with no token', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app);
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('POST /model/:id/files — attach existing + upload with dedup', () => {
   it('attaches existing asset ids via JSON body', async () => {
     const app = await bootApp();

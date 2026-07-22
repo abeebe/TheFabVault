@@ -7,6 +7,7 @@ import { useTheme } from '../hooks/useTheme.js';
 import { VaultPage } from '../views/VaultPage.js';
 import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
+import { ConvertWizardPage } from '../views/ConvertWizardPage.js';
 
 interface Props {
   logout: () => void;
@@ -87,6 +88,10 @@ export function AppShell({ logout, authRequired }: Props) {
           <Route path="/vault" element={<VaultPage />} />
           <Route path="/library" element={<Navigate to="/" replace />} />
           <Route path="/models/:id" element={<ModelPage />} />
+          {/* Bulk folder→model convert wizard (#2170) — admin-ish power
+              tool, not on the persistent nav; reached via AdminSettings'
+              Library Tools section (see AdminSettings.tsx). */}
+          <Route path="/convert" element={<ConvertWizardPage />} />
         </Routes>
       </div>
 

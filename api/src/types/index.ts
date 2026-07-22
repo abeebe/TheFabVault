@@ -491,6 +491,40 @@ export interface ModelDetailOut extends ModelOut {
   profiles: PrintProfileOut[];
 }
 
+// ─── Folder→model conversion preview (Phase B, #2170) ─────────────────────────
+//
+// GET /models/from-folder/preview response shape — the same
+// planFolderConversion() classification POST /models/from-folder acts on,
+// but read-only: no models/model_files rows are written. Deliberately its
+// own shape rather than a slice of ModelDetailOut — a preview has no
+// model id yet (nothing has been created) and needs countsByRole +
+// alreadyConverted, neither of which a real model has any use for.
+export interface FolderConversionPreviewFile {
+  assetId: string;
+  filename: string;
+  role: 'part' | 'image' | 'doc' | 'other';
+  sortOrder: number;
+}
+
+export interface FolderConversionPreviewOut {
+  folderId: string;
+  folderName: string;
+  // Same folder-name fallback POST /models/from-folder itself uses when
+  // no title override is given — surfaced so the wizard can show/edit
+  // the title it would submit, matching what would actually happen.
+  suggestedTitle: string;
+  assetCount: number;
+  countsByRole: Record<'part' | 'image' | 'doc' | 'other', number>;
+  files: FolderConversionPreviewFile[];
+  coverAssetId: string | null;
+  // True when a non-deleted model already has source_folder_id === this
+  // folder. The wizard uses this to show an "already converted" marker
+  // and require an explicit re-check before allowing a second convert of
+  // the same folder (see routes/models.ts's batch idempotence guard).
+  alreadyConverted: boolean;
+  existingModelIds: string[];
+}
+
 // ─── Collections (Phase B, #2167) ─────────────────────────────────────────────
 //
 // Model-level analog of SetRow/SetAssetRow (v11) — same shape, except
