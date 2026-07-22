@@ -117,6 +117,62 @@ export type CategoryUpdateBody = Partial<{
   sortOrder: number;
 }>;
 
+// ─── Users (Phase D, #2177) ────────────────────────────────────────────────
+//
+// Contract commit for api/src/routes/users.ts + GET /auth/me. Same
+// "defined locally here, mirror api/src/types/index.ts by hand" convention
+// as Categories/Models above. AuthMeOut/UserOut mirror the server types
+// exactly; UserRole is the same 'admin' | 'member' enum
+// services/enumValidators.ts (server) validates against.
+export type UserRole = 'admin' | 'member';
+
+export interface AuthMeOut {
+  id: string;
+  username: string;
+  displayName: string | null;
+  role: UserRole;
+}
+
+export interface UserOut {
+  id: string;
+  username: string;
+  displayName: string | null;
+  role: UserRole;
+  disabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// generatedPassword is present ONLY when the caller did not supply a
+// password themselves (create with no `password`, or reset-password with
+// no `password`) — see routes/users.ts's create/reset-password handlers.
+// Shown to the admin exactly once; the API never returns it again after
+// this response.
+export interface UserCreateResponse extends UserOut {
+  generatedPassword?: string;
+}
+
+export interface UserCreateBody {
+  username: string;
+  // Omit to have the server generate one (returned once as
+  // generatedPassword on the response).
+  password?: string;
+  // Defaults to 'member' server-side if omitted.
+  role?: UserRole;
+  displayName?: string | null;
+}
+
+export type UserUpdateBody = Partial<{
+  role: UserRole;
+  displayName: string | null;
+  disabled: boolean;
+}>;
+
+export interface UserResetPasswordBody {
+  // Omit to have the server generate one.
+  password?: string;
+}
+
 export type ModelFileRole = 'part' | 'image' | 'doc' | 'other';
 export type ModelVisibility = 'public' | 'private';
 
@@ -416,6 +472,11 @@ export const api = {
       }),
     refresh: (): Promise<LoginResponse> =>
       apiFetch('/auth/refresh', { method: 'POST' }),
+
+    // The whole-app identity/role contract (#2177) — every client-side
+    // role gate (admin nav, ownership checks) reads from this, never from
+    // decoding the JWT itself (the token only ever carries `sub`).
+    me: (): Promise<AuthMeOut> => apiFetch('/auth/me'),
   },
 
   assets: {
@@ -1060,5 +1121,23 @@ export const api = {
 
     cleanOrphans: (opts?: { deleteDeadRecords?: boolean; deleteOrphanDirs?: boolean }): Promise<{ ok: boolean; removedRecords: number; removedDirs: number }> =>
       apiFetch('/admin/orphans/clean', { method: 'POST', body: JSON.stringify(opts ?? {}) }),
+  },
+
+  // Admin users CRUD (Phase D, #2177) — all requireAdmin server-side, same
+  // "this client doesn't gate that itself, the API 401/403s" split as
+  // categories above. No delete() — disable via update() instead
+  // (routes/users.ts's file header explains why: preserves
+  // models.owner_id integrity, no silent orphaning).
+  users: {
+    list: (): Promise<UserOut[]> => apiFetch('/users'),
+
+    create: (body: UserCreateBody): Promise<UserCreateResponse> =>
+      apiFetch('/users', { method: 'POST', body: JSON.stringify(body) }),
+
+    update: (id: string, body: UserUpdateBody): Promise<UserOut> =>
+      apiFetch(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    resetPassword: (id: string, body: UserResetPasswordBody = {}): Promise<UserCreateResponse> =>
+      apiFetch(`/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify(body) }),
   },
 };
