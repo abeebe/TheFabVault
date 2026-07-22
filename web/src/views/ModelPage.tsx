@@ -5,6 +5,7 @@ import {
   Lock, Globe, FileBox, Image as ImageIcon, FileText, File as FileIcon,
 } from 'lucide-react';
 import { useModel } from '../hooks/useModels.js';
+import { useCategories } from '../hooks/useCategories.js';
 import { ModelViewer } from '../components/ModelViewer.js';
 import { AssetPicker } from '../components/AssetPicker.js';
 import { TagInput, TagBadge } from '../components/TagInput.js';
@@ -16,6 +17,7 @@ import type { AssetOut } from '../types/index.js';
 import type {
   ModelDetailOut, ModelFileOut, ModelUpdateBody, ModelVisibility,
   PrintProfileOut, PrintProfileCreateBody, PrintProfileUpdateBody,
+  CategoryOut,
 } from '../lib/api.js';
 
 type Tab = 'overview' | 'files' | 'profiles';
@@ -155,12 +157,30 @@ function PartsQuickView({ parts, onView }: { parts: ModelFileOut[]; onView: (ass
 // this modal (see ModelPage body) since markdown deserves more room than
 // a modal affords.
 //
-// Known gap: categoryId is a raw text field, not a picker. There is no
-// GET /categories endpoint yet (the categories table + seed exist
-// server-side per the plan, but no route exposes the list to the
-// client) -- out of scope for this ticket to add server-side, and adding
-// a client-only picker without it would just be a dropdown with nothing
-// to select. Flagged in the completion report as a follow-up for Kit.
+// Category picker (#2164): flattens the useCategories() tree into a
+// single ordered list of options, indenting children under their parent
+// with a simple em-dash prefix per depth level. No category admin UI
+// exists yet to manage the tree's shape (Phase B proper) -- this is
+// deliberately just a select fed by GET /categories, not a full tree
+// widget.
+function buildCategoryOptions(categories: CategoryOut[]): Array<{ id: string; label: string }> {
+  const byParent = new Map<string | null, CategoryOut[]>();
+  for (const c of categories) {
+    const key = c.parentId;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key)!.push(c);
+  }
+  const options: Array<{ id: string; label: string }> = [];
+  function walk(parentId: string | null, depth: number) {
+    for (const c of byParent.get(parentId) ?? []) {
+      options.push({ id: c.id, label: `${'— '.repeat(depth)}${c.name}` });
+      walk(c.id, depth + 1);
+    }
+  }
+  walk(null, 0);
+  return options;
+}
+
 function EditDetailsModal({
   model, onSave, onClose,
 }: {
@@ -177,6 +197,8 @@ function EditDetailsModal({
   const [sourceUrl, setSourceUrl] = useState(model.sourceUrl ?? '');
   const [license, setLicense] = useState(model.license ?? '');
   const [saving, setSaving] = useState(false);
+  const { categories } = useCategories();
+  const categoryOptions = buildCategoryOptions(categories);
 
   async function handleSave() {
     const trimmedTitle = title.trim();
@@ -222,15 +244,13 @@ function EditDetailsModal({
             </select>
           </div>
           <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Category ID <span className="font-normal text-gray-400">(no picker yet)</span>
-            </label>
-            <input
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              placeholder="leave blank for none"
-              className={inputClass}
-            />
+            <label htmlFor="model-category-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Category</label>
+            <select id="model-category-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={inputClass}>
+              <option value="">Uncategorized</option>
+              {categoryOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>{opt.label}</option>
+              ))}
+            </select>
           </div>
         </div>
 
