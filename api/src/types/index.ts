@@ -259,6 +259,32 @@ export interface HealthResponse {
   authRequired: boolean;
 }
 
+// ─── Users (Phase D, #2177 — routes/users.ts + GET /auth/me) ─────────────────
+//
+// AuthMeOut is the whole-app identity/role contract: every client-side
+// gate (admin nav, ownership checks) reads from GET /auth/me, never from
+// decoding the JWT (which only ever carries `sub` — see auth.ts's
+// createToken comment). UserOut is the admin-facing shape (adds
+// disabled/timestamps) used by the GET/POST/PATCH /users* admin CRUD —
+// deliberately a superset of AuthMeOut's fields rather than an unrelated
+// shape, so the two stay easy to reason about side by side.
+export interface AuthMeOut {
+  id: string;
+  username: string;
+  displayName: string | null;
+  role: 'admin' | 'member';
+}
+
+export interface UserOut {
+  id: string;
+  username: string;
+  displayName: string | null;
+  role: 'admin' | 'member';
+  disabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ─── DB row types ─────────────────────────────────────────────────────────────
 
 // Users (migration v13 — env-to-DB auth migration; migration v15 —

@@ -22,6 +22,7 @@ import collectionsRouter from './routes/collections.js';
 import adminRouter from './routes/admin.js';
 import mountsRouter from './routes/mounts.js';
 import modelImportRouter from './routes/modelImport.js';
+import usersRouter from './routes/users.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
 import { assetFilePath } from './services/fileStore.js';
 import { ensureMountPoints, remountAll } from './services/mountManager.js';
@@ -104,6 +105,7 @@ app.use('/', collectionsRouter);
 app.use('/', adminRouter);
 app.use('/', mountsRouter);
 app.use('/', modelImportRouter);
+app.use('/', usersRouter);
 
 // 404 handler
 app.use((_req, res) => {
