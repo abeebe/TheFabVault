@@ -21,9 +21,11 @@ import categoriesRouter from './routes/categories.js';
 import collectionsRouter from './routes/collections.js';
 import adminRouter from './routes/admin.js';
 import mountsRouter from './routes/mounts.js';
+import modelImportRouter from './routes/modelImport.js';
 import { requeuePendingThumbs, setServerPort, shutdownBrowser } from './services/thumbGen.js';
 import { assetFilePath } from './services/fileStore.js';
 import { ensureMountPoints, remountAll } from './services/mountManager.js';
+import { sweepExpiredDrafts } from './services/zipImportDraft.js';
 import { errorMiddleware } from './errorMiddleware.js';
 import { installProcessGuards } from './processGuards.js';
 
@@ -101,6 +103,7 @@ app.use('/', categoriesRouter);
 app.use('/', collectionsRouter);
 app.use('/', adminRouter);
 app.use('/', mountsRouter);
+app.use('/', modelImportRouter);
 
 // 404 handler
 app.use((_req, res) => {
@@ -132,6 +135,14 @@ const server = app.listen(config.port, () => {
 
   // Re-queue any pending thumbnails from before shutdown
   requeuePendingThumbs();
+
+  // Sweep abandoned zip-import drafts left over from before this boot
+  // (crash, restart mid-wizard, or just never finished/deleted). This is
+  // one of exactly two call sites for sweepExpiredDrafts — the other is
+  // POST /import/zip, right before it creates a new draft — never a
+  // timer (#2078, "no background filesystem scanning" hard lesson).
+  const draftSweep = sweepExpiredDrafts();
+  console.log(`[api] Zip import drafts: removed ${draftSweep.removed} expired, ${draftSweep.kept} still active`);
 
   // Ensure /imports/1,2,3 mount point directories exist (Admin UI-managed
   // NFS/SMB "Network Mounts" feature — routes/mounts.ts,

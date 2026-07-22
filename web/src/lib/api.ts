@@ -287,6 +287,124 @@ export type CollectionUpdateBody = Partial<{
   visibility: ModelVisibility;
 }>;
 
+// ─── Zip Import (Phase C, #2171/#2172) ────────────────────────────────────────
+//
+// Same convention as Models/Categories/Collections above -- types defined
+// locally here as the single cross-engineer contract for
+// api/src/routes/modelImport.ts, mirroring
+// api/src/services/zipImportClassify.ts's ZipImportPlan/ClassifiedZipFile
+// and api/src/routes/modelImport.ts's request/response shapes exactly --
+// keep both in sync by hand if either changes. Remy's C3 (ImportWizard)
+// builds against this.
+
+// 'ignore' is never a real model_files role (it's a classifier-only
+// concept for macOS junk / bare directory-listing entries) -- kept as a
+// distinct union member here, same as the API side, rather than folded
+// into ModelFileRole, so a wizard row can render an "ignored" state
+// without a type-level lie.
+export type ZipEntryRole = ModelFileRole | 'ignore';
+
+export interface ClassifiedZipFile {
+  path: string;
+  role: ZipEntryRole;
+  // zip-slip flag -- the wizard should render these as excluded/disabled,
+  // never selectable for commit. The server independently re-enforces
+  // this at commit time regardless of what a client sends.
+  invalid: boolean;
+  invalidReason?: 'absolute path' | 'path traversal (..)' | 'empty path';
+  // Passthrough of the original zip entry's declared size, when known --
+  // lets the plan-review UI show per-file size without re-joining
+  // against the upload's entry list by path (Remy's C1 review finding,
+  // #2171 follow-up). Omitted, not 0, when the size was never provided.
+  size?: number;
+}
+
+export type GuessedSourceSite = 'makerworld' | 'printables' | 'thingiverse' | null;
+
+export interface ZipImportPlan {
+  suggestedTitle: string;
+  files: ClassifiedZipFile[];
+  descriptionSource: string | null;
+  profileCandidates: string[];
+  guessedSourceSite: GuessedSourceSite;
+  licenseFile: string | null;
+}
+
+export interface ZipImportDraftResponse {
+  draftId: string;
+  zipFilename: string;
+  plan: ZipImportPlan;
+  // Unix seconds -- convenience for a "this draft expires in ~2 days"
+  // hint in the wizard; the server enforces the actual TTL independently
+  // via its own sidecar-stored createdAt, this is just for display.
+  expiresAt: number;
+}
+
+export interface ZipImportCommitFile {
+  // Must match one of the draft plan's files[].path exactly (byte-for-
+  // byte, whatever separator/case the archive used) -- the server looks
+  // this up against its own stored copy of the original plan, not the
+  // client's.
+  path: string;
+  // Defaults server-side to the original classified role if omitted --
+  // only pass this to override (e.g. the wizard's per-file role
+  // reassignment). Never send 'ignore' or an invalid entry's path here;
+  // the server 400s the whole commit if either slips through.
+  role?: ModelFileRole;
+  label?: string | null;
+}
+
+export interface ZipImportCommitProfile {
+  // Must be one of the paths also present in `files` below.
+  path: string;
+  name?: string;
+}
+
+export interface ZipImportCommitBody {
+  title: string;
+  description?: string | null;
+  categoryId?: string | null;
+  tags?: string[];
+  visibility?: ModelVisibility;
+  sourceUrl?: string | null;
+  // Omit to keep the plan's guessedSourceSite; pass '' or a value to
+  // override/clear it explicitly.
+  sourceSite?: string | null;
+  sourceAuthor?: string | null;
+  license?: string | null;
+  files: ZipImportCommitFile[];
+  // Must be one of `files`' paths with role='image'.
+  coverPath?: string | null;
+  profiles?: ZipImportCommitProfile[];
+}
+
+// Per-file dedup outcome (Remy's C3-consumer finding, #2172 follow-up --
+// the wizard is promised a dedup summary, not just a bare model). One
+// entry per submitted `files[]` path, same order.
+//   'created'          -- no matching content existed anywhere; a new
+//                          asset was stored.
+//   'linked-existing'  -- matched an asset that already existed in the
+//                          vault BEFORE this commit; linked, not duplicated.
+//   'merged-duplicate' -- matched another path submitted in THIS SAME
+//                          commit (identical byte content); this path's
+//                          own role/label never took effect -- the
+//                          FIRST matching path (by submission order) is
+//                          the one that "won" the model_files link
+//                          (INSERT OR IGNORE keeps the first insert for
+//                          a given model+asset pair). Surface this
+//                          distinctly in the UI rather than letting it
+//                          look identical to an ordinary link/create.
+export interface ZipImportCommitFileResult {
+  path: string;
+  assetId: string;
+  outcome: 'created' | 'linked-existing' | 'merged-duplicate';
+}
+
+export interface ZipImportCommitResult {
+  model: ModelDetailOut;
+  files: ZipImportCommitFileResult[];
+}
+
 export const api = {
   health: (): Promise<HealthResponse> => apiFetch('/health'),
 
@@ -631,6 +749,65 @@ export const api = {
       const base = `${API_BASE}${collection.coverThumbUrl}`;
       return token ? `${base}?token=${encodeURIComponent(token)}` : base;
     },
+  },
+
+  // Zip import — draft/commit (Phase C, #2171/#2172). uploadZip creates a
+  // draft (extracted server-side to scratch, never touching the vault
+  // until commit); commit finalizes an edited plan into a real model;
+  // abandon deletes the draft outright. No polling/list endpoint here —
+  // a draft is a single-flight wizard session the client already knows
+  // the id of, not a browsable resource.
+  import: {
+    // onProgress mirrors assets.upload's XHR path exactly (Remy's
+    // C3-consumer finding, #2172 follow-up) -- a zip can be up to
+    // MAX_ZIP_UPLOAD_BYTES (1 GiB server-side), so the wizard needs the
+    // same upload-progress affordance a single large asset upload
+    // already gets; fetch has no upload-progress event at all, which is
+    // the whole reason assets.upload has this same fork.
+    uploadZip: (
+      file: File,
+      opts: { onProgress?: (loaded: number, total: number) => void } = {},
+    ): Promise<ZipImportDraftResponse> => {
+      const fd = new FormData();
+      fd.append('file', file);
+
+      if (!opts.onProgress) {
+        return apiFetch('/import/zip', { method: 'POST', body: fd });
+      }
+
+      return new Promise<ZipImportDraftResponse>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const token = getToken();
+        xhr.open('POST', `${API_BASE}/import/zip`);
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) opts.onProgress!(e.loaded, e.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status === 401) {
+            localStorage.removeItem('mv_token');
+            window.dispatchEvent(new Event('mv:unauthorized'));
+            reject(new Error('Unauthorized'));
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText) as ZipImportDraftResponse); }
+            catch (err) { reject(err); }
+          } else {
+            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload aborted'));
+        xhr.send(fd);
+      });
+    },
+
+    commit: (draftId: string, body: ZipImportCommitBody): Promise<ZipImportCommitResult> =>
+      apiFetch(`/import/zip/${draftId}/commit`, { method: 'POST', body: JSON.stringify(body) }),
+
+    abandon: (draftId: string): Promise<void> =>
+      apiFetch(`/import/zip/${draftId}`, { method: 'DELETE' }),
   },
 
   folders: {
