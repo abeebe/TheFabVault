@@ -474,6 +474,13 @@ export interface ModelOut {
   // SetOut.assetCount's rationale (list view needs the count without a
   // second per-model request).
   fileCount: number;
+  // Migration v16 (#2167). likeCount = COUNT(*) of model_likes rows for
+  // this model; likedByMe = whether req.user has a row in model_likes
+  // for this model (always false when there's no authenticated caller,
+  // which in practice never happens — every route serving ModelOut sits
+  // behind requireAuth).
+  likeCount: number;
+  likedByMe: boolean;
   createdAt: number;
   updatedAt: number;
   deletedAt: number | null;
@@ -482,4 +489,55 @@ export interface ModelOut {
 export interface ModelDetailOut extends ModelOut {
   files: ModelFileOut[];
   profiles: PrintProfileOut[];
+}
+
+// ─── Collections (Phase B, #2167) ─────────────────────────────────────────────
+//
+// Model-level analog of SetRow/SetAssetRow (v11) — same shape, except
+// membership is models (collection_models) instead of assets
+// (set_assets), and it carries owner_id/visibility like models does
+// (migration v15). visibility reuses the models 'public'/'private' enum
+// (enumValidators.ts's isModelVisibility) rather than a second copy —
+// see db.ts's v16 migration comment.
+
+export interface CollectionRow {
+  id: string;
+  name: string;
+  description: string | null;
+  owner_id: string | null;
+  visibility: 'public' | 'private';
+  cover_model_id: string | null;
+  created_at: number;
+}
+
+export interface CollectionModelRow {
+  collection_id: string;
+  model_id: string;
+  sort_order: number;
+  added_at: number;
+}
+
+export interface ModelLikeRow {
+  model_id: string;
+  user_id: string;
+  created_at: number;
+}
+
+export interface CollectionOut {
+  id: string;
+  name: string;
+  description: string | null;
+  ownerId: string | null;
+  visibility: 'public' | 'private';
+  coverModelId: string | null;
+  // Resolved cover thumb — coverModelId's own coverThumbUrl if it
+  // resolves to one, else the first member model's coverThumbUrl, else
+  // null. Same fallback shape as ModelOut.coverThumbUrl/SetOut's.
+  coverThumbUrl: string | null;
+  modelCount: number;
+  createdAt: number;
+}
+
+export interface CollectionDetailOut extends CollectionOut {
+  models: ModelOut[];
 }

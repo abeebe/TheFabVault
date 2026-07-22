@@ -692,3 +692,119 @@ describe('auth', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ─── Likes (migration v16, #2167) ──────────────────────────────────────────────
+
+describe('PUT/DELETE /model/:id/like — idempotency + count/likedByMe threading', () => {
+  it('a fresh model has likeCount 0 and likedByMe false everywhere it appears', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Unliked' }) });
+    const created = await createRes.json() as { id: string; likeCount: number; likedByMe: boolean };
+    expect(created.likeCount).toBe(0);
+    expect(created.likedByMe).toBe(false);
+
+    const detailRes = await fetch(`${app.baseUrl}/model/${created.id}`, { headers: bearer(app.token) });
+    const detail = await detailRes.json() as { likeCount: number; likedByMe: boolean };
+    expect(detail.likeCount).toBe(0);
+    expect(detail.likedByMe).toBe(false);
+
+    const listRes = await fetch(`${app.baseUrl}/models`, { headers: bearer(app.token) });
+    const list = await listRes.json() as { items: Array<{ id: string; likeCount: number; likedByMe: boolean }> };
+    const row = list.items.find((m) => m.id === created.id)!;
+    expect(row.likeCount).toBe(0);
+    expect(row.likedByMe).toBe(false);
+  });
+
+  it('PUT like sets likedByMe true and increments likeCount; repeated PUTs are idempotent (no double count)', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Liked Thing' }) });
+    const { id } = await createRes.json() as { id: string };
+
+    const like1 = await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'PUT', headers: bearer(app.token) });
+    expect(like1.status).toBe(200);
+    const body1 = await like1.json() as { likeCount: number; likedByMe: boolean };
+    expect(body1.likeCount).toBe(1);
+    expect(body1.likedByMe).toBe(true);
+
+    // Second PUT — idempotent, count stays at 1, not 2.
+    const like2 = await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'PUT', headers: bearer(app.token) });
+    const body2 = await like2.json() as { likeCount: number; likedByMe: boolean };
+    expect(body2.likeCount).toBe(1);
+    expect(body2.likedByMe).toBe(true);
+
+    const row = app.db.prepare('SELECT COUNT(*) AS c FROM model_likes WHERE model_id = ?').get(id) as { c: number };
+    expect(row.c).toBe(1);
+  });
+
+  it('DELETE unlike clears likedByMe and decrements likeCount; repeated DELETEs are idempotent (no error, no negative count)', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Thing' }) });
+    const { id } = await createRes.json() as { id: string };
+    await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'PUT', headers: bearer(app.token) });
+
+    const unlike1 = await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'DELETE', headers: bearer(app.token) });
+    expect(unlike1.status).toBe(200);
+    const body1 = await unlike1.json() as { likeCount: number; likedByMe: boolean };
+    expect(body1.likeCount).toBe(0);
+    expect(body1.likedByMe).toBe(false);
+
+    // Second DELETE on an already-unliked model — no error, stays at 0.
+    const unlike2 = await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'DELETE', headers: bearer(app.token) });
+    expect(unlike2.status).toBe(200);
+    const body2 = await unlike2.json() as { likeCount: number; likedByMe: boolean };
+    expect(body2.likeCount).toBe(0);
+  });
+
+  it('404s liking/unliking a model that does not exist', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/model/does-not-exist/like`, { method: 'PUT', headers: bearer(app.token) });
+    expect(res.status).toBe(404);
+  });
+
+  it('404s liking a soft-deleted model', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Gone' }) });
+    const { id } = await createRes.json() as { id: string };
+    await fetch(`${app.baseUrl}/model/${id}`, { method: 'DELETE', headers: bearer(app.token) });
+    const res = await fetch(`${app.baseUrl}/model/${id}/like`, { method: 'PUT', headers: bearer(app.token) });
+    expect(res.status).toBe(404);
+  });
+
+  it('denies like/unlike with no token', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/model/anything/like`, { method: 'PUT' });
+    expect(res.status).toBe(401);
+  });
+
+  it('sort=likes orders by like count descending, ties broken by created_at descending', async () => {
+    const app = await bootApp();
+    const mkModel = async (title: string) => {
+      const r = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title }) });
+      return (await r.json()) as { id: string };
+    };
+    const a = await mkModel('A - zero likes');
+    const b = await mkModel('B - two likes');
+    const c = await mkModel('C - one like');
+
+    await fetch(`${app.baseUrl}/model/${b.id}/like`, { method: 'PUT', headers: bearer(app.token) });
+    await fetch(`${app.baseUrl}/model/${c.id}/like`, { method: 'PUT', headers: bearer(app.token) });
+    // A second liker on B, so B has 2 and C has 1 — insert a second user
+    // directly (no signup route exists yet, Phase D) to prove the count
+    // is a real COUNT(*), not just a boolean liked-by-current-user flag.
+    const secondUserId = uuidv4();
+    app.db.prepare(
+      "INSERT INTO users (id, username, password_hash, role) VALUES (?, 'second', 'hash', 'member')",
+    ).run(secondUserId);
+    app.db.prepare('INSERT INTO model_likes (model_id, user_id) VALUES (?, ?)').run(b.id, secondUserId);
+
+    const res = await fetch(`${app.baseUrl}/models?sort=likes`, { headers: bearer(app.token) });
+    const { items } = await res.json() as { items: Array<{ id: string; likeCount: number }> };
+    const ids = items.map((m) => m.id);
+    // B (2 likes) first, C (1 like) second, A (0 likes) last.
+    expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(c.id));
+    expect(ids.indexOf(c.id)).toBeLessThan(ids.indexOf(a.id));
+    expect(items.find((m) => m.id === b.id)!.likeCount).toBe(2);
+    expect(items.find((m) => m.id === c.id)!.likeCount).toBe(1);
+    expect(items.find((m) => m.id === a.id)!.likeCount).toBe(0);
+  });
+});
