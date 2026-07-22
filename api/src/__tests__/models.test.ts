@@ -173,6 +173,50 @@ describe('GET/POST /models — list + create', () => {
     expect(res.status).toBe(400);
   });
 
+  it('accepts a valid https sourceUrl', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'X', sourceUrl: 'https://www.thingiverse.com/thing:123' }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { sourceUrl: string };
+    expect(body.sourceUrl).toBe('https://www.thingiverse.com/thing:123');
+  });
+
+  it('rejects a javascript: sourceUrl (stored XSS guard)', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'X', sourceUrl: 'javascript:alert(1)' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a case-variant / whitespace-padded javascript: sourceUrl', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'X', sourceUrl: '  JaVaScRiPt:alert(1)' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts an empty-string sourceUrl (treated as none)', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'X', sourceUrl: '' }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { sourceUrl: string | null };
+    expect(body.sourceUrl).toBeNull();
+  });
+
   it('lists models filtered by q, and respects owner=me', async () => {
     const app = await bootApp();
     await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Skull Planter' }) });
@@ -226,6 +270,44 @@ describe('PATCH /model/:id', () => {
       body: JSON.stringify({ title: 'X' }),
     });
     expect(res.status).toBe(404);
+  });
+
+  it('rejects a javascript: sourceUrl on update', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Original' }) });
+    const created = await createRes.json() as { id: string };
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ sourceUrl: 'javascript:alert(document.cookie)' }),
+    });
+    expect(patchRes.status).toBe(400);
+
+    const row = app.db.prepare('SELECT source_url FROM models WHERE id = ?').get(created.id) as { source_url: string | null };
+    expect(row.source_url).toBeNull();
+  });
+
+  it('accepts a valid http sourceUrl on update and null clears it', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Original' }) });
+    const created = await createRes.json() as { id: string };
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ sourceUrl: 'http://example.com/model/42' }),
+    });
+    expect(patchRes.status).toBe(200);
+    expect((await patchRes.json() as { sourceUrl: string }).sourceUrl).toBe('http://example.com/model/42');
+
+    const clearRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ sourceUrl: null }),
+    });
+    expect(clearRes.status).toBe(200);
+    expect((await clearRes.json() as { sourceUrl: string | null }).sourceUrl).toBeNull();
   });
 });
 
