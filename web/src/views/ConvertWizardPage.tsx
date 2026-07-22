@@ -147,15 +147,34 @@ export function ConvertWizardPage() {
     // already-converted without an explicit re-check) still get a result
     // row — "one confirm per batch, then per-folder results" means every
     // selected folder should show up in the outcome, not silently vanish.
+    //
+    // The two `if`/`else if` branches below are the two KNOWN reasons a
+    // ready preview excludes a folder. Everything else — the preview
+    // fetch itself failed (status==='error'), it never finished
+    // (status==='loading', e.g. Confirm was clicked while another
+    // folder's preview was still in flight), or no preview entry exists
+    // at all — falls into the final `else`, which is deliberately a
+    // catch-all rather than a third named case: Kit's #2170 review caught
+    // a real bug here (a rejected previewFromFolder silently dropped that
+    // folder from Results entirely, contradicting this very comment). An
+    // exhaustive default is what keeps that invariant from regressing
+    // again if a future PreviewState variant is ever added — no branch to
+    // remember to update, nothing new can fall through.
     for (const folderId of selectedIds) {
       if (eligibleIds.includes(folderId)) continue;
       const p = previews.get(folderId);
       const folderName = p && p.status === 'ready' ? p.preview.folderName
         : rows.find((r) => r.folder.id === folderId)?.folder.name ?? folderId;
-      if (p && p.status === 'ready' && p.preview.assetCount === 0) {
+
+      if (p?.status === 'ready' && p.preview.assetCount === 0) {
         setResults((prev) => [...prev, { folderId, folderName, status: 'skipped-empty' }]);
-      } else if (p && p.status === 'ready' && p.preview.alreadyConverted) {
+      } else if (p?.status === 'ready' && p.preview.alreadyConverted) {
         setResults((prev) => [...prev, { folderId, folderName, status: 'skipped-already-converted' }]);
+      } else {
+        const message = p?.status === 'error'
+          ? `Preview failed: ${p.message}`
+          : 'Preview did not complete — folder was not converted.';
+        setResults((prev) => [...prev, { folderId, folderName, status: 'error', message }]);
       }
     }
     setConverting(false);

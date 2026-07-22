@@ -178,6 +178,45 @@ describe('ConvertWizardPage — confirm + results', () => {
     expect(link.getAttribute('href')).toBe('/models/new-model-1');
   });
 
+  // Regression for Kit's #2170 review finding: a folder whose PREVIEW
+  // fetch itself rejects (not the later conversion call) used to fall
+  // through both named branches of the results back-fill loop and vanish
+  // from Results entirely — even though it was selected, and even though
+  // the code's own comment promised every selected folder shows up.
+  it('still shows a result row for a folder whose PREVIEW fetch fails, in a mixed batch with a folder that previews fine', async () => {
+    mockFoldersList.mockResolvedValue([folder('f1', 'Dragon Prints'), folder('f2', 'Skull Planter')]);
+    mockPreviewFromFolder.mockImplementation((folderId: string) => (
+      folderId === 'f1'
+        ? Promise.resolve(preview({ folderId: 'f1', folderName: 'Dragon Prints' }))
+        : Promise.reject(new Error('folder not found'))
+    ));
+    mockFromFolder.mockResolvedValue({ id: 'new-model-1' } as ModelDetailOut);
+
+    renderWizard();
+    await screen.findByText('Dragon Prints');
+    fireEvent.click(screen.getByLabelText('Dragon Prints'));
+    fireEvent.click(screen.getByLabelText('Skull Planter'));
+    fireEvent.click(screen.getByRole('button', { name: /Review/ }));
+
+    // Only f1 (the folder whose preview succeeded) is eligible — f2's
+    // failed preview correctly keeps it out of the batch...
+    const confirmButton = await screen.findByRole('button', { name: /Confirm & convert 1 folder/ });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(mockFromFolder).toHaveBeenCalledWith('f1', undefined));
+    // ...but conversion still ran for f1, so fromFolder must never have
+    // been called for f2 (the bug's failure mode was silent omission from
+    // Results, not an accidental conversion attempt).
+    expect(mockFromFolder).not.toHaveBeenCalledWith('f2', expect.anything());
+
+    expect(await screen.findByText('Step 3 of 3 — Results')).toBeTruthy();
+    // The load-bearing assertion: BOTH selected folders appear in
+    // Results, not just the one that converted successfully.
+    expect(await screen.findByText('Dragon Prints')).toBeTruthy();
+    expect(await screen.findByText('Skull Planter')).toBeTruthy();
+    expect(await screen.findByText(/Preview failed: folder not found/)).toBeTruthy();
+  });
+
   it('records an error row (not a thrown exception) when one folder in the batch fails', async () => {
     mockFoldersList.mockResolvedValue([folder('f1', 'Dragon Prints')]);
     mockPreviewFromFolder.mockResolvedValue(preview({}));
