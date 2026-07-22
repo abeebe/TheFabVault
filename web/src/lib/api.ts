@@ -175,6 +175,28 @@ export interface ModelDetailOut extends ModelOut {
   profiles: PrintProfileOut[];
 }
 
+// ─── Folder→model conversion preview (Phase B, #2170) ─────────────────────────
+// Mirrors api/src/types/index.ts's FolderConversionPreviewOut exactly —
+// same cross-engineer-contract convention as the rest of this section.
+export interface FolderConversionPreviewFile {
+  assetId: string;
+  filename: string;
+  role: ModelFileRole;
+  sortOrder: number;
+}
+
+export interface FolderConversionPreviewOut {
+  folderId: string;
+  folderName: string;
+  suggestedTitle: string;
+  assetCount: number;
+  countsByRole: Record<ModelFileRole, number>;
+  files: FolderConversionPreviewFile[];
+  coverAssetId: string | null;
+  alreadyConverted: boolean;
+  existingModelIds: string[];
+}
+
 export interface ModelCreateBody {
   title: string;
   description?: string;
@@ -467,6 +489,13 @@ export const api = {
     // + model_files links.
     fromFolder: (folderId: string, title?: string): Promise<ModelDetailOut> =>
       apiFetch('/models/from-folder', { method: 'POST', body: JSON.stringify({ folderId, title }) }),
+
+    // Dry-run counterpart of fromFolder above — same classification,
+    // zero writes (see routes/models.ts's preview handler comment). The
+    // bulk convert wizard calls this once per folder before the user
+    // confirms anything.
+    previewFromFolder: (folderId: string): Promise<FolderConversionPreviewOut> =>
+      apiFetch(`/models/from-folder/preview?folder_id=${encodeURIComponent(folderId)}`),
 
     // Link assets already in the vault onto a model.
     attachExisting: (

@@ -16,7 +16,9 @@
 // `a.deleted_at IS NULL` on the assets side so a trashed asset silently
 // drops out of a model's file list instead of 404ing the whole model.
 // from-folder conversion is purely additive: it only INSERTs into
-// models/model_files, never touches folders or assets.
+// models/model_files, never touches folders or assets. Its preview
+// counterpart (GET /models/from-folder/preview, #2170) goes one step
+// further and writes nothing at all — see that handler's own comment.
 
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
@@ -538,6 +540,81 @@ router.post('/models/from-folder', requireAuth, asyncHandler(async (req: Request
 
   const detail = loadModelDetail(db, modelId, req.user!.id)!;
   res.status(201).json(detail);
+}));
+
+// ─── GET /models/from-folder/preview — dry-run classification, no writes ──────
+//
+// Bulk convert wizard (#2170) needs to show what conversion WOULD produce
+// before the user confirms, per-folder, without ever creating a model
+// just to preview it. This calls the exact same planFolderConversion()
+// pure function as the POST above and returns its plan directly — no
+// INSERT anywhere, no transaction, nothing under this handler touches
+// the models or model_files tables. (Verified by the paired test: asserts
+// row counts on both tables are identical before and after the call.)
+//
+// Deliberately does NOT 400 on a folder with zero assets the way the real
+// POST does — "nothing to convert" is itself a useful preview result for
+// an admin browsing many folders (assetCount: 0, empty files/counts), and
+// the wizard uses that to grey out the folder's checkbox rather than
+// making the user click in to discover the same 400 the POST would give.
+//
+// Query param is snake_case `folder_id`, matching every other list
+// endpoint's folder filter (AssetListParams.folder_id) — not the camelCase
+// `folderId` the POST body above uses. Deliberate: this is a query string
+// (GET), that's a JSON body (POST), and the rest of this file already
+// uses different casing conventions for the two surfaces (route params/
+// query strings stay snake_case or plain; JSON bodies are camelCase).
+router.get('/models/from-folder/preview', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const { folder_id: folderId } = req.query as { folder_id?: string };
+  if (!folderId) { res.status(400).json({ error: 'folder_id is required' }); return; }
+
+  const db = getDb();
+  const folder = db.prepare('SELECT * FROM folders WHERE id = ?').get(folderId) as FolderRow | undefined;
+  if (!folder) { res.status(404).json({ error: 'Folder not found' }); return; }
+
+  const assetRows = db.prepare(
+    'SELECT * FROM assets WHERE folder_id = ? AND deleted_at IS NULL ORDER BY filename ASC'
+  ).all(folderId) as AssetRow[];
+
+  const plan = planFolderConversion(
+    assetRows.map((a) => ({ assetId: a.id, filename: a.filename, thumbStatus: a.thumb_status }))
+  );
+
+  const assetsById = new Map(assetRows.map((a) => [a.id, a]));
+  const countsByRole: Record<'part' | 'image' | 'doc' | 'other', number> = {
+    part: 0, image: 0, doc: 0, other: 0,
+  };
+  const files = plan.files.map((f) => {
+    countsByRole[f.role] += 1;
+    return {
+      assetId: f.assetId,
+      filename: assetsById.get(f.assetId)!.filename,
+      role: f.role,
+      sortOrder: f.sortOrder,
+    };
+  });
+
+  // Already-converted marker: any non-deleted model whose source_folder_id
+  // points at this folder. A folder can only be walked into a model via
+  // this same explicit action, and there's deliberately no uniqueness
+  // constraint stopping a second from-folder conversion of the same
+  // folder (a wizard re-check is the explicit override), so this can
+  // legitimately be more than one.
+  const existing = db.prepare(
+    'SELECT id FROM models WHERE source_folder_id = ? AND deleted_at IS NULL'
+  ).all(folderId) as Array<{ id: string }>;
+
+  res.json({
+    folderId,
+    folderName: folder.name,
+    suggestedTitle: folder.name,
+    assetCount: assetRows.length,
+    countsByRole,
+    files,
+    coverAssetId: plan.coverAssetId,
+    alreadyConverted: existing.length > 0,
+    existingModelIds: existing.map((m) => m.id),
+  });
 }));
 
 // ─── POST /model/:id/files — attach existing asset ids OR multipart upload ────

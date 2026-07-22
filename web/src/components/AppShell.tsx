@@ -9,6 +9,7 @@ import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
 import { CollectionsPage } from '../views/CollectionsPage.js';
 import { CollectionPage } from '../views/CollectionPage.js';
+import { ConvertWizardPage } from '../views/ConvertWizardPage.js';
 
 interface Props {
   logout: () => void;
@@ -100,6 +101,10 @@ export function AppShell({ logout, authRequired }: Props) {
           <Route path="/models/:id" element={<ModelPage />} />
           <Route path="/collections" element={<CollectionsPage />} />
           <Route path="/collections/:id" element={<CollectionPage />} />
+          {/* Bulk folder→model convert wizard (#2170) — admin-ish power
+              tool, not on the persistent nav; reached via AdminSettings'
+              Library Tools section (see AdminSettings.tsx). */}
+          <Route path="/convert" element={<ConvertWizardPage />} />
         </Routes>
       </div>
 
