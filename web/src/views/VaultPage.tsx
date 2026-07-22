@@ -1,9 +1,8 @@
 import { useState, useCallback, useEffect } from 'react';
-import { LogOut, Settings, RefreshCw } from 'lucide-react';
+import { Settings, RefreshCw } from 'lucide-react';
 import { Sidebar } from '../components/Sidebar.js';
 import { AssetGrid } from '../components/AssetGrid.js';
 import { SearchBar } from '../components/SearchBar.js';
-import { ThemeToggle } from '../components/ThemeToggle.js';
 import { UploadZone } from '../components/UploadZone.js';
 import { GlobalDropZone } from '../components/GlobalDropZone.js';
 import { setOnUploaded } from '../lib/uploadStore.js';
@@ -16,7 +15,6 @@ import { AdminSettings } from '../components/AdminSettings.js';
 import { TrashView } from '../components/TrashView.js';
 import { useAssets } from '../hooks/useAssets.js';
 import { useFolders } from '../hooks/useFolders.js';
-import { useTheme } from '../hooks/useTheme.js';
 import { useProjects } from '../hooks/useProjects.js';
 import { useSets } from '../hooks/useSets.js';
 import { useAssetStats } from '../hooks/useAssetStats.js';
@@ -28,15 +26,16 @@ type Category = '3dmodel' | '2d' | 'uncategorized';
 
 // This is the (nearly verbatim) body of the pre-router `AuthenticatedApp`
 // from App.tsx. It rendered unconditionally as the app's only view; now it
-// renders at the `/` and `/vault` routes via AppShell. Behavior is meant to
-// be pixel-identical to before the router landed (#2156) — see AppShell.tsx
-// for what moved out (UploadPanel/ImportPanel, hoisted so they survive
-// route navigation) and what stayed here (GlobalDropZone — its drop targets
-// depend on this page's folder/project selection state, which isn't lifted
-// yet; see PR notes for #2156).
-export function VaultPage({ logout, authRequired }: { logout: () => void; authRequired: boolean }) {
-  const { theme, cycleTheme } = useTheme();
-
+// renders at the `/vault` route via AppShell (the `/` alias it also had
+// under #2156/A3 is gone as of #2168's landing flip -- `/` is Browse now).
+// Behavior is meant to be pixel-identical to before the router landed
+// (#2156) — see AppShell.tsx for what moved out (UploadPanel/ImportPanel,
+// hoisted so they survive route navigation; and, as of #2168, the theme
+// toggle + logout button, hoisted for the same reason -- every route
+// needs them, not just Vault) and what stayed here (GlobalDropZone — its
+// drop targets depend on this page's folder/project selection state,
+// which isn't lifted yet; see PR notes for #2156).
+export function VaultPage() {
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -350,7 +349,6 @@ export function VaultPage({ logout, authRequired }: { logout: () => void; authRe
               </div>
               <div className="flex-1" />
               <UploadZone currentFolderId={selectedFolderId} />
-              <ThemeToggle theme={theme} onCycle={cycleTheme} />
               <button
                 onClick={() => setAdminSettingsOpen(true)}
                 title="Admin settings"
@@ -358,15 +356,6 @@ export function VaultPage({ logout, authRequired }: { logout: () => void; authRe
               >
                 <Settings size={16} />
               </button>
-              {authRequired && (
-                <button
-                  onClick={logout}
-                  title="Sign out"
-                  className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                >
-                  <LogOut size={16} />
-                </button>
-              )}
             </header>
 
             {/* Breadcrumb / context */}

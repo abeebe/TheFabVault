@@ -1,9 +1,12 @@
 // Router smoke tests for #2156 (Phase A3: react-router shell + VaultPage
-// extraction) and #2157 (Phase A4: real LibraryPage/ModelPage replacing
-// the #2156 placeholders). These deliberately stay shallow — confirming
-// the route table wires the right top-level view to the right path — not
-// a deep integration test of VaultPage/LibraryPage/ModelPage's own
-// behavior.
+// extraction), #2157 (Phase A4: real LibraryPage/ModelPage replacing the
+// #2156 placeholders), and #2168 (Phase B2: Browse landing flip -- / is
+// now BrowsePage, Vault moved to /vault only, /library redirects to /,
+// theme toggle + logout moved into AppShell's persistent nav). These
+// deliberately stay shallow — confirming the route table wires the right
+// top-level view to the right path — not a deep integration test of
+// VaultPage/BrowsePage/ModelPage's own behavior (see BrowsePage.test.tsx
+// for the browse-specific param-building coverage).
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -17,6 +20,7 @@ import type { ModelDetailOut } from '../lib/api.js';
 const mockAssetsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [] as unknown[], total: 0 }));
 const mockModelsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [] as unknown[], total: 0 }));
 const mockModelGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as ModelDetailOut));
+const mockCategoriesList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
 
 const emptyModelDetail: ModelDetailOut = {
   id: 'abc123', title: 'Widget X', description: null, categoryId: null, tags: [],
@@ -25,12 +29,12 @@ const emptyModelDetail: ModelDetailOut = {
   fileCount: 0, createdAt: 0, updatedAt: 0, deletedAt: null, files: [], profiles: [],
 };
 
-// The real `api` module makes network calls VaultPage's/LibraryPage's/
+// The real `api` module makes network calls VaultPage's/BrowsePage's/
 // ModelPage's data hooks kick off on mount (assets/folders/projects/sets/
-// stats/trash/models). None of that is under test here, so stub every
-// member their mount paths touch with an immediately-resolved empty
-// result — keeps the test deterministic and network-free regardless of
-// environment fetch support.
+// stats/trash/models/categories). None of that is under test here, so
+// stub every member their mount paths touch with an immediately-resolved
+// empty result — keeps the test deterministic and network-free regardless
+// of environment fetch support.
 vi.mock('../lib/api.js', () => ({
   api: {
     health: () => Promise.resolve({ authRequired: false }),
@@ -49,8 +53,12 @@ vi.mock('../lib/api.js', () => ({
     models: {
       list: (...args: unknown[]) => mockModelsList(...args),
       get: (...args: unknown[]) => mockModelGet(...args),
+      create: () => Promise.resolve({ id: 'new1' }),
       coverThumbUrl: () => null,
       downloadUrl: () => '',
+    },
+    categories: {
+      list: (...args: unknown[]) => mockCategoriesList(...args),
     },
   },
 }));
@@ -63,42 +71,44 @@ beforeEach(() => {
   mockModelsList.mockImplementation(() => Promise.resolve({ items: [], total: 0 }));
   mockModelGet.mockClear();
   mockModelGet.mockImplementation(() => Promise.resolve(emptyModelDetail));
+  mockCategoriesList.mockClear();
+  mockCategoriesList.mockImplementation(() => Promise.resolve([]));
   // Pin an explicit theme so useTheme's 'system' default doesn't depend on
   // matchMedia support in the test environment.
   localStorage.setItem('mv_theme', 'light');
 });
 
-function renderAt(path: string) {
+function renderAt(path: string, authRequired = false) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <AppShell logout={() => {}} authRequired={false} />
+      <AppShell logout={() => {}} authRequired={authRequired} />
     </MemoryRouter>
   );
 }
 
 describe('AppShell routing', () => {
-  it('renders VaultPage at /', () => {
+  it('renders the Browse landing page at / (#2168 landing flip)', async () => {
     renderAt('/');
-    // "All Files" is VaultPage's default breadcrumb/sidebar root — appears
-    // twice (sidebar button + breadcrumb span), which is itself confirmation
-    // this is the real VaultPage and not a stand-in.
-    expect(screen.getAllByText('All Files').length).toBeGreaterThan(0);
+    // The models search placeholder is BrowsePage-specific — confirms /
+    // now renders Browse, not VaultPage (which would show "All Files") or
+    // the old LibraryPage placeholder. "Browse" itself appears twice (nav
+    // link + breadcrumb span), which is its own additional confirmation —
+    // asserted via getAllByText below rather than findByText/getByText
+    // (which throw on multiple matches).
+    expect(screen.getByPlaceholderText('Search models...')).toBeTruthy();
+    await waitFor(() => expect(screen.getAllByText('Browse').length).toBeGreaterThan(0));
+    expect(screen.queryByText('All Files')).toBeNull();
   });
 
-  it('renders VaultPage at /vault', () => {
+  it('renders VaultPage at /vault (no longer aliased at /)', () => {
     renderAt('/vault');
     expect(screen.getAllByText('All Files').length).toBeGreaterThan(0);
   });
 
-  it('renders the real LibraryPage at /library (not VaultPage), #2157', async () => {
+  it('redirects /library to / (Browse), #2168', async () => {
     renderAt('/library');
-    // "New model" + the search placeholder are LibraryPage-specific --
-    // confirms this is the real page from #2157, not the #2156 placeholder
-    // ("model-centric library ... coming soon") or VaultPage.
-    expect(await screen.findByRole('button', { name: /new model/i })).toBeTruthy();
-    expect(screen.getByPlaceholderText('Search models...')).toBeTruthy();
-    expect(screen.queryByText('All Files')).toBeNull();
-    expect(screen.queryByText(/coming soon/i)).toBeNull();
+    expect(await screen.findByPlaceholderText('Search models...')).toBeTruthy();
+    expect(screen.getAllByText('Browse').length).toBeGreaterThan(0);
   });
 
   it('renders the real ModelPage at /models/:id with the id threaded through to the fetch, #2157', async () => {
@@ -112,10 +122,35 @@ describe('AppShell routing', () => {
   });
 
   it('renders the persistent nav switch on every route', () => {
-    renderAt('/library');
-    expect(screen.getByRole('link', { name: 'Library' })).toBeTruthy();
+    renderAt('/vault');
+    expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Vault' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
+  });
+
+  // Nav affordances (#2168): theme toggle + logout used to live in
+  // VaultPage's header (only reachable from /vault); they now live in
+  // AppShell's persistent nav, so they must render identically regardless
+  // of which route is active. authRequired: true so the logout button
+  // actually renders (it's conditional on that flag, same as before the
+  // move) -- theme toggle isn't conditional, so it's checked at every path
+  // regardless.
+  describe('theme toggle + logout render on every route (#2168 nav restructure)', () => {
+    it.each(['/', '/vault', '/models/abc123'])('on %s', async (path) => {
+      renderAt(path, true);
+      await waitFor(() => expect(screen.getByTitle(/^Theme:/)).toBeTruthy());
+      expect(screen.getByTitle('Sign out')).toBeTruthy();
+    });
+  });
+
+  it('hides the logout button when authRequired is false', () => {
+    renderAt('/vault', false);
+    expect(screen.queryByTitle('Sign out')).toBeNull();
+  });
+
+  it('shows the logout button when authRequired is true', () => {
+    renderAt('/vault', true);
+    expect(screen.getByTitle('Sign out')).toBeTruthy();
   });
 });
 
@@ -125,13 +160,14 @@ describe('AppShell routing', () => {
 // like that doesn't trip tsc or a snapshot of unrelated text, so this
 // asserts both the visible label AND the click behavior of each button —
 // label-only or handler-only coverage would each have missed half of what
-// actually broke.
+// actually broke. Moved to render at /vault (#2168): VaultPage (and its
+// pagination bar) no longer lives at / after the landing flip.
 describe('VaultPage pagination controls', () => {
   it('has a working Next button (advances one page) and Last button (jumps to the final page)', async () => {
     // total: 250 with PAGE_SIZE 100 (VaultPage.tsx) -> totalPages = 3,
     // which is what makes the pagination bar render at all.
     mockAssetsList.mockImplementation(() => Promise.resolve({ items: [], total: 250 }));
-    renderAt('/');
+    renderAt('/vault');
 
     const nextButton = await screen.findByRole('button', { name: 'Next' });
     const lastButton = screen.getByRole('button', { name: 'Last' });
