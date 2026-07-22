@@ -261,15 +261,21 @@ export interface HealthResponse {
 
 // ─── DB row types ─────────────────────────────────────────────────────────────
 
-// Admin users (migration v13 — env-to-DB auth migration). Single role
-// today ('admin'); the CHECK constraint exists so a future multi-user
-// pass doesn't need a breaking migration, but the API surface is
-// single-admin for now (no users-list UI, no invite flow, no RBAC).
+// Users (migration v13 — env-to-DB auth migration; migration v15 —
+// #2154 table-copy dropped the v13 `role CHECK(role IN ('admin'))` and
+// added display_name/disabled to prep for Phase D multi-user). role is
+// validated at the app layer (services/enumValidators.ts: UserRole)
+// instead of a SQL CHECK — see that module's header for why. The API
+// surface is still single-admin as of this migration (no users-list
+// UI, no invite flow, no RBAC yet — that's Phase D); this type only
+// stops being a lie about what the column can hold.
 export interface UserRow {
   id: string;
   username: string;
   password_hash: string; // 'scrypt:N:r:p:saltHex:hashHex' — see passwords.ts
-  role: 'admin';
+  role: 'admin' | 'member';
+  display_name: string | null;
+  disabled: number; // 0 = active, 1 = disabled (SQLite has no boolean type)
   created_at: number;
   updated_at: number;
 }
