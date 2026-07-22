@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { Plus, FileArchive } from 'lucide-react';
 import { useModels } from '../hooks/useModels.js';
 import { useCategories } from '../hooks/useCategories.js';
 import { buildCategoryOptions } from '../lib/categoryTree.js';
@@ -153,6 +153,12 @@ export function BrowsePage() {
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+        <Link
+          to="/import"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        >
+          <FileArchive size={14} /> Import zip
+        </Link>
         <button
           onClick={() => setNewModelOpen(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover transition-colors"

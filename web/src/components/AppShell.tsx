@@ -7,6 +7,7 @@ import { useTheme } from '../hooks/useTheme.js';
 import { VaultPage } from '../views/VaultPage.js';
 import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
+import { ImportWizardPage } from '../views/ImportWizardPage.js';
 
 interface Props {
   logout: () => void;
@@ -87,6 +88,11 @@ export function AppShell({ logout, authRequired }: Props) {
           <Route path="/vault" element={<VaultPage />} />
           <Route path="/library" element={<Navigate to="/" replace />} />
           <Route path="/models/:id" element={<ModelPage />} />
+          {/* Zip ImportWizard (#2173, Phase C) -- upload a MakerWorld/
+              Printables/Thingiverse zip, edit the classified draft plan,
+              commit into a real model. Entry point is BrowsePage's
+              "Import zip" button. */}
+          <Route path="/import" element={<ImportWizardPage />} />
         </Routes>
       </div>
 
