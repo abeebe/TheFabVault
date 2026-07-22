@@ -36,6 +36,7 @@ import { planFolderConversion } from '../services/modelConvert.js';
 import {
   MODEL_FILE_ROLES, isModelFileRole, MODEL_VISIBILITY, isModelVisibility,
 } from '../services/enumValidators.js';
+import { isValidSourceUrl } from '../services/urlValidators.js';
 import type {
   AssetOut, AssetRow, FolderRow,
   ModelRow, ModelOut, ModelDetailOut, ModelFileOut,
@@ -307,6 +308,11 @@ router.post('/models', requireAuth, (req: Request, res: Response) => {
     return;
   }
 
+  if (!isValidSourceUrl(sourceUrl)) {
+    res.status(400).json({ error: 'sourceUrl must be a valid http(s) URL' });
+    return;
+  }
+
   const id = uuidv4();
   // owner_id is set from req.user, never trusted from the request body —
   // this route sits behind requireAuth so req.user is always populated.
@@ -381,6 +387,10 @@ router.patch('/model/:id', requireAuth, (req: Request, res: Response) => {
     db.prepare('UPDATE models SET visibility = ?, updated_at = unixepoch() WHERE id = ?').run(visibility, row.id);
   }
   if (sourceUrl !== undefined) {
+    if (!isValidSourceUrl(sourceUrl)) {
+      res.status(400).json({ error: 'sourceUrl must be a valid http(s) URL' });
+      return;
+    }
     db.prepare('UPDATE models SET source_url = ?, updated_at = unixepoch() WHERE id = ?').run(sourceUrl?.trim() || null, row.id);
   }
   if (sourceSite !== undefined) {
