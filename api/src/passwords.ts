@@ -70,8 +70,9 @@ export function verifyPassword(password: string, stored: string): boolean {
 // since this is a password a human may need to read off a screen and type
 // once, and includes a handful of symbols for entropy without going full
 // print-ASCII (some legacy systems choke on certain punctuation — kept
-// conservative). 20 chars over this 80-symbol alphabet is ~126 bits of
-// entropy, comfortably above any reasonable brute-force floor.
+// conservative). 20 chars over this 67-symbol alphabet is ~121 bits of
+// entropy (log2(67) * 20 ≈ 121.3), comfortably above any reasonable
+// brute-force floor.
 //
 // Never logged and never persisted in plaintext anywhere — callers hash it
 // with hashPassword() immediately and surface the plaintext to the admin
