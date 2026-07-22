@@ -10,6 +10,7 @@ import { ModelPage } from '../views/ModelPage.js';
 import { CollectionsPage } from '../views/CollectionsPage.js';
 import { CollectionPage } from '../views/CollectionPage.js';
 import { ConvertWizardPage } from '../views/ConvertWizardPage.js';
+import { ImportWizardPage } from '../views/ImportWizardPage.js';
 
 interface Props {
   logout: () => void;
@@ -105,6 +106,11 @@ export function AppShell({ logout, authRequired }: Props) {
               tool, not on the persistent nav; reached via AdminSettings'
               Library Tools section (see AdminSettings.tsx). */}
           <Route path="/convert" element={<ConvertWizardPage />} />
+          {/* Zip ImportWizard (#2173, Phase C) -- upload a MakerWorld/
+              Printables/Thingiverse zip, edit the classified draft plan,
+              commit into a real model. Entry point is BrowsePage's
+              "Import zip" button. */}
+          <Route path="/import" element={<ImportWizardPage />} />
         </Routes>
       </div>
 
