@@ -20,7 +20,19 @@ import zlib from 'zlib';
 export interface RawZipEntryInput {
   name: string;
   content: string;
+  // Central-directory external file attributes, raw. Defaults to 0
+  // (ordinary regular file, no special mode bits). Exposed so tests can
+  // build a unix-style symlink entry -- upper 16 bits = unix mode,
+  // S_IFLNK (0o120000) marks it as a symlink to real unzip tools -- and
+  // confirm this codebase's extractZip never reads this field at all
+  // (see zipImportDraft.ts's symlink-safety comment).
+  externalFileAttributes?: number;
 }
+
+// S_IFLNK (symlink) | 0777 permission bits, shifted into the unix-mode
+// upper half of externalFileAttributes -- the exact bit pattern real
+// zip tools (e.g. Info-ZIP) write for a symlink entry on unix.
+export const UNIX_SYMLINK_EXTERNAL_ATTRS = (0o120777 << 16) >>> 0;
 
 function u16(n: number): Buffer {
   const b = Buffer.alloc(2);
@@ -77,7 +89,7 @@ export function buildRawZip(entries: RawZipEntryInput[]): Buffer {
       u16(0), // comment length
       u16(0), // disk number start
       u16(0), // internal attrs
-      u32(0), // external attrs
+      u32(entry.externalFileAttributes ?? 0), // external attrs
       u32(offset), // relative offset of local header
       nameBuf,
     ]);

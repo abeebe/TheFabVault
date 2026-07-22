@@ -46,6 +46,38 @@ import type { ModelFileRole } from '../services/enumValidators.js';
 
 const router = Router();
 
+// Validated at the top of every route that takes :draftId as a URL
+// param, BEFORE it ever reaches draftDirFor/readDraftMeta/deleteDraftDir
+// (Vera's security review, #2172 follow-up, HIGH finding). draftIds are
+// always server-generated uuidv4()s (POST /import/zip), so a
+// non-UUID-shaped value can only be a client trying something --
+// confirmed exploitable: Express decodes %2f in a route param AFTER
+// matching, so `DELETE /import/zip/..%2Fvictim-dir` arrives at the
+// handler with req.params.draftId === '../victim-dir', which
+// draftDirFor's plain path.join happily turns into a real path outside
+// import-drafts/ (resolveContainedPath is never in that call chain at
+// all -- draftDirFor has no base to contain against, it's just building
+// the base). This regex closes the class regardless of any future
+// Express/routing quirk, independent of that root cause.
+const DRAFT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidDraftId(value: string): boolean {
+  return DRAFT_ID_RE.test(value);
+}
+
+// Ownership gate (Vera's security review, #2172 follow-up, HIGH finding,
+// explicit Phase D blocker closed now while it's still a design decision
+// rather than a migration): requireAuth only proves SOME valid session
+// exists, not that the caller created THIS draft. 404, not 403, on a
+// mismatch -- deliberately indistinguishable from "draft doesn't exist"
+// so a caller can't use the response to enumerate other users' draft
+// ids (Derek's routing note; matches this app's existing not-found-vs-
+// forbidden convention elsewhere, e.g. auth.ts never distinguishing
+// "wrong password" from "no such user").
+function isOwnDraftOrAdmin(meta: { ownerId: string }, user: { id: string; role: string }): boolean {
+  return meta.ownerId === user.id || user.role === 'admin';
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, scratchRootDir()),
@@ -94,7 +126,7 @@ router.post('/import/zip', requireAuth, handleUpload, asyncHandler(async (req: R
 
     const createdAt = Date.now();
     writeDraftMeta({
-      draftId, zipFilename, createdAt, plan,
+      draftId, zipFilename, createdAt, plan, ownerId: req.user!.id,
     });
 
     res.status(201).json({
@@ -120,8 +152,13 @@ router.post('/import/zip', requireAuth, handleUpload, asyncHandler(async (req: R
 // ─── DELETE /import/zip/:draftId — abandon a draft ────────────────────────────
 
 router.delete('/import/zip/:draftId', requireAuth, (req: Request, res: Response) => {
+  if (!isValidDraftId(req.params.draftId)) { res.status(400).json({ error: 'Invalid draft id' }); return; }
+
   const meta = readDraftMeta(req.params.draftId);
-  if (!meta) { res.status(404).json({ error: 'Draft not found or already expired' }); return; }
+  if (!meta || !isOwnDraftOrAdmin(meta, req.user!)) {
+    res.status(404).json({ error: 'Draft not found or already expired' });
+    return;
+  }
   deleteDraftDir(req.params.draftId);
   res.status(204).end();
 });
@@ -163,8 +200,13 @@ interface CommitProfileInput {
 
 router.post('/import/zip/:draftId/commit', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const { draftId } = req.params;
+  if (!isValidDraftId(draftId)) { res.status(400).json({ error: 'Invalid draft id' }); return; }
+
   const meta = readDraftMeta(draftId);
-  if (!meta) { res.status(404).json({ error: 'Draft not found or expired' }); return; }
+  if (!meta || !isOwnDraftOrAdmin(meta, req.user!)) {
+    res.status(404).json({ error: 'Draft not found or expired' });
+    return;
+  }
 
   const {
     title, description, categoryId, tags, visibility,
@@ -250,30 +292,62 @@ router.post('/import/zip/:draftId/commit', requireAuth, asyncHandler(async (req:
     }
   }
 
-  // ─── Create assets (hash-dedup) ─────────────────────────────────────────────
+  // ─── Create assets (hash-dedup + per-file outcome reporting) ────────────────
+  //
+  // assetIdByHash is scoped to THIS request only -- distinct from
+  // findAssetByHash's DB-wide lookup -- so a SECOND selected path that
+  // hashes identically to an EARLIER one in the same commit is
+  // recognized without a redundant DB round-trip, and so its outcome can
+  // be reported as 'merged-duplicate' rather than indistinguishable from
+  // an ordinary 'created'/'linked-existing' (Remy's C3-consumer finding,
+  // #2172 follow-up: the wizard is promised a dedup summary, including
+  // when its own selection collapses two paths onto one asset). Whichever
+  // path was processed first (submission order) is the one whose
+  // role/label actually lands in model_files below -- INSERT OR IGNORE
+  // keeps the first insert for a given (model_id, asset_id) pair, so a
+  // 'merged-duplicate' entry's role/label is reported here but never
+  // takes effect.
   const assetIdByPath = new Map<string, string>();
+  const assetIdByHash = new Map<string, string>();
+  const fileOutcomes: Array<{ path: string; assetId: string; outcome: 'created' | 'linked-existing' | 'merged-duplicate' }> = [];
+
   for (const f of resolvedFiles) {
     const buffer = fs.readFileSync(f.absPath);
     const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-    const existing = findAssetByHash(db, hash);
+
     let assetId: string;
-    if (existing) {
-      assetId = existing.id;
+    let outcome: 'created' | 'linked-existing' | 'merged-duplicate';
+
+    const seenThisCommit = assetIdByHash.get(hash);
+    if (seenThisCommit) {
+      assetId = seenThisCommit;
+      outcome = 'merged-duplicate';
     } else {
-      const originalName = path.posix.basename(f.path.replace(/\\/g, '/'));
-      const filename = sanitizeFilename(originalName);
-      const mimeType = mime.lookup(filename) || 'application/octet-stream';
-      assetId = uuidv4();
-      // sourcePath deliberately left null: that column means "reconciled
-      // against a live mount-scan location" (see db.ts's comment on
-      // idx_assets_source) -- a zip's internal relative path isn't a
-      // filesystem location that will ever be rescanned, so it isn't
-      // that. This is closest to a plain upload, just batched.
-      // eslint-disable-next-line no-await-in-loop
-      await saveUploadedFile(buffer, assetId, filename, mimeType, null, [], null, originalName);
-      if (needsThumbnail(filename)) enqueueThumb(assetId);
+      const existing = findAssetByHash(db, hash);
+      if (existing) {
+        assetId = existing.id;
+        outcome = 'linked-existing';
+      } else {
+        const originalName = path.posix.basename(f.path.replace(/\\/g, '/'));
+        const filename = sanitizeFilename(originalName);
+        const mimeType = mime.lookup(filename) || 'application/octet-stream';
+        assetId = uuidv4();
+        // sourcePath deliberately left null: that column means
+        // "reconciled against a live mount-scan location" (see db.ts's
+        // comment on idx_assets_source) -- a zip's internal relative
+        // path isn't a filesystem location that will ever be rescanned,
+        // so it isn't that. This is closest to a plain upload, just
+        // batched.
+        // eslint-disable-next-line no-await-in-loop
+        await saveUploadedFile(buffer, assetId, filename, mimeType, null, [], null, originalName);
+        if (needsThumbnail(filename)) enqueueThumb(assetId);
+        outcome = 'created';
+      }
+      assetIdByHash.set(hash, assetId);
     }
+
     assetIdByPath.set(f.path, assetId);
+    fileOutcomes.push({ path: f.path, assetId, outcome });
   }
 
   // ─── Model + model_files + print_profiles (one transaction) ────────────────
@@ -322,7 +396,7 @@ router.post('/import/zip/:draftId/commit', requireAuth, asyncHandler(async (req:
   deleteDraftDir(draftId);
 
   const detail = loadModelDetail(db, modelId, req.user!.id)!;
-  res.status(201).json({ model: detail });
+  res.status(201).json({ model: detail, files: fileOutcomes });
 }));
 
 export default router;

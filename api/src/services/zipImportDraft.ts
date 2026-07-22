@@ -50,12 +50,24 @@ export const MAX_ZIP_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GiB
 // Applied against the running SUM of each entry's declared
 // uncompressedSize while extracting -- a cheap zip-bomb guard (a tiny
 // compressed file that unpacks to far more than this aborts instead of
-// filling the disk). Not a hardened defense (a crafted central directory
-// could still lie about sizes), but proportionate to this app's threat
-// model -- "internal-only app; multi-user = trusted household users"
-// (plan §Hard constraints) -- and layered on top of, not instead of, the
-// zip-slip containment check below, which IS the hard security boundary.
+// filling the disk). yauzl's own AssertByteCountStream already aborts if
+// the ACTUAL decompressed bytes exceed an entry's DECLARED
+// uncompressedSize (a shrink-then-lie bomb is defended by the library
+// itself), so this cap's real job is bounding total legitimate content,
+// not distrusting yauzl's per-entry accounting (Vera's security review,
+// #2172 follow-up).
 export const MAX_ZIP_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+// Caps entry COUNT, independent of MAX_ZIP_UNCOMPRESSED_BYTES, which only
+// bounds cumulative bytes and does nothing against a small, valid archive
+// containing tens of thousands of zero-byte entries -- confirmed
+// empirically (Vera, #2172 security review) to take 53s and create 60,000
+// real files on disk for a ~5.7MB upload, with the byte cap never
+// engaging. 2,000 is generous for anything a real MakerWorld/Printables/
+// Thingiverse export would ever contain -- a legitimate model zip is
+// files + a handful of images + maybe a few profiles, not thousands of
+// entries.
+export const MAX_ZIP_ENTRIES = 2000;
 
 export class ZipTooLargeError extends Error {}
 
@@ -85,6 +97,15 @@ export interface DraftMeta {
   zipFilename: string;
   createdAt: number; // ms epoch
   plan: ZipImportPlan;
+  // Set from req.user!.id at draft creation (Vera's security review,
+  // #2172 follow-up, HIGH finding — Phase D blocker closed now while
+  // it's still a design decision, not a migration). requireAuth only
+  // proves SOME valid session exists, not that the caller created THIS
+  // draft; routes/modelImport.ts's commit/DELETE handlers check this
+  // against req.user!.id (or an admin role) before doing anything else.
+  // Inert today (single admin user) but load-bearing the moment a
+  // second household user exists.
+  ownerId: string;
 }
 
 export function writeDraftMeta(meta: DraftMeta): void {
@@ -130,7 +151,21 @@ export function deleteDraftDir(draftId: string): void {
 // accepted reasoning as its "C:evil" case, Remy's C1 review), but this
 // function's job is the actual containment truth on the filesystem it
 // runs on, and on POSIX that shape genuinely never escapes.
+//
+// Also rejects any path containing a NUL byte (Vera's security review,
+// #2172 follow-up, CRITICAL finding): path.resolve() itself does NOT
+// throw on an embedded '\0' (confirmed empirically) and would happily
+// hand back a "contained" result -- the crash instead happens later,
+// synchronously, inside fs.mkdirSync/fs.createWriteStream, which DO
+// throw ERR_INVALID_ARG_VALUE on a NUL byte. Catching it here, in the
+// same function that already rejects traversal/absolute paths, means
+// extractZip's per-entry fs calls never see one at all -- belt AND
+// suspenders alongside the try/catch extractZip also now has around
+// those same calls (a synchronous throw from some OTHER cause, e.g. an
+// ordinary file/directory name collision, isn't a "path" problem this
+// function can characterize, so it's caught there instead).
 export function resolveContainedPath(baseDir: string, rawEntryPath: string): string | null {
+  if (rawEntryPath.includes('\0')) return null;
   const cleaned = rawEntryPath.replace(/\\/g, '/');
   const resolved = path.resolve(baseDir, cleaned);
   const baseWithSep = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
@@ -178,6 +213,22 @@ function openZip(zipPath: string): Promise<yauzl.ZipFile> {
 // entries are silently skipped on disk; they still come back in the
 // returned list, which is what feeds classifyZipEntries and lets its
 // `invalid` flag reach the wizard.
+//
+// Symlink entries are safe BY OMISSION, deliberately -- not by any
+// explicit check -- and that omission must stay in place (Remy's C1/C2
+// review, #2172 follow-up): entry.externalFileAttributes (where a
+// unix-built zip stores the symlink mode bit, S_IFLNK, in its upper 16
+// bits) is never read anywhere in this function. Every non-directory
+// entry, symlink or not, is written via fs.createWriteStream as an
+// ordinary regular file containing whatever bytes the archive stored for
+// it -- for a real symlink entry, that's just the link-target path as
+// literal text, not an actual filesystem symlink. There is no
+// traversal-via-symlink vector as a result: nothing this function ever
+// creates can be followed out of destDir. If a future change ever starts
+// honoring externalFileAttributes to recreate real symlinks, it MUST
+// re-run every target through resolveContainedPath first, with the same
+// rigor as file entries get here -- see the regression test in
+// zipImportDraft.test.ts pinning the current (safe) behavior.
 export async function extractZip(zipPath: string, destDir: string): Promise<RawZipEntry[]> {
   const entries: RawZipEntry[] = [];
   const zipfile = await openZip(zipPath);
@@ -197,6 +248,34 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       resolve();
     };
 
+    // Logs and moves on to the next entry rather than failing the whole
+    // extraction — the per-entry skip path (Vera's security review,
+    // #2172 follow-up, CRITICAL finding). Every fs call inside the
+    // 'entry' handler below used to be an unguarded synchronous call;
+    // yauzl invokes that handler from its own internal fs-read callback
+    // chain, outside this Promise executor's own call stack, so a throw
+    // there was a true UNCAUGHT exception -- not a rejected promise, not
+    // caught by this function's fail()/reject() at all. Confirmed two
+    // independent, no-exotic-bytes-required triggers: a NUL byte in an
+    // entry name (fs.mkdirSync/fs.createWriteStream both throw
+    // ERR_INVALID_ARG_VALUE synchronously) and an ordinary file/directory
+    // name collision, e.g. "foo" as a file followed by "foo/bar.stl"
+    // implying foo must be a directory (fs.mkdirSync throws EEXIST
+    // synchronously). Both are full-process crashes via
+    // processGuards.ts's uncaughtException handler (#2044) — a single
+    // authenticated upload, no auth bypass, no cleverness, malformed
+    // zips included, not just malicious ones. NUL bytes are additionally
+    // rejected a layer earlier by resolveContainedPath itself (never
+    // reaching these calls at all); this catch is the backstop for that
+    // AND the true belt-and-suspenders case a path-level check can't
+    // characterize at all: an ordinary collision between two otherwise
+    // perfectly legal entry names.
+    function skipEntry(context: string, err: unknown): void {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[zipImportDraft] Skipping unwritable entry (${context}): ${message}`);
+      zipfile.readEntry();
+    }
+
     zipfile.on('error', fail);
     zipfile.on('end', succeed);
     zipfile.on('entry', (entry: yauzl.Entry) => {
@@ -205,6 +284,20 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       // place that decoding happens for the rest of this function.
       const fileName = (entry.fileName as unknown as Buffer).toString('utf8');
       entries.push({ path: fileName, size: entry.uncompressedSize });
+
+      // Entry-COUNT cap, independent of the byte cap below (Vera's
+      // security review, #2172 follow-up, MEDIUM finding) -- a small,
+      // entirely valid zip with tens of thousands of zero-byte entries
+      // sails past MAX_ZIP_UNCOMPRESSED_BYTES (which only bounds
+      // cumulative declared size) while still taking the better part of
+      // a minute and creating that many real files on disk. Checked
+      // before the byte-cap check below so a huge-entry-count,
+      // near-zero-byte zip is rejected on the cheaper, more specific
+      // signal first.
+      if (entries.length > MAX_ZIP_ENTRIES) {
+        fail(new ZipTooLargeError(`Zip exceeds the ${MAX_ZIP_ENTRIES}-entry cap`));
+        return;
+      }
 
       totalUncompressed += entry.uncompressedSize;
       if (totalUncompressed > MAX_ZIP_UNCOMPRESSED_BYTES) {
@@ -218,22 +311,56 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       const dest = resolveContainedPath(destDir, fileName);
 
       if (!dest) {
-        // Zip-slip candidate -- never written, regardless of what the
-        // classifier later decides to call it.
+        // Zip-slip (or NUL-byte) candidate -- never written, regardless
+        // of what the classifier later decides to call it.
         zipfile.readEntry();
         return;
       }
 
       if (isDir) {
-        fs.mkdirSync(dest, { recursive: true });
+        try {
+          fs.mkdirSync(dest, { recursive: true });
+        } catch (err) {
+          skipEntry(fileName, err);
+          return;
+        }
         zipfile.readEntry();
         return;
       }
 
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+      } catch (err) {
+        skipEntry(fileName, err);
+        return;
+      }
+
+      // The REVERSE type-collision (a directory already sits at `dest`,
+      // e.g. an earlier entry "foo/bar.stl" implied "foo" must be a
+      // directory, and THIS entry is a plain file also named "foo"):
+      // fs.createWriteStream's own EISDIR failure for that case doesn't
+      // throw synchronously at all -- it surfaces asynchronously via the
+      // stream's own 'error' event (already wired to fail() below),
+      // which is not a crash, but WOULD reject the whole extraction over
+      // one bad entry, same problem this whole fix round exists to close
+      // for the synchronous cases. Checking for it explicitly here, same
+      // skip-this-entry treatment as every other unwritable-entry case
+      // above, keeps both collision directions symmetric.
+      if (fs.existsSync(dest) && fs.statSync(dest).isDirectory()) {
+        skipEntry(fileName, new Error(`refusing to overwrite an existing directory with a file: ${fileName}`));
+        return;
+      }
+
+      let writeStream: fs.WriteStream;
+      try {
+        writeStream = fs.createWriteStream(dest);
+      } catch (err) {
+        skipEntry(fileName, err);
+        return;
+      }
+
       zipfile.openReadStream(entry, (err, readStream) => {
         if (err) { fail(err); return; }
-        const writeStream = fs.createWriteStream(dest);
         readStream.on('error', fail);
         writeStream.on('error', fail);
         writeStream.on('close', () => zipfile.readEntry());

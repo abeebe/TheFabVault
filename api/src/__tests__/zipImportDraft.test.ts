@@ -17,7 +17,7 @@ import {
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildRawZip } from './helpers/rawZip.js';
+import { buildRawZip, UNIX_SYMLINK_EXTERNAL_ATTRS } from './helpers/rawZip.js';
 
 interface Loaded {
   dataDir: string;
@@ -147,6 +147,139 @@ describe('extractZip — zip-slip enforcement against a real, hand-built hostile
   });
 });
 
+// Vera's security review, #2172 follow-up, CRITICAL finding: every fs
+// call in extractZip's per-entry handler used to be an unguarded
+// synchronous call, invoked from yauzl's own internal fs-read callback
+// chain -- a throw there was a true UNCAUGHT exception (full process
+// exit via processGuards.ts's uncaughtException handler, #2044), not a
+// rejected promise. These tests run in THIS process (not a forked
+// child), so before the fix they would have taken the whole vitest
+// worker down rather than failing cleanly -- confirming they now
+// resolve/reject normally IS the regression test.
+describe('extractZip — Critical fix: malformed/ordinary entries no longer crash the process', () => {
+  it('a NUL byte in an entry name is skipped (not written), not a crash, and legitimate sibling entries still extract', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'nul-byte.zip');
+    fs.writeFileSync(zipPath, buildRawZip([
+      { name: 'foo\0bar.stl', content: 'hostile-looking but just malformed' },
+      { name: 'fine.txt', content: 'ok bytes' },
+    ]));
+    const destDir = path.join(dataDir, 'dest-nul');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    const entries = await mod.extractZip(zipPath, destDir);
+
+    // Still reported (for the classifier to see/flag), just never written.
+    expect(entries.map((e) => e.path)).toContain('foo\0bar.stl');
+    const written = fs.readdirSync(destDir);
+    expect(written).toEqual(['fine.txt']);
+  });
+
+  it('a NUL byte in a directory-marker entry name is skipped the same way', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'nul-byte-dir.zip');
+    fs.writeFileSync(zipPath, buildRawZip([
+      { name: 'foo\0bar/', content: '' },
+      { name: 'fine.txt', content: 'ok bytes' },
+    ]));
+    const destDir = path.join(dataDir, 'dest-nul-dir');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    await expect(mod.extractZip(zipPath, destDir)).resolves.not.toThrow();
+    expect(fs.readdirSync(destDir)).toEqual(['fine.txt']);
+  });
+
+  it('an ordinary file/directory name collision ("foo" as a file, then "foo/bar.stl") is skipped, not a crash -- needs no hostile intent at all', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'collision.zip');
+    fs.writeFileSync(zipPath, buildRawZip([
+      { name: 'foo', content: 'foo is a plain file' },
+      { name: 'foo/bar.stl', content: 'this needs foo to be a directory instead' },
+      { name: 'fine.txt', content: 'ok bytes' },
+    ]));
+    const destDir = path.join(dataDir, 'dest-collision');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    const entries = await mod.extractZip(zipPath, destDir);
+
+    expect(entries.map((e) => e.path)).toEqual(['foo', 'foo/bar.stl', 'fine.txt']);
+    // "foo" landed as a file (first entry wins); the second entry, which
+    // needed foo to be a directory, was skipped rather than crashing.
+    expect(fs.statSync(path.join(destDir, 'foo')).isFile()).toBe(true);
+    expect(fs.existsSync(path.join(destDir, 'foo', 'bar.stl'))).toBe(false);
+    expect(fs.readFileSync(path.join(destDir, 'fine.txt'), 'utf8')).toBe('ok bytes');
+  });
+
+  it('the reverse collision ("foo/bar.stl" first, establishing foo as a directory, then "foo" as a file) is also skipped, not a crash', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'collision-reverse.zip');
+    fs.writeFileSync(zipPath, buildRawZip([
+      { name: 'foo/bar.stl', content: 'foo must be a directory for this' },
+      { name: 'foo', content: 'now foo wants to be a plain file instead' },
+      { name: 'fine.txt', content: 'ok bytes' },
+    ]));
+    const destDir = path.join(dataDir, 'dest-collision-reverse');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    await expect(mod.extractZip(zipPath, destDir)).resolves.not.toThrow();
+    expect(fs.statSync(path.join(destDir, 'foo')).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(destDir, 'foo', 'bar.stl'), 'utf8')).toBe('foo must be a directory for this');
+    expect(fs.readFileSync(path.join(destDir, 'fine.txt'), 'utf8')).toBe('ok bytes');
+  });
+});
+
+describe('extractZip — MEDIUM fix: entry-count cap', () => {
+  it('rejects a zip whose entry count exceeds MAX_ZIP_ENTRIES, even though every entry is zero bytes', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'too-many-entries.zip');
+    const entries = Array.from({ length: mod.MAX_ZIP_ENTRIES + 1 }, (_, i) => ({ name: `f${i}.txt`, content: '' }));
+    fs.writeFileSync(zipPath, buildRawZip(entries));
+    const destDir = path.join(dataDir, 'dest-too-many');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    await expect(mod.extractZip(zipPath, destDir)).rejects.toThrow(mod.ZipTooLargeError);
+  });
+
+  it('accepts a zip with exactly MAX_ZIP_ENTRIES entries (boundary, not off-by-one)', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'at-cap.zip');
+    const entries = Array.from({ length: mod.MAX_ZIP_ENTRIES }, (_, i) => ({ name: `f${i}.txt`, content: '' }));
+    fs.writeFileSync(zipPath, buildRawZip(entries));
+    const destDir = path.join(dataDir, 'dest-at-cap');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    const result = await mod.extractZip(zipPath, destDir);
+    expect(result).toHaveLength(mod.MAX_ZIP_ENTRIES);
+  }, 15000);
+});
+
+describe('extractZip — symlink entries are safe by omission (Remy\'s hardening note, #2172 follow-up)', () => {
+  it('writes a unix-symlink-flagged entry as an ordinary regular file containing the literal target string, never a real symlink', async () => {
+    const { mod, dataDir } = await loadModule();
+    const zipPath = path.join(dataDir, 'symlink.zip');
+    fs.writeFileSync(zipPath, buildRawZip([
+      {
+        name: 'sneaky-link',
+        content: '../../../etc/passwd', // what a real symlink entry stores as its "content": the target path
+        externalFileAttributes: UNIX_SYMLINK_EXTERNAL_ATTRS,
+      },
+    ]));
+    const destDir = path.join(dataDir, 'dest-symlink');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    await mod.extractZip(zipPath, destDir);
+
+    const written = path.join(destDir, 'sneaky-link');
+    // isSymbolicLink() must be false -- lstat, not stat, so a real
+    // symlink would be detected as such rather than followed.
+    expect(fs.lstatSync(written).isSymbolicLink()).toBe(false);
+    expect(fs.lstatSync(written).isFile()).toBe(true);
+    // The "target path" was written as literal, inert text -- reading
+    // this file never redirects anywhere.
+    expect(fs.readFileSync(written, 'utf8')).toBe('../../../etc/passwd');
+  });
+});
+
 describe('draft metadata + TTL sweep', () => {
   it('round-trips draft metadata written by writeDraftMeta through readDraftMeta', async () => {
     const { mod } = await loadModule();
@@ -154,10 +287,10 @@ describe('draft metadata + TTL sweep', () => {
       suggestedTitle: 'Test', files: [], descriptionSource: null, profileCandidates: [], guessedSourceSite: null, licenseFile: null,
     };
     mod.writeDraftMeta({
-      draftId: 'abc123', zipFilename: 'test.zip', createdAt: 1000, plan,
+      draftId: 'abc123', zipFilename: 'test.zip', createdAt: 1000, plan, ownerId: 'user-1',
     });
     expect(mod.readDraftMeta('abc123')).toEqual({
-      draftId: 'abc123', zipFilename: 'test.zip', createdAt: 1000, plan,
+      draftId: 'abc123', zipFilename: 'test.zip', createdAt: 1000, plan, ownerId: 'user-1',
     });
   });
 
@@ -190,10 +323,10 @@ describe('draft metadata + TTL sweep', () => {
     };
     const now = 10_000_000;
     mod.writeDraftMeta({
-      draftId: 'old', zipFilename: 'old.zip', createdAt: now - mod.DRAFT_TTL_MS - 1, plan,
+      draftId: 'old', zipFilename: 'old.zip', createdAt: now - mod.DRAFT_TTL_MS - 1, plan, ownerId: 'user-1',
     });
     mod.writeDraftMeta({
-      draftId: 'fresh', zipFilename: 'fresh.zip', createdAt: now - 1000, plan,
+      draftId: 'fresh', zipFilename: 'fresh.zip', createdAt: now - 1000, plan, ownerId: 'user-1',
     });
 
     const result = mod.sweepExpiredDrafts(now);

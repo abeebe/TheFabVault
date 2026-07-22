@@ -356,6 +356,33 @@ export interface ZipImportCommitBody {
   profiles?: ZipImportCommitProfile[];
 }
 
+// Per-file dedup outcome (Remy's C3-consumer finding, #2172 follow-up --
+// the wizard is promised a dedup summary, not just a bare model). One
+// entry per submitted `files[]` path, same order.
+//   'created'          -- no matching content existed anywhere; a new
+//                          asset was stored.
+//   'linked-existing'  -- matched an asset that already existed in the
+//                          vault BEFORE this commit; linked, not duplicated.
+//   'merged-duplicate' -- matched another path submitted in THIS SAME
+//                          commit (identical byte content); this path's
+//                          own role/label never took effect -- the
+//                          FIRST matching path (by submission order) is
+//                          the one that "won" the model_files link
+//                          (INSERT OR IGNORE keeps the first insert for
+//                          a given model+asset pair). Surface this
+//                          distinctly in the UI rather than letting it
+//                          look identical to an ordinary link/create.
+export interface ZipImportCommitFileResult {
+  path: string;
+  assetId: string;
+  outcome: 'created' | 'linked-existing' | 'merged-duplicate';
+}
+
+export interface ZipImportCommitResult {
+  model: ModelDetailOut;
+  files: ZipImportCommitFileResult[];
+}
+
 export const api = {
   health: (): Promise<HealthResponse> => apiFetch('/health'),
 
@@ -691,13 +718,52 @@ export const api = {
   // a draft is a single-flight wizard session the client already knows
   // the id of, not a browsable resource.
   import: {
-    uploadZip: (file: File): Promise<ZipImportDraftResponse> => {
+    // onProgress mirrors assets.upload's XHR path exactly (Remy's
+    // C3-consumer finding, #2172 follow-up) -- a zip can be up to
+    // MAX_ZIP_UPLOAD_BYTES (1 GiB server-side), so the wizard needs the
+    // same upload-progress affordance a single large asset upload
+    // already gets; fetch has no upload-progress event at all, which is
+    // the whole reason assets.upload has this same fork.
+    uploadZip: (
+      file: File,
+      opts: { onProgress?: (loaded: number, total: number) => void } = {},
+    ): Promise<ZipImportDraftResponse> => {
       const fd = new FormData();
       fd.append('file', file);
-      return apiFetch('/import/zip', { method: 'POST', body: fd });
+
+      if (!opts.onProgress) {
+        return apiFetch('/import/zip', { method: 'POST', body: fd });
+      }
+
+      return new Promise<ZipImportDraftResponse>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const token = getToken();
+        xhr.open('POST', `${API_BASE}/import/zip`);
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) opts.onProgress!(e.loaded, e.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status === 401) {
+            localStorage.removeItem('mv_token');
+            window.dispatchEvent(new Event('mv:unauthorized'));
+            reject(new Error('Unauthorized'));
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText) as ZipImportDraftResponse); }
+            catch (err) { reject(err); }
+          } else {
+            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload aborted'));
+        xhr.send(fd);
+      });
     },
 
-    commit: (draftId: string, body: ZipImportCommitBody): Promise<{ model: ModelDetailOut }> =>
+    commit: (draftId: string, body: ZipImportCommitBody): Promise<ZipImportCommitResult> =>
       apiFetch(`/import/zip/${draftId}/commit`, { method: 'POST', body: JSON.stringify(body) }),
 
     abandon: (draftId: string): Promise<void> =>

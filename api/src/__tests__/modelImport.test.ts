@@ -24,6 +24,7 @@ import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import type Database from 'better-sqlite3';
 import { buildRawZip } from './helpers/rawZip.js';
+import { hashPassword } from '../passwords.js';
 
 interface Booted {
   baseUrl: string;
@@ -122,10 +123,33 @@ function jsonHeaders(token: string): Record<string, string> {
   return { ...bearer(token), 'Content-Type': 'application/json' };
 }
 
-async function uploadZip(app: Booted, buf: Buffer, filename = 'import.zip'): Promise<Response> {
+async function uploadZip(app: Booted, buf: Buffer, filename = 'import.zip', token = app.token): Promise<Response> {
   const form = new FormData();
   form.append('file', new Blob([buf], { type: 'application/zip' }), filename);
-  return fetch(`${app.baseUrl}/import/zip`, { method: 'POST', headers: bearer(app.token), body: form });
+  return fetch(`${app.baseUrl}/import/zip`, { method: 'POST', headers: bearer(token), body: form });
+}
+
+// Creates a genuine second, non-admin ('member') account and logs in as
+// them, for testing the ownership gate against something other than the
+// single seeded admin user (whose role='admin' always short-circuits the
+// ownership check true, per isOwnDraftOrAdmin) -- role 'member' is
+// insertable directly since migration v15 already dropped the v13
+// `role CHECK(role IN ('admin'))`.
+async function createMemberUser(app: Booted, username: string): Promise<{ token: string; userId: string }> {
+  const userId = crypto.randomUUID();
+  const password = 'correct-horse-battery-staple-2';
+  app.db.prepare(
+    "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, 'member')"
+  ).run(userId, username, hashPassword(password));
+
+  const loginRes = await fetch(`${app.baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (loginRes.status !== 200) throw new Error(`test setup: member login failed with ${loginRes.status}`);
+  const { token } = await loginRes.json() as { token: string };
+  return { token, userId };
 }
 
 interface DraftResponse {
@@ -140,6 +164,11 @@ interface DraftResponse {
     profileCandidates: string[];
   };
   expiresAt: number;
+}
+
+interface CommitResponse {
+  model: { id: string; title: string; coverAssetId: string | null; sourceSite: string | null; files: Array<{ role: string; assetId: string; asset: { filename: string } }> };
+  files: Array<{ path: string; assetId: string; outcome: 'created' | 'linked-existing' | 'merged-duplicate' }>;
 }
 
 describe('POST /import/zip — draft creation + real-zip integration', () => {
@@ -272,16 +301,38 @@ describe('commit — hash-dedup', () => {
       }),
     });
     expect(commitRes.status).toBe(201);
-    const { model } = await commitRes.json() as { model: { files: Array<{ assetId: string }> } };
+    const { model, files } = await commitRes.json() as CommitResponse;
 
     expect(model.files).toHaveLength(1);
     expect(model.files[0].assetId).toBe(existingId);
+
+    // Dedup-outcome summary (Remy's C3-consumer finding, #2172 follow-up):
+    // the wizard is promised a report of which files linked to something
+    // that already existed vs. were newly stored.
+    expect(files).toEqual([{ path: 'duplicate-name.stl', assetId: existingId, outcome: 'linked-existing' }]);
 
     const assetCount = (app.db.prepare('SELECT COUNT(*) as c FROM assets').get() as { c: number }).c;
     expect(assetCount).toBe(1); // no second asset row created
   });
 
-  it('dedups two selected files that hash to the same content without violating the model_files PK', async () => {
+  it('reports outcome: created for a genuinely new file with no pre-existing or intra-zip duplicate', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'brand_new.stl', content: 'never seen before' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const commitRes = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'Created Test', files: [{ path: 'brand_new.stl', role: 'part' }] }),
+    });
+    expect(commitRes.status).toBe(201);
+    const { files } = await commitRes.json() as CommitResponse;
+    expect(files).toHaveLength(1);
+    expect(files[0].outcome).toBe('created');
+  });
+
+  it('dedups two selected files that hash to the same content without violating the model_files PK, and reports the second as merged-duplicate', async () => {
     const app = await bootApp();
     const zip = buildRawZip([
       { name: 'files/part.stl', content: 'identical bytes' },
@@ -302,10 +353,19 @@ describe('commit — hash-dedup', () => {
       }),
     });
     expect(commitRes.status).toBe(201);
-    const { model } = await commitRes.json() as { model: { files: Array<{ assetId: string }> } };
+    const { model, files } = await commitRes.json() as CommitResponse;
     // Both paths resolved to the same asset (identical bytes) -- INSERT
     // OR IGNORE means the second link is a no-op, not a 500.
     expect(model.files).toHaveLength(1);
+
+    // The first path in submission order "wins" the model_files link
+    // (created); the second is reported as merged-duplicate -- its own
+    // role/label never took effect, and the wizard is told that
+    // explicitly rather than the two outcomes looking identical.
+    expect(files).toEqual([
+      { path: 'files/part.stl', assetId: model.files[0].assetId, outcome: 'created' },
+      { path: 'spares/part.stl', assetId: model.files[0].assetId, outcome: 'merged-duplicate' },
+    ]);
 
     const assetCount = (app.db.prepare('SELECT COUNT(*) as c FROM assets').get() as { c: number }).c;
     expect(assetCount).toBe(1);
@@ -391,14 +451,93 @@ describe('draft lifecycle', () => {
     expect(fs.existsSync(path.join(app.dataDir, 'import-drafts', draft.draftId))).toBe(false);
   });
 
-  it('commit 404s for an unknown draft id', async () => {
+  it('commit 404s for a well-formed but unknown draft id', async () => {
     const app = await bootApp();
-    const res = await fetch(`${app.baseUrl}/import/zip/does-not-exist/commit`, {
+    const res = await fetch(`${app.baseUrl}/import/zip/${crypto.randomUUID()}/commit`, {
       method: 'POST',
       headers: jsonHeaders(app.token),
       body: JSON.stringify({ title: 'X', files: [{ path: 'a.stl', role: 'part' }] }),
     });
     expect(res.status).toBe(404);
+  });
+
+  it('commit 400s (not 404 or 500) for a non-UUID-shaped draft id, e.g. an encoded-slash traversal attempt', async () => {
+    const app = await bootApp();
+    // Express decodes %2f into a literal "/" in req.params AFTER route
+    // matching (Vera's security review, #2172 follow-up, HIGH finding) --
+    // this is exactly the shape that would otherwise reach
+    // draftDirFor/readDraftMeta as '../victim-dir'.
+    const res = await fetch(`${app.baseUrl}/import/zip/..%2fvictim-dir/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'X', files: [{ path: 'a.stl', role: 'part' }] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE 400s for a non-UUID-shaped draft id rather than reaching the filesystem at all', async () => {
+    const app = await bootApp();
+    const res = await fetch(`${app.baseUrl}/import/zip/..%2fvictim-dir`, {
+      method: 'DELETE',
+      headers: bearer(app.token),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE and commit 404 (never leaking that the draft exists) when a different, non-admin user owns the draft', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+
+    const zip = buildRawZip([{ name: 'a.stl', content: 'x' }]);
+    const draftRes = await uploadZip(app, zip, 'import.zip', memberA.token);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const delRes = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(delRes.status).toBe(404);
+    // Still on disk -- the DELETE was refused, not silently no-op'd.
+    expect(fs.existsSync(path.join(app.dataDir, 'import-drafts', draft.draftId))).toBe(true);
+
+    const commitRes = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(memberB.token),
+      body: JSON.stringify({ title: 'Should Not Work', files: [{ path: 'a.stl', role: 'part' }] }),
+    });
+    expect(commitRes.status).toBe(404);
+    const modelCount = (app.db.prepare('SELECT COUNT(*) as c FROM models').get() as { c: number }).c;
+    expect(modelCount).toBe(0);
+
+    // The rightful owner can still commit their own draft afterward --
+    // proves the rejection above was ownership-specific, not a general
+    // breakage of this draft.
+    const ownCommitRes = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(memberA.token),
+      body: JSON.stringify({ title: 'Owner Commit', files: [{ path: 'a.stl', role: 'part' }] }),
+    });
+    expect(ownCommitRes.status).toBe(201);
+  });
+
+  it('DELETE and commit succeed for an admin acting on another user\'s draft', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'a.stl', content: 'x' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    // The seeded test user IS admin (see bootApp) -- simulate a
+    // different owner to prove the admin override, not the "it's my own
+    // draft" path, is what lets this through.
+    const metaPath = path.join(app.dataDir, 'import-drafts', draft.draftId, '.draft-meta.json');
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as { ownerId: string };
+    meta.ownerId = 'someone-else';
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+    const commitRes = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/commit`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'Admin Override', files: [{ path: 'a.stl', role: 'part' }] }),
+    });
+    expect(commitRes.status).toBe(201);
   });
 
   it('sweeps an expired draft on the next boot against the same data directory, while a fresh draft from that same boot survives', async () => {
