@@ -186,7 +186,13 @@ function profileToOut(row: PrintProfileRow): PrintProfileOut {
 // userId is required (every call site sits behind requireAuth) so
 // likedByMe can be resolved — same reason modelToOut takes it as a
 // param rather than computing it internally.
-function loadModelDetail(db: Database.Database, modelId: string, userId: string): ModelDetailOut | undefined {
+//
+// Exported (#2172) so routes/modelImport.ts's commit endpoint can return
+// the exact same detail shape a normal model create/fetch does, rather
+// than a divergent partial payload — the only cross-file use so far, so
+// this stays a plain named export rather than moving to its own service
+// module.
+export function loadModelDetail(db: Database.Database, modelId: string, userId: string): ModelDetailOut | undefined {
   const row = db.prepare('SELECT * FROM models WHERE id = ?').get(modelId) as ModelRow | undefined;
   if (!row) return undefined;
 
