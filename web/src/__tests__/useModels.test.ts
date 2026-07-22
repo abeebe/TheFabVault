@@ -38,7 +38,7 @@ const emptyDetail: ModelDetailOut = {
   id: 'm1', title: 'Test model', description: null, categoryId: null, tags: [],
   ownerId: null, visibility: 'public', coverAssetId: null, coverThumbUrl: null,
   sourceUrl: null, sourceSite: null, sourceAuthor: null, license: null, sourceFolderId: null,
-  fileCount: 0, createdAt: 0, updatedAt: 0, deletedAt: null, files: [], profiles: [],
+  fileCount: 0, likeCount: 0, likedByMe: false, createdAt: 0, updatedAt: 0, deletedAt: null, files: [], profiles: [],
 };
 
 beforeEach(() => {

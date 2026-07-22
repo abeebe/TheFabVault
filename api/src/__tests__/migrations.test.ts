@@ -93,7 +93,7 @@ describe('MIGRATIONS: fresh DB reaches v15 with the expected schema', () => {
     const db = makeDb();
     runMigrations(db);
     expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
-    expect(MIGRATIONS.length).toBe(15);
+    expect(MIGRATIONS.length).toBe(16);
   });
 
   it('creates categories/models/model_files/print_profiles with the expected columns', () => {
@@ -179,9 +179,9 @@ describe('MIGRATIONS: v14-shaped user survives the v15 table-copy', () => {
       ).run();
     }).toThrow(); // proves the v14 CHECK is still active pre-copy
 
-    // Now continue to v15 with the full real array.
+    // Now continue with the full real array (through v16).
     runMigrations(db, MIGRATIONS);
-    expect(db.pragma('user_version', { simple: true })).toBe(15);
+    expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
 
     const row = db.prepare('SELECT * FROM users WHERE id = ?').get('legacy-admin') as {
       id: string; username: string; password_hash: string; role: string;
@@ -213,5 +213,98 @@ describe('MIGRATIONS: v14-shaped user survives the v15 table-copy', () => {
     runMigrations(db, MIGRATIONS);
     const { c } = db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number };
     expect(c).toBe(1);
+  });
+});
+
+describe('MIGRATIONS: fresh DB reaches v16 with collections + likes (#2167)', () => {
+  it('creates collections/collection_models/model_likes with the expected columns', () => {
+    const db = makeDb();
+    runMigrations(db);
+
+    const tableNames = (db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all() as { name: string }[]).map((r) => r.name);
+    expect(tableNames).toEqual(
+      expect.arrayContaining(['collections', 'collection_models', 'model_likes']),
+    );
+
+    const collectionCols = (db.prepare('PRAGMA table_info(collections)').all() as { name: string }[]).map((c) => c.name);
+    expect(collectionCols).toEqual(
+      expect.arrayContaining(['id', 'name', 'description', 'owner_id', 'visibility', 'cover_model_id', 'created_at']),
+    );
+
+    const collectionModelCols = (db.prepare('PRAGMA table_info(collection_models)').all() as { name: string }[]).map((c) => c.name);
+    expect(collectionModelCols).toEqual(
+      expect.arrayContaining(['collection_id', 'model_id', 'sort_order', 'added_at']),
+    );
+
+    const modelLikeCols = (db.prepare('PRAGMA table_info(model_likes)').all() as { name: string }[]).map((c) => c.name);
+    expect(modelLikeCols).toEqual(expect.arrayContaining(['model_id', 'user_id', 'created_at']));
+
+    const indexNames = (db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as { name: string }[]).map((r) => r.name);
+    expect(indexNames).toEqual(
+      expect.arrayContaining(['idx_collection_models_model', 'idx_model_likes_user']),
+    );
+  });
+
+  it('has no CHECK on collections.visibility — an arbitrary string is accepted at the schema layer (enforcement is app-layer, enumValidators.ts)', () => {
+    const db = makeDb();
+    runMigrations(db);
+    db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES ('u1', 'a', 'h', 'admin')").run();
+    expect(() => {
+      db.prepare(
+        "INSERT INTO collections (id, name, owner_id, visibility) VALUES ('c1', 'Test', 'u1', 'not-a-real-value')",
+      ).run();
+    }).not.toThrow();
+  });
+
+  it('model_likes PK makes a duplicate (model_id, user_id) insert fail at the raw SQL layer — INSERT OR IGNORE is what the route relies on for idempotency', () => {
+    const db = makeDb();
+    runMigrations(db);
+    db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES ('u1', 'a', 'h', 'admin')").run();
+    db.prepare("INSERT INTO models (id, title, owner_id) VALUES ('m1', 'Model', 'u1')").run();
+    db.prepare('INSERT INTO model_likes (model_id, user_id) VALUES (?, ?)').run('m1', 'u1');
+    expect(() => {
+      db.prepare('INSERT INTO model_likes (model_id, user_id) VALUES (?, ?)').run('m1', 'u1');
+    }).toThrow();
+    expect(() => {
+      db.prepare('INSERT OR IGNORE INTO model_likes (model_id, user_id) VALUES (?, ?)').run('m1', 'u1');
+    }).not.toThrow();
+    const { c } = db.prepare('SELECT COUNT(*) AS c FROM model_likes').get() as { c: number };
+    expect(c).toBe(1);
+  });
+
+  it('deleting a model cascades its likes and collection_models rows but not the reverse — deleting a collection never touches models', () => {
+    const db = makeDb();
+    runMigrations(db);
+    db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES ('u1', 'a', 'h', 'admin')").run();
+    db.prepare("INSERT INTO models (id, title, owner_id) VALUES ('m1', 'Model', 'u1')").run();
+    db.prepare("INSERT INTO collections (id, name, owner_id) VALUES ('c1', 'Collection', 'u1')").run();
+    db.prepare('INSERT INTO collection_models (collection_id, model_id) VALUES (?, ?)').run('c1', 'm1');
+    db.prepare('INSERT INTO model_likes (model_id, user_id) VALUES (?, ?)').run('m1', 'u1');
+
+    // Deleting the collection removes only the collection + its
+    // membership link — the model row survives untouched.
+    db.prepare('DELETE FROM collections WHERE id = ?').run('c1');
+    const modelStillThere = db.prepare('SELECT id FROM models WHERE id = ?').get('m1');
+    expect(modelStillThere).toBeTruthy();
+    const linkGoneAfterCollectionDelete = db.prepare('SELECT * FROM collection_models WHERE collection_id = ?').all('c1');
+    expect(linkGoneAfterCollectionDelete).toEqual([]);
+
+    // Re-create the collection+link, then delete the model this time —
+    // both collection_models and model_likes rows referencing it cascade.
+    db.prepare("INSERT INTO collections (id, name, owner_id) VALUES ('c2', 'Collection 2', 'u1')").run();
+    db.prepare('INSERT INTO collection_models (collection_id, model_id) VALUES (?, ?)').run('c2', 'm1');
+    db.prepare('DELETE FROM models WHERE id = ?').run('m1');
+    const linksAfterModelDelete = db.prepare('SELECT * FROM collection_models WHERE model_id = ?').all('m1');
+    expect(linksAfterModelDelete).toEqual([]);
+    const likesAfterModelDelete = db.prepare('SELECT * FROM model_likes WHERE model_id = ?').all('m1');
+    expect(likesAfterModelDelete).toEqual([]);
+    // The collection itself survives — deleting a member model never
+    // deletes the collection.
+    const collectionStillThere = db.prepare('SELECT id FROM collections WHERE id = ?').get('c2');
+    expect(collectionStillThere).toBeTruthy();
   });
 });

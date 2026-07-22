@@ -319,6 +319,61 @@ const MIGRATIONS: string[] = [
     created_at      INTEGER NOT NULL DEFAULT (unixepoch())
   );
   CREATE INDEX IF NOT EXISTS idx_print_profiles_model ON print_profiles(model_id);`,
+  // v16: collections + likes (Phase B, #2167). See
+  // Reports/derek-thefabvault-makerworld-restructure-plan-2026-07-22.md
+  // §"Schema (sketches)" v16.
+  //
+  // collections is the model-level analog of sets (v11): name,
+  // description, optional cover, and a membership list — except a
+  // collection's members are models (collection_models), not assets.
+  // Same owner_id/visibility shape as models (v15): visibility is a
+  // bare TEXT with no CHECK (enumValidators.ts's isModelVisibility is
+  // reused — same two values, 'public'/'private', no reason to fork a
+  // second identical enum) and enforcement is deferred to Phase D3's
+  // visibility.ts threading, same as models today. cover_model_id
+  // mirrors models.cover_asset_id's ON DELETE SET NULL pattern.
+  //
+  // model_likes is a pure join table: PK (model_id, user_id) makes
+  // "like" and "unlike" idempotent by construction (INSERT OR IGNORE /
+  // DELETE, no separate existence check needed) rather than a boolean
+  // column on a per-user row. CASCADE both directions: deleting a model
+  // clears its likes, deleting a user clears their likes — neither
+  // cascade ever touches models/assets rows themselves.
+  //
+  // idx_collection_models_model and idx_model_likes_user (not the PK's
+  // leading column, which SQLite already indexes for free via the
+  // table's own rowid/PK btree) are the two lookup directions the
+  // routes actually need: "which collections is this model in" and
+  // "which models has this user liked" / "has this user liked model X"
+  // are both keyed off the PK's second column, which has no index of
+  // its own without these.
+  `
+  CREATE TABLE IF NOT EXISTS collections (
+    id             TEXT    PRIMARY KEY,
+    name           TEXT    NOT NULL,
+    description    TEXT,
+    owner_id       TEXT    REFERENCES users(id) ON DELETE SET NULL,
+    visibility     TEXT    NOT NULL DEFAULT 'public',
+    cover_model_id TEXT    REFERENCES models(id) ON DELETE SET NULL,
+    created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS collection_models (
+    collection_id TEXT    NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    model_id      TEXT    NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    added_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (collection_id, model_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_collection_models_model ON collection_models(model_id);
+
+  CREATE TABLE IF NOT EXISTS model_likes (
+    model_id   TEXT    NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (model_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_model_likes_user ON model_likes(user_id);`,
 ];
 
 /**

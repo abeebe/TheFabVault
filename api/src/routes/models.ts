@@ -106,7 +106,13 @@ function resolveCoverThumb(db: Database.Database, coverAssetId: string | null, m
   return null;
 }
 
-function modelToOut(db: Database.Database, row: ModelRow, fileCount: number): ModelOut {
+// likeCount/likedByMe (migration v16, #2167) are required params, not
+// re-queried inside modelToOut itself — every call site already has (or
+// can cheaply batch) both, same rationale as fileCount already being a
+// param here rather than computed inline.
+function modelToOut(
+  db: Database.Database, row: ModelRow, fileCount: number, likeCount: number, likedByMe: boolean,
+): ModelOut {
   return {
     id: row.id,
     title: row.title,
@@ -123,6 +129,8 @@ function modelToOut(db: Database.Database, row: ModelRow, fileCount: number): Mo
     license: row.license,
     sourceFolderId: row.source_folder_id,
     fileCount,
+    likeCount,
+    likedByMe,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -137,6 +145,18 @@ function fileCountFor(db: Database.Database, modelId: string): number {
        WHERE mf.model_id = ? AND a.deleted_at IS NULL`
     ).get(modelId) as { cnt: number }
   ).cnt;
+}
+
+function likeCountFor(db: Database.Database, modelId: string): number {
+  return (
+    db.prepare('SELECT COUNT(*) as cnt FROM model_likes WHERE model_id = ?').get(modelId) as { cnt: number }
+  ).cnt;
+}
+
+function likedByUser(db: Database.Database, modelId: string, userId: string): boolean {
+  return Boolean(
+    db.prepare('SELECT 1 FROM model_likes WHERE model_id = ? AND user_id = ?').get(modelId, userId)
+  );
 }
 
 function profileToOut(row: PrintProfileRow): PrintProfileOut {
@@ -162,7 +182,11 @@ function profileToOut(row: PrintProfileRow): PrintProfileOut {
 // files/profile mutation endpoints below — one place builds the full
 // detail payload so every mutation returns the same shape the detail GET
 // does, instead of each handler assembling its own partial view.
-function loadModelDetail(db: Database.Database, modelId: string): ModelDetailOut | undefined {
+//
+// userId is required (every call site sits behind requireAuth) so
+// likedByMe can be resolved — same reason modelToOut takes it as a
+// param rather than computing it internally.
+function loadModelDetail(db: Database.Database, modelId: string, userId: string): ModelDetailOut | undefined {
   const row = db.prepare('SELECT * FROM models WHERE id = ?').get(modelId) as ModelRow | undefined;
   if (!row) return undefined;
 
@@ -187,7 +211,7 @@ function loadModelDetail(db: Database.Database, modelId: string): ModelDetailOut
   ).all(row.id) as PrintProfileRow[];
 
   return {
-    ...modelToOut(db, row, files.length),
+    ...modelToOut(db, row, files.length, likeCountFor(db, row.id), likedByUser(db, row.id, userId)),
     files,
     profiles: profileRows.map(profileToOut),
   };
@@ -202,11 +226,29 @@ function loadModelDetail(db: Database.Database, modelId: string): ModelDetailOut
 // param name, different underlying concept, because models actually
 // have the table assets don't.
 
+// sort=likes (migration v16, #2167): a correlated subquery in ORDER BY
+// is the right tool here specifically because it's or­dering, not
+// display — SQLite only has to evaluate it per row it's actually
+// comparing during the sort, and there's no way to express "order by an
+// aggregate over a different table" as a plain column-name entry in
+// this map otherwise. Ties break by created_at DESC (newest first among
+// equally-liked models), matching every other sort's implicit
+// most-recent-first bias.
+//
+// This is deliberately a different mechanism than the batched-IN-query
+// approach used for the like COUNTS returned in each list row below
+// (see the `likeCounts` map) — that batch happens once per page
+// regardless of row count, while this subquery only runs during the
+// sort comparison itself. Reusing the batch map for ordering would mean
+// materializing it before the LIMIT/OFFSET page is even known, i.e. for
+// every model in the filtered set rather than just the page — worse for
+// large libraries, which is exactly the case sorting matters for.
 const MODEL_SORT_MAP: Record<string, string> = {
   date_desc: 'created_at DESC',
   date_asc: 'created_at ASC',
   name_asc: 'LOWER(title) ASC',
   name_desc: 'LOWER(title) DESC',
+  likes: '(SELECT COUNT(*) FROM model_likes ml WHERE ml.model_id = models.id) DESC, created_at DESC',
 };
 
 router.get('/models', requireAuth, (req: Request, res: Response) => {
@@ -256,6 +298,13 @@ router.get('/models', requireAuth, (req: Request, res: Response) => {
 
   // Batch file counts for the page rather than one query per row.
   const counts = new Map<string, number>();
+  // Batch like counts + this user's liked set for the page, same
+  // one-query-per-page shape as file counts just above — a subquery per
+  // row (like the ORDER BY case does) would be N extra queries for a
+  // page of N models purely to render a count that's already sitting in
+  // model_likes; a single IN(...) GROUP BY does the whole page at once.
+  const likeCounts = new Map<string, number>();
+  const likedSet = new Set<string>();
   if (rows.length) {
     const placeholders = rows.map(() => '?').join(',');
     const countRows = db.prepare(
@@ -265,9 +314,26 @@ router.get('/models', requireAuth, (req: Request, res: Response) => {
        GROUP BY mf.model_id`
     ).all(...rows.map((r) => r.id)) as { model_id: string; cnt: number }[];
     for (const c of countRows) counts.set(c.model_id, c.cnt);
+
+    const likeCountRows = db.prepare(
+      `SELECT model_id, COUNT(*) as cnt FROM model_likes
+       WHERE model_id IN (${placeholders})
+       GROUP BY model_id`
+    ).all(...rows.map((r) => r.id)) as { model_id: string; cnt: number }[];
+    for (const c of likeCountRows) likeCounts.set(c.model_id, c.cnt);
+
+    const likedRows = db.prepare(
+      `SELECT model_id FROM model_likes WHERE user_id = ? AND model_id IN (${placeholders})`
+    ).all(req.user!.id, ...rows.map((r) => r.id)) as { model_id: string }[];
+    for (const l of likedRows) likedSet.add(l.model_id);
   }
 
-  res.json({ items: rows.map((r) => modelToOut(db, r, counts.get(r.id) ?? 0)), total });
+  res.json({
+    items: rows.map((r) => modelToOut(
+      db, r, counts.get(r.id) ?? 0, likeCounts.get(r.id) ?? 0, likedSet.has(r.id),
+    )),
+    total,
+  });
 });
 
 // ─── POST /models ──────────────────────────────────────────────────────────────
@@ -328,13 +394,13 @@ router.post('/models', requireAuth, (req: Request, res: Response) => {
   );
 
   const row = db.prepare('SELECT * FROM models WHERE id = ?').get(id) as ModelRow;
-  res.status(201).json(modelToOut(db, row, 0));
+  res.status(201).json(modelToOut(db, row, 0, 0, false));
 });
 
 // ─── GET /model/:id — detail (files by role, profiles) ────────────────────────
 
 router.get('/model/:id', requireAuth, (req: Request, res: Response) => {
-  const detail = loadModelDetail(getDb(), req.params.id);
+  const detail = loadModelDetail(getDb(), req.params.id, req.user!.id);
   if (!detail) { res.status(404).json({ error: 'Not found' }); return; }
   res.json(detail);
 });
@@ -404,7 +470,7 @@ router.patch('/model/:id', requireAuth, (req: Request, res: Response) => {
   }
 
   const updated = db.prepare('SELECT * FROM models WHERE id = ?').get(row.id) as ModelRow;
-  res.json(modelToOut(db, updated, fileCountFor(db, row.id)));
+  res.json(modelToOut(db, updated, fileCountFor(db, row.id), likeCountFor(db, row.id), likedByUser(db, row.id, req.user!.id)));
 });
 
 // ─── DELETE /model/:id — soft by default, ?permanent=true hard ────────────────
@@ -470,7 +536,7 @@ router.post('/models/from-folder', requireAuth, asyncHandler(async (req: Request
   });
   create();
 
-  const detail = loadModelDetail(db, modelId)!;
+  const detail = loadModelDetail(db, modelId, req.user!.id)!;
   res.status(201).json(detail);
 }));
 
@@ -543,7 +609,7 @@ router.post('/model/:id/files', requireAuth, upload.array('files'), asyncHandler
     }
   }
 
-  const detail = loadModelDetail(db, model.id)!;
+  const detail = loadModelDetail(db, model.id, req.user!.id)!;
   res.status(201).json({ attached: attachedAssetIds.length, model: detail });
 }));
 
@@ -586,7 +652,7 @@ router.patch('/model/:id/files/reorder', requireAuth, (req: Request, res: Respon
     assetIds.forEach((aid, i) => update.run(i, model.id, aid));
   })();
 
-  res.json(loadModelDetail(db, model.id));
+  res.json(loadModelDetail(db, model.id, req.user!.id));
 });
 
 // ─── PATCH /model/:id/cover ─────────────────────────────────────────────────────
@@ -603,7 +669,7 @@ router.patch('/model/:id/cover', requireAuth, (req: Request, res: Response) => {
   }
   db.prepare('UPDATE models SET cover_asset_id = ?, updated_at = unixepoch() WHERE id = ?').run(assetId || null, model.id);
 
-  res.json(loadModelDetail(db, model.id));
+  res.json(loadModelDetail(db, model.id, req.user!.id));
 });
 
 // ─── GET /model/:id/download — zip of role='part' files ──────────────────────
@@ -751,6 +817,38 @@ router.delete('/profile/:id', requireAuth, (req: Request, res: Response) => {
   const info = db.prepare('DELETE FROM print_profiles WHERE id = ?').run(req.params.id);
   if (info.changes === 0) { res.status(404).json({ error: 'Not found' }); return; }
   res.status(204).end();
+});
+
+// ─── PUT/DELETE /model/:id/like — like/unlike (migration v16, #2167) ──────────
+//
+// Idempotent by construction via the model_likes PK (model_id, user_id):
+// PUT uses INSERT OR IGNORE (already-liked is a no-op, not a 409/error),
+// DELETE just deletes whatever row is there (not-liked is a no-op, not a
+// 404) — a client can PUT/DELETE the same like state repeatedly without
+// checking first, same idempotency contract as models.ts elsewhere
+// (attach uses INSERT OR IGNORE too). Both return the same small shape
+// rather than a full model/detail payload — liking is a lightweight,
+// frequent action and the caller (a like button) only ever needs the
+// resulting count + its own state back, not the whole model re-fetched.
+
+router.put('/model/:id/like', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
+  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+
+  db.prepare('INSERT OR IGNORE INTO model_likes (model_id, user_id) VALUES (?, ?)').run(model.id, req.user!.id);
+
+  res.json({ likeCount: likeCountFor(db, model.id), likedByMe: true });
+});
+
+router.delete('/model/:id/like', requireAuth, (req: Request, res: Response) => {
+  const db = getDb();
+  const model = db.prepare('SELECT id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as { id: string } | undefined;
+  if (!model) { res.status(404).json({ error: 'Not found' }); return; }
+
+  db.prepare('DELETE FROM model_likes WHERE model_id = ? AND user_id = ?').run(model.id, req.user!.id);
+
+  res.json({ likeCount: likeCountFor(db, model.id), likedByMe: false });
 });
 
 export default router;

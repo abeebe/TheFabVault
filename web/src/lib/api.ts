@@ -77,7 +77,10 @@ export interface ModelListParams {
   category?: string;
   tags?: string;
   owner?: 'me';
-  sort?: 'date_desc' | 'date_asc' | 'name_asc' | 'name_desc';
+  // 'likes' added #2167 (migration v16) — orders by model_likes count
+  // descending, ties broken by created_at descending (see
+  // routes/models.ts's MODEL_SORT_MAP comment).
+  sort?: 'date_desc' | 'date_asc' | 'name_asc' | 'name_desc' | 'likes';
   limit?: number;
   offset?: number;
 }
@@ -158,6 +161,10 @@ export interface ModelOut {
   license: string | null;
   sourceFolderId: string | null;
   fileCount: number;
+  // #2167 (migration v16): count of model_likes rows for this model,
+  // and whether the requesting user has liked it.
+  likeCount: number;
+  likedByMe: boolean;
   createdAt: number;
   updatedAt: number;
   deletedAt: number | null;
@@ -217,6 +224,45 @@ export type PrintProfileUpdateBody = Partial<{
   settings: Record<string, unknown>;
   slicedAssetId: string | null;
   sortOrder: number;
+}>;
+
+// ─── Collections (Phase B, #2167) ─────────────────────────────────────────────
+//
+// Same convention as Models/Categories above -- types defined locally
+// here as the single cross-engineer contract for
+// api/src/routes/collections.ts, mirroring
+// api/src/types/index.ts's CollectionRow/CollectionOut/CollectionDetailOut
+// exactly. Model-level analog of SetOut/SetDetailOut (v11), except
+// membership is models, and it carries owner_id/visibility like ModelOut
+// does.
+
+export interface CollectionOut {
+  id: string;
+  name: string;
+  description: string | null;
+  ownerId: string | null;
+  visibility: ModelVisibility;
+  coverModelId: string | null;
+  coverThumbUrl: string | null;
+  modelCount: number;
+  createdAt: number;
+}
+
+export interface CollectionDetailOut extends CollectionOut {
+  models: ModelOut[];
+}
+
+export interface CollectionCreateBody {
+  name: string;
+  description?: string;
+  visibility?: ModelVisibility;
+  modelIds?: string[];
+}
+
+export type CollectionUpdateBody = Partial<{
+  name: string;
+  description: string | null;
+  visibility: ModelVisibility;
 }>;
 
 export const api = {
@@ -486,6 +532,16 @@ export const api = {
       delete: (profileId: string): Promise<void> =>
         apiFetch(`/profile/${profileId}`, { method: 'DELETE' }),
     },
+
+    // Idempotent like/unlike (#2167) -- PUT/DELETE the same state
+    // repeatedly is safe (model_likes PK makes it a no-op server-side).
+    // Returns just the count + this user's state, not the full model --
+    // a like button doesn't need a whole model/detail re-fetch.
+    like: (id: string): Promise<{ likeCount: number; likedByMe: boolean }> =>
+      apiFetch(`/model/${id}/like`, { method: 'PUT' }),
+
+    unlike: (id: string): Promise<{ likeCount: number; likedByMe: boolean }> =>
+      apiFetch(`/model/${id}/like`, { method: 'DELETE' }),
   },
 
   // GET is requireAuth (every user needs the list for a category
@@ -502,6 +558,39 @@ export const api = {
 
     delete: (id: string): Promise<void> =>
       apiFetch(`/category/${id}`, { method: 'DELETE' }),
+  },
+
+  // Model-level analog of `sets` below -- CRUD + membership + reorder +
+  // cover, same shape, different member type (models, not assets).
+  collections: {
+    list: (): Promise<CollectionOut[]> => apiFetch('/collections'),
+
+    get: (id: string): Promise<CollectionDetailOut> => apiFetch(`/collection/${id}`),
+
+    create: (body: CollectionCreateBody): Promise<CollectionOut> =>
+      apiFetch('/collections', { method: 'POST', body: JSON.stringify(body) }),
+
+    update: (id: string, body: CollectionUpdateBody): Promise<CollectionOut> =>
+      apiFetch(`/collection/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    delete: (id: string): Promise<void> =>
+      apiFetch(`/collection/${id}`, { method: 'DELETE' }),
+
+    addModels: (id: string, modelIds: string[]): Promise<{ added: number }> =>
+      apiFetch(`/collection/${id}/models`, { method: 'POST', body: JSON.stringify({ modelIds }) }),
+
+    removeModel: (id: string, modelId: string): Promise<void> =>
+      apiFetch(`/collection/${id}/model/${modelId}`, { method: 'DELETE' }),
+
+    // modelIds is the full desired order; sort_order is assigned as each
+    // id's array index -- same contract as models.reorderFiles.
+    reorderModels: (id: string, modelIds: string[]): Promise<CollectionDetailOut> =>
+      apiFetch(`/collection/${id}/models/reorder`, { method: 'PATCH', body: JSON.stringify({ modelIds }) }),
+
+    // modelId must already be a member; null clears the cover (falls
+    // back server-side to the first member model with a usable thumb).
+    setCover: (id: string, modelId: string | null): Promise<CollectionOut> =>
+      apiFetch(`/collection/${id}/cover`, { method: 'PATCH', body: JSON.stringify({ modelId }) }),
   },
 
   folders: {
