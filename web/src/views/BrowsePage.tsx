@@ -1,7 +1,9 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import { useModels } from '../hooks/useModels.js';
+import { useCategories } from '../hooks/useCategories.js';
+import { buildCategoryOptions } from '../lib/categoryTree.js';
 import { ModelCard } from '../components/ModelCard.js';
 import { SearchBar } from '../components/SearchBar.js';
 import { Modal } from '../components/Modal.js';
@@ -10,26 +12,85 @@ import { api } from '../lib/api.js';
 import type { ModelListParams } from '../lib/api.js';
 
 const PAGE_SIZE = 60;
+// Debounces the search box -> URL sync so rapid typing doesn't spam
+// pushState (and, downstream, the /models fetch) on every keystroke.
+// SearchBar itself stays exactly as-is (LibraryPage's component,
+// unmodified) -- this is a thin URL-sync wrapper around it, not a new
+// search input.
+const SEARCH_DEBOUNCE_MS = 300;
 
-// Model-centric library view (Phase A4, #2157). Deliberately basic per
-// the phase plan -- search + sort + a grid of ModelCard, no category
-// chips or collections yet (that's Browse/Discovery, Phase B). The one
-// piece of connective tissue this page adds beyond "just a list" is the
-// New Model button: without it, /library and /models/:id have no way to
-// get data into them yet (from-folder conversion's bulk wizard is Phase
-// B4), so the page would otherwise be an unreachable dead end.
-export function LibraryPage() {
+// Phase B scope (#2168 ticket): only two sort options ship now -- "likes"
+// is explicitly deferred until B1 (#2167, collections/likes API) merges;
+// wiring it in ahead of that would mean shipping a sort value the API
+// can't yet satisfy. Values match ModelListParams['sort'] so no
+// translation layer is needed between URL state and the fetch params.
+type BrowseSort = 'date_desc' | 'name_asc';
+const DEFAULT_SORT: BrowseSort = 'date_desc';
+const SORT_OPTIONS: Array<{ value: BrowseSort; label: string }> = [
+  { value: 'date_desc', label: 'Newest' },
+  { value: 'name_asc', label: 'Title A→Z' },
+];
+
+function isBrowseSort(value: string | null): value is BrowseSort {
+  return value === 'date_desc' || value === 'name_asc';
+}
+
+// Browse landing page (#2168, Phase B) -- the new / route. Search-first:
+// prominent search box, category chips (flat -- reuses the same tree
+// flatten ModelPage's Edit Details select already does via
+// buildCategoryOptions, just rendered as chips instead of <option>s),
+// sort, and a grid of ModelCard (unchanged from LibraryPage/#2157). All
+// three filters are deep-linkable via URL search params (useSearchParams)
+// so a Browse view is shareable/bookmarkable -- q/category/sort round-trip
+// through the URL, not just component state.
+//
+// This supersedes LibraryPage (#2157): the New Model affordance moves
+// here (see AppShell.tsx / router for the /library -> / redirect) so it
+// isn't stranded now that Browse is the front door.
+export function BrowsePage() {
   const navigate = useNavigate();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sort, setSort] = useState<NonNullable<ModelListParams['sort']>>('date_desc');
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const qParam = searchParams.get('q') ?? '';
+  const categoryParam = searchParams.get('category');
+  const sortParam = searchParams.get('sort');
+  const sort: BrowseSort = isBrowseSort(sortParam) ? sortParam : DEFAULT_SORT;
+
+  // Search input is local state so every keystroke is instantly
+  // responsive in the box; it's debounced into the URL (and from there
+  // into the fetch params below) rather than the URL being written on
+  // every change. Kept in sync with the URL in the other direction too --
+  // back/forward nav or landing on a bookmarked ?q= link updates the box.
+  const [searchInput, setSearchInput] = useState(qParam);
   const [page, setPage] = useState(0);
+
+  useEffect(() => { setSearchInput(qParam); }, [qParam]);
+
+  useEffect(() => {
+    if (searchInput === qParam) return;
+    const timer = setTimeout(() => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (searchInput) next.set('q', searchInput); else next.delete('q');
+        return next;
+      }, { replace: true });
+      setPage(0);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput]);
+
+  const { categories } = useCategories();
+  const categoryChips = buildCategoryOptions(categories);
+
   const [newModelOpen, setNewModelOpen] = useState(false);
   const [newModelTitle, setNewModelTitle] = useState('');
   const [creating, setCreating] = useState(false);
 
   const params: ModelListParams = Object.fromEntries(
     Object.entries({
-      q: searchQuery || undefined,
+      q: qParam || undefined,
+      category: categoryParam || undefined,
       sort,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
@@ -39,6 +100,24 @@ export function LibraryPage() {
   const { models, total, loading, error, refresh } = useModels(params);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  function handleCategorySelect(id: string | null) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id) next.set('category', id); else next.delete('category');
+      return next;
+    });
+    setPage(0);
+  }
+
+  function handleSortChange(next: BrowseSort) {
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      if (next === DEFAULT_SORT) params.delete('sort'); else params.set('sort', next);
+      return params;
+    });
+    setPage(0);
+  }
+
   async function handleCreate() {
     const title = newModelTitle.trim();
     if (!title) return;
@@ -47,7 +126,7 @@ export function LibraryPage() {
       const created = await api.models.create({ title });
       navigate(`/models/${created.id}`);
     } catch (err) {
-      console.error('[LibraryPage] Failed to create model:', err);
+      console.error('[BrowsePage] Failed to create model:', err);
       alert(`Couldn't create model: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setCreating(false);
@@ -57,23 +136,22 @@ export function LibraryPage() {
   return (
     <div className="flex flex-col h-full bg-surface overflow-hidden">
       <header className="flex items-center gap-3 px-5 py-3 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-        <div className="flex-1 max-w-sm">
+        <div className="flex-1 max-w-md">
           <SearchBar
-            value={searchQuery}
-            onChange={(v) => { setSearchQuery(v); setPage(0); }}
+            value={searchInput}
+            onChange={setSearchInput}
             placeholder="Search models..."
           />
         </div>
         <div className="flex-1" />
         <select
           value={sort}
-          onChange={(e) => { setSort(e.target.value as NonNullable<ModelListParams['sort']>); setPage(0); }}
+          onChange={(e) => handleSortChange(e.target.value as BrowseSort)}
           className="text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-2 py-1 outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
         >
-          <option value="date_desc">Newest first</option>
-          <option value="date_asc">Oldest first</option>
-          <option value="name_asc">Name A→Z</option>
-          <option value="name_desc">Name Z→A</option>
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
         </select>
         <button
           onClick={() => setNewModelOpen(true)}
@@ -83,8 +161,36 @@ export function LibraryPage() {
         </button>
       </header>
 
+      {categoryChips.length > 0 && (
+        <div className="flex items-center gap-2 px-5 py-2 flex-wrap bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <button
+            onClick={() => handleCategorySelect(null)}
+            className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+              categoryParam === null
+                ? 'bg-accent text-white border-accent'
+                : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+            }`}
+          >
+            All
+          </button>
+          {categoryChips.map((chip) => (
+            <button
+              key={chip.id}
+              onClick={() => handleCategorySelect(chip.id)}
+              className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                categoryParam === chip.id
+                  ? 'bg-accent text-white border-accent'
+                  : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-        <span className="text-gray-900 dark:text-gray-100 font-medium">Library</span>
+        <span className="text-gray-900 dark:text-gray-100 font-medium">Browse</span>
         <div className="flex-1" />
         <span className="text-xs text-gray-400">{total} {total === 1 ? 'model' : 'models'}</span>
       </div>

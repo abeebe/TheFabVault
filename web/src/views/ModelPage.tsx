@@ -12,12 +12,12 @@ import { TagInput, TagBadge } from '../components/TagInput.js';
 import { Modal } from '../components/Modal.js';
 import { Spinner } from '../components/Spinner.js';
 import { renderMarkdown, isSafeUrl } from '../lib/markdown.js';
+import { buildCategoryOptions } from '../lib/categoryTree.js';
 import { api } from '../lib/api.js';
 import type { AssetOut } from '../types/index.js';
 import type {
   ModelDetailOut, ModelFileOut, ModelUpdateBody, ModelVisibility,
   PrintProfileOut, PrintProfileCreateBody, PrintProfileUpdateBody,
-  CategoryOut,
 } from '../lib/api.js';
 
 type Tab = 'overview' | 'files' | 'profiles';
@@ -157,30 +157,6 @@ function PartsQuickView({ parts, onView }: { parts: ModelFileOut[]; onView: (ass
 // this modal (see ModelPage body) since markdown deserves more room than
 // a modal affords.
 //
-// Category picker (#2164): flattens the useCategories() tree into a
-// single ordered list of options, indenting children under their parent
-// with a simple em-dash prefix per depth level. No category admin UI
-// exists yet to manage the tree's shape (Phase B proper) -- this is
-// deliberately just a select fed by GET /categories, not a full tree
-// widget.
-function buildCategoryOptions(categories: CategoryOut[]): Array<{ id: string; label: string }> {
-  const byParent = new Map<string | null, CategoryOut[]>();
-  for (const c of categories) {
-    const key = c.parentId;
-    if (!byParent.has(key)) byParent.set(key, []);
-    byParent.get(key)!.push(c);
-  }
-  const options: Array<{ id: string; label: string }> = [];
-  function walk(parentId: string | null, depth: number) {
-    for (const c of byParent.get(parentId) ?? []) {
-      options.push({ id: c.id, label: `${'— '.repeat(depth)}${c.name}` });
-      walk(c.id, depth + 1);
-    }
-  }
-  walk(null, 0);
-  return options;
-}
-
 function EditDetailsModal({
   model, onSave, onClose,
 }: {
