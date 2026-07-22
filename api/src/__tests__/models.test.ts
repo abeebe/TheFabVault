@@ -1146,7 +1146,7 @@ describe('Visibility / ownership authz matrix (#2179)', () => {
     expect(JSON.stringify(body)).not.toContain(memberB.userId);
   });
 
-  it('print_profiles CRUD (GET list, POST, PATCH, DELETE) all inherit the write rule — a non-owner 404s on every one, even GET, even on a PUBLIC model', async () => {
+  it('print_profiles POST/PATCH/DELETE inherit the write rule — a non-owner 404s on create/edit/delete even on a PUBLIC model; owner and admin succeed', async () => {
     const app = await bootApp();
     const memberA = await createMemberUser(app, 'member-a');
     const memberB = await createMemberUser(app, 'member-b');
@@ -1156,9 +1156,6 @@ describe('Visibility / ownership authz matrix (#2179)', () => {
       method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'PLA 0.2mm' }),
     });
     const profile = await createRes.json() as { id: string };
-
-    const listByB = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(memberB.token) });
-    expect(listByB.status).toBe(404);
 
     const createByB = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, {
       method: 'POST', headers: jsonHeaders(memberB.token), body: JSON.stringify({ name: 'Sneaky Profile' }),
@@ -1174,11 +1171,6 @@ describe('Visibility / ownership authz matrix (#2179)', () => {
     expect(deleteByB.status).toBe(404);
 
     // Owner and admin can do all of the above.
-    const listByOwner = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(memberA.token) });
-    expect(listByOwner.status).toBe(200);
-    const listByAdmin = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(app.token) });
-    expect(listByAdmin.status).toBe(200);
-
     const patchByAdmin = await fetch(`${app.baseUrl}/profile/${profile.id}`, {
       method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ notes: 'admin edit ok' }),
     });
@@ -1188,7 +1180,34 @@ describe('Visibility / ownership authz matrix (#2179)', () => {
     expect(deleteByOwner.status).toBe(204);
   });
 
-  it('GET /model/:id detail still embeds `profiles` for a PUBLIC model viewed by a non-owner (the standalone profiles endpoint is stricter, the embedded detail view is not — stated deviation)', async () => {
+  it('print_profiles GET (list) is READ-gated (#2179 Remy round) — a non-owner CAN list profiles on a PUBLIC model, but 404s on a PRIVATE model; owner/admin always can', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const pub = await createModelAs(app, memberA.token, { title: 'Profiled Public', visibility: 'public' });
+    const priv = await createModelAs(app, memberA.token, { title: 'Profiled Private', visibility: 'private' });
+    await fetch(`${app.baseUrl}/model/${pub.id}/profiles`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'PLA 0.2mm' }),
+    });
+    await fetch(`${app.baseUrl}/model/${priv.id}/profiles`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'PETG 0.24mm' }),
+    });
+
+    const pubListByB = await fetch(`${app.baseUrl}/model/${pub.id}/profiles`, { headers: bearer(memberB.token) });
+    expect(pubListByB.status).toBe(200);
+    expect(await pubListByB.json()).toHaveLength(1);
+
+    const privListByB = await fetch(`${app.baseUrl}/model/${priv.id}/profiles`, { headers: bearer(memberB.token) });
+    expect(privListByB.status).toBe(404);
+
+    const privListByOwner = await fetch(`${app.baseUrl}/model/${priv.id}/profiles`, { headers: bearer(memberA.token) });
+    expect(privListByOwner.status).toBe(200);
+
+    const privListByAdmin = await fetch(`${app.baseUrl}/model/${priv.id}/profiles`, { headers: bearer(app.token) });
+    expect(privListByAdmin.status).toBe(200);
+  });
+
+  it('GET /model/:id detail embeds `profiles` for a PUBLIC model viewed by a non-owner, consistent with the standalone GET /model/:id/profiles endpoint (#2179 Remy round — no more asymmetry)', async () => {
     const app = await bootApp();
     const memberA = await createMemberUser(app, 'member-a');
     const memberB = await createMemberUser(app, 'member-b');

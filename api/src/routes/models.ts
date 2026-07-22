@@ -67,9 +67,10 @@ const upload = multer({
 //   - WRITE (ownership): can this caller mutate the row? owner + admin
 //     only, regardless of visibility — a public model is still not
 //     everyone's to edit. Governs PATCH/DELETE on the model itself, file
-//     attach/detach/reorder/cover, and print_profiles CRUD (see that
-//     section's own comment for why profiles get the stricter rule even
-//     on their GET).
+//     attach/detach/reorder/cover, and print_profiles create/update/
+//     delete. print_profiles' own GET (list) is READ-gated instead
+//     (#2179 Remy round), matching GET /model/:id's embedded `profiles`
+//     — see that section's own comment.
 //
 // Both deny with 404, never 403 — existence-hiding, same convention as
 // modelImport.ts's isOwnDraftOrAdmin (C2 precedent): a caller can't tell
@@ -834,23 +835,25 @@ router.get('/model/:id/download', requireAuth, (req: Request, res: Response) => 
 
 // ─── print_profiles CRUD ───────────────────────────────────────────────────────
 //
-// Deliberately gated on the OWNERSHIP (write) rule, not visibility, for
-// all four operations — including this section's GET, unlike every other
-// GET in this file. Print profiles are per-owner printer configuration
-// (nozzle/layer-height/infill/slicer settings), not gallery content;
-// unlike files/likes, there's no product reason a non-owner browsing a
-// public model needs its owner's slicer settings. This is narrower than
-// GET /model/:id itself: that detail payload still embeds `profiles`
-// for a public model (loadModelDetail doesn't filter them out — this
-// ticket didn't ask for that split), so a non-owner viewing a public
-// model's detail sees its profiles embedded but cannot hit this
-// standalone list endpoint directly. Stated explicitly per the ticket's
-// "decide + state the choice" instruction — see #2179 report.
+// GET (list) is READ-gated (visibility), matching GET /model/:id's
+// embedded `profiles` array exactly — a public model's print profiles
+// are visible to anyone who can see the model, same as its files/likes.
+// (Revised #2179 Remy round: the original cut gated ALL FOUR operations
+// on ownership including this GET, which was an unnecessary asymmetry
+// with the embedded detail view — a non-owner viewing a public model's
+// detail already saw its profiles embedded, just not through this
+// standalone endpoint. Closed that gap rather than keep two different
+// answers to "can this caller see this model's profiles?" depending on
+// which endpoint asked.)
+//
+// POST/PATCH/DELETE stay WRITE-gated (ownership) — creating, editing, or
+// deleting someone else's printer settings is not a visibility question,
+// same as file attach/detach/reorder/cover.
 router.get('/model/:id/profiles', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
-  const model = db.prepare('SELECT id, owner_id FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
-    { id: string; owner_id: string | null } | undefined;
-  if (!model || !isOwnerOrAdmin(model, req)) { res.status(404).json({ error: 'Not found' }); return; }
+  const model = db.prepare('SELECT id, owner_id, visibility FROM models WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as
+    { id: string; owner_id: string | null; visibility: string } | undefined;
+  if (!model || !isVisible(model, visCtx(req))) { res.status(404).json({ error: 'Not found' }); return; }
   const rows = db.prepare(
     'SELECT * FROM print_profiles WHERE model_id = ? ORDER BY sort_order ASC, created_at ASC'
   ).all(model.id) as PrintProfileRow[];
