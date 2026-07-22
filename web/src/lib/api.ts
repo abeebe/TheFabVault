@@ -436,6 +436,17 @@ export const api = {
       return token ? `${base}?token=${encodeURIComponent(token)}` : base;
     },
 
+    // Additive convenience (A4, #2157) -- ModelOut.coverThumbUrl is a raw
+    // path (same shape as AssetOut.thumbUrl), needing the exact same
+    // auth-token query-param treatment as assets.thumbUrl above. Kept as
+    // a thin wrapper here rather than duplicated in ModelCard/ModelPage.
+    coverThumbUrl: (model: ModelOut): string | null => {
+      if (!model.coverThumbUrl) return null;
+      const token = getToken();
+      const base = `${API_BASE}${model.coverThumbUrl}`;
+      return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    },
+
     profiles: {
       list: (modelId: string): Promise<PrintProfileOut[]> => apiFetch(`/model/${modelId}/profiles`),
 
