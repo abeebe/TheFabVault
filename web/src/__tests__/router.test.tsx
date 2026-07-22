@@ -11,7 +11,21 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppShell } from '../components/AppShell.js';
-import type { ModelDetailOut } from '../lib/api.js';
+import { MeProvider } from '../hooks/useMe.js';
+import type { ModelDetailOut, AuthMeOut } from '../lib/api.js';
+
+// Phase D4 (#2180) member-mode gating: every test below except the
+// dedicated "member-mode gating" describe further down runs as an admin
+// (mockMe's default) -- these tests predate D4 and assert the pre-gating
+// "everything is reachable" shape, which is exactly what an admin should
+// still see. The member-role behavior (Vault/Projects nav hidden,
+// /vault and /convert showing Not-authorized) gets its own describe
+// block with its own mockMe override, rather than retrofitting a role
+// param onto renderAt/mockMe here, so an accidental default-role change
+// can't silently flip every existing assertion in this file.
+const mockMe = vi.fn((..._args: unknown[]) => Promise.resolve<AuthMeOut>({
+  id: 'admin1', username: 'root', displayName: null, role: 'admin',
+}));
 
 // mockAssetsList is a vi.fn() (not an inline arrow) specifically so the
 // pagination test below can override its resolved value per-test (default
@@ -45,6 +59,9 @@ const emptyModelDetail: ModelDetailOut = {
 vi.mock('../lib/api.js', () => ({
   api: {
     health: () => Promise.resolve({ authRequired: false }),
+    auth: {
+      me: (...args: unknown[]) => mockMe(...args),
+    },
     assets: {
       list: (...args: unknown[]) => mockAssetsList(...args),
       stats: () => Promise.resolve({ total: 0, totalSize: 0, favorites: 0, threeDmodel: 0, twoD: 0, uncategorized: 0 }),
@@ -80,6 +97,8 @@ vi.mock('../lib/api.js', () => ({
 
 beforeEach(() => {
   cleanup();
+  mockMe.mockClear();
+  mockMe.mockImplementation(() => Promise.resolve({ id: 'admin1', username: 'root', displayName: null, role: 'admin' }));
   mockAssetsList.mockClear();
   mockAssetsList.mockImplementation(() => Promise.resolve({ items: [], total: 0 }));
   mockModelsList.mockClear();
@@ -109,7 +128,9 @@ beforeEach(() => {
 function renderAt(path: string, authRequired = false) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <AppShell logout={() => {}} authRequired={authRequired} />
+      <MeProvider isAuthenticated={true}>
+        <AppShell logout={() => {}} authRequired={authRequired} />
+      </MeProvider>
     </MemoryRouter>
   );
 }
@@ -128,9 +149,13 @@ describe('AppShell routing', () => {
     expect(screen.queryByText('All Files')).toBeNull();
   });
 
-  it('renders VaultPage at /vault (no longer aliased at /)', () => {
+  it('renders VaultPage at /vault (no longer aliased at /)', async () => {
     renderAt('/vault');
-    expect(screen.getAllByText('All Files').length).toBeGreaterThan(0);
+    // /vault is admin-gated as of #2180 (RequireAdmin) -- mockMe resolves
+    // async, so VaultPage only mounts after that identity check settles.
+    // findAllByText retries until then, same as findByText elsewhere in
+    // this file that cross an async boundary.
+    expect((await screen.findAllByText('All Files')).length).toBeGreaterThan(0);
   });
 
   it('redirects /library to / (Browse), #2168', async () => {
@@ -158,12 +183,15 @@ describe('AppShell routing', () => {
     expect(await screen.findByText('Dragon Prints')).toBeTruthy();
   });
 
-  it('renders the persistent nav switch on every route', () => {
+  it('renders the persistent nav switch on every route (as admin -- Vault/Projects are admin-only as of #2180)', async () => {
     renderAt('/vault');
     expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Collections' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Vault' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
+    // Vault/Projects nav links are gated on useMe()'s async isAdmin --
+    // findByRole retries until mockMe (admin, by this file's default)
+    // resolves and AppShell re-renders with them present.
+    expect(await screen.findByRole('link', { name: 'Vault' })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'Projects' })).toBeTruthy();
   });
 
   // #2169 (Phase B3): Collections list + detail added as top-level routes,
@@ -206,6 +234,60 @@ describe('AppShell routing', () => {
   it('shows the logout button when authRequired is true', () => {
     renderAt('/vault', true);
     expect(screen.getByTitle('Sign out')).toBeTruthy();
+  });
+});
+
+// Member-mode role gating (Phase D4, #2180, plan §6): Vault nav item +
+// /convert are admin-only; a member neither sees the Vault/Projects nav
+// links nor gets a working page if they land on /vault or /convert by
+// direct URL (stale bookmark, typed link, whatever) -- they get a clean
+// Not-authorized state, never a crash or a half-functional page. This is
+// the client-side UX layer only -- every route these guard is
+// independently requireAdmin-gated server-side regardless of what
+// RequireAdmin decides to render (see RequireAdmin.tsx's own comment).
+describe('AppShell member-mode gating (#2180)', () => {
+  beforeEach(() => {
+    mockMe.mockImplementation(() => Promise.resolve({ id: 'member1', username: 'bob', displayName: null, role: 'member' }));
+  });
+
+  it('hides the Vault and Projects nav links for a member', async () => {
+    renderAt('/');
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    // Give the resolved identity a tick to land in AppShell's isAdmin.
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Vault' })).toBeNull());
+    expect(screen.queryByRole('link', { name: 'Projects' })).toBeNull();
+    // Browse/Collections stay visible regardless of role.
+    expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Collections' })).toBeTruthy();
+  });
+
+  it('shows a clean Not-authorized state on direct-URL access to /vault as a member', async () => {
+    renderAt('/vault');
+    expect(await screen.findByText('Not authorized')).toBeTruthy();
+    expect(screen.queryByText('All Files')).toBeNull();
+  });
+
+  it('shows a clean Not-authorized state on direct-URL access to /convert as a member', async () => {
+    renderAt('/convert');
+    expect(await screen.findByText('Not authorized')).toBeTruthy();
+    expect(screen.queryByText('Bulk Convert Folders to Models')).toBeNull();
+  });
+
+  it('does not show Not-authorized while the identity fetch is still in flight (no flash of the wrong state)', async () => {
+    // A never-resolving mockMe pins the provider in its loading state --
+    // RequireAdmin must show its own loading affordance, not jump
+    // straight to Not-authorized before it actually knows the role.
+    mockMe.mockImplementation(() => new Promise(() => {}));
+    renderAt('/vault');
+    expect(screen.queryByText('Not authorized')).toBeNull();
+  });
+});
+
+describe('AppShell admin-mode gating (#2180)', () => {
+  it('an admin can still reach /vault and /convert directly', async () => {
+    renderAt('/vault');
+    expect((await screen.findAllByText('All Files')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Not authorized')).toBeNull();
   });
 });
 

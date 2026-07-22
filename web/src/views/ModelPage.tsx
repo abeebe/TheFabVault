@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { useModel } from '../hooks/useModels.js';
 import { useCategories } from '../hooks/useCategories.js';
+import { useMe } from '../hooks/useMe.js';
+import { isOwnerOrAdmin } from '../lib/permissions.js';
 import { ModelViewer } from '../components/ModelViewer.js';
 import { AssetPicker } from '../components/AssetPicker.js';
 import { TagInput, TagBadge } from '../components/TagInput.js';
@@ -365,6 +367,7 @@ export function ModelPage() {
     model, loading, error, refresh, update, attachExisting, uploadFiles,
     detachFile, setCover, createProfile, updateProfile, deleteProfile,
   } = useModel(id ?? null);
+  const { me } = useMe();
 
   const [tab, setTab] = useState<Tab>('overview');
   const [previewAsset, setPreviewAsset] = useState<AssetOut | null>(null);
@@ -408,6 +411,16 @@ export function ModelPage() {
   const parts = model.files.filter((f) => f.role === 'part');
   const filesByRole: Record<FileRole, ModelFileOut[]> = { part: [], image: [], doc: [], other: [] };
   for (const f of model.files) filesByRole[f.role].push(f);
+
+  // Edit/delete/attach/upload/reorder/cover/profile-write controls are
+  // owner-or-admin only (D3's server-side rule, mirrored client-side --
+  // see lib/permissions.ts); like + AddToCollectionMenu stay available
+  // to every member regardless, per the D4 ticket. Also gates the one
+  // path to the visibility public/private select -- it lives inside
+  // EditDetailsModal (opened by the pencil below), so hiding the pencil
+  // for a non-owner/non-admin covers "visibility toggle owner-or-admin
+  // only" too, without a second standalone control duplicating it.
+  const canEdit = isOwnerOrAdmin(model.ownerId, me);
 
   async function handleDelete() {
     setDeleting(true);
@@ -468,13 +481,15 @@ export function ModelPage() {
             </Link>
             <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 flex items-center gap-2 flex-wrap">
               {model.title}
-              <button
-                onClick={() => setEditOpen(true)}
-                className="p-1 rounded text-gray-400 hover:text-accent hover:bg-gray-100 dark:hover:bg-gray-700"
-                title="Edit details"
-              >
-                <Pencil size={14} />
-              </button>
+              {canEdit && (
+                <button
+                  onClick={() => setEditOpen(true)}
+                  className="p-1 rounded text-gray-400 hover:text-accent hover:bg-gray-100 dark:hover:bg-gray-700"
+                  title="Edit details"
+                >
+                  <Pencil size={14} />
+                </button>
+              )}
               <span
                 className={`text-xs font-medium px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${
                   model.visibility === 'private'
@@ -497,13 +512,15 @@ export function ModelPage() {
 
           <div className="flex items-center gap-1.5 shrink-0">
             <AddToCollectionMenu modelId={model.id} />
-            <button
-              onClick={() => setConfirmDeleteOpen(true)}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-              title="Delete model"
-            >
-              <Trash2 size={15} />
-            </button>
+            {canEdit && (
+              <button
+                onClick={() => setConfirmDeleteOpen(true)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+                title="Delete model"
+              >
+                <Trash2 size={15} />
+              </button>
+            )}
           </div>
         </div>
 
@@ -535,7 +552,7 @@ export function ModelPage() {
             <div>
               <div className="flex items-center justify-between mb-1">
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Description</h2>
-                {!editingDescription && (
+                {!editingDescription && canEdit && (
                   <button onClick={startEditDescription} className="text-xs text-accent hover:underline flex items-center gap-1">
                     <Pencil size={11} /> Edit
                   </button>
@@ -602,16 +619,20 @@ export function ModelPage() {
         {tab === 'files' && (
           <div className="max-w-3xl space-y-5">
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                onClick={() => setPickerOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-              >
-                <Plus size={14} /> Attach from vault
-              </button>
-              <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer">
-                <Plus size={14} /> {uploading ? 'Uploading…' : 'Upload files'}
-                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileUpload} disabled={uploading} />
-              </label>
+              {canEdit && (
+                <button
+                  onClick={() => setPickerOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <Plus size={14} /> Attach from vault
+                </button>
+              )}
+              {canEdit && (
+                <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer">
+                  <Plus size={14} /> {uploading ? 'Uploading…' : 'Upload files'}
+                  <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileUpload} disabled={uploading} />
+                </label>
+              )}
               <div className="flex-1" />
               {model.fileCount > 0 && (
                 <a
@@ -645,7 +666,7 @@ export function ModelPage() {
                           {f.label || f.asset.originalName || f.asset.filename}
                         </button>
                         <span className="text-xs text-gray-400 flex-shrink-0">{formatSize(f.asset.size)}</span>
-                        {f.role === 'image' && model.coverAssetId !== f.assetId && (
+                        {canEdit && f.role === 'image' && model.coverAssetId !== f.assetId && (
                           <button
                             onClick={() => setCover(f.assetId)}
                             className="text-xs text-gray-400 hover:text-accent flex-shrink-0"
@@ -665,7 +686,7 @@ export function ModelPage() {
                         >
                           <Download size={14} />
                         </a>
-                        {confirmDetachId === f.assetId ? (
+                        {canEdit && (confirmDetachId === f.assetId ? (
                           <div className="flex items-center gap-1.5 flex-shrink-0">
                             <button onClick={() => handleDetach(f.assetId)} className="text-xs text-red-500 hover:underline">Remove</button>
                             <button onClick={() => setConfirmDetachId(null)} className="text-xs text-gray-400 hover:underline">Cancel</button>
@@ -678,7 +699,7 @@ export function ModelPage() {
                           >
                             <X size={14} />
                           </button>
-                        )}
+                        ))}
                       </div>
                     ))}
                   </div>
@@ -692,12 +713,14 @@ export function ModelPage() {
           <div className="max-w-3xl space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Print profiles</h2>
-              <button
-                onClick={() => { setEditingProfile(null); setProfileModalOpen(true); }}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-              >
-                <Plus size={14} /> Add profile
-              </button>
+              {canEdit && (
+                <button
+                  onClick={() => { setEditingProfile(null); setProfileModalOpen(true); }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <Plus size={14} /> Add profile
+                </button>
+              )}
             </div>
 
             {model.profiles.length === 0 ? (
@@ -728,20 +751,24 @@ export function ModelPage() {
                         <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{p.infill != null ? `${p.infill}%` : '—'}</td>
                         <td className="py-2 pr-3 text-gray-500 dark:text-gray-400">{p.supports ? 'Yes' : 'No'}</td>
                         <td className="py-2 text-right whitespace-nowrap">
-                          <button
-                            onClick={() => { setEditingProfile(p); setProfileModalOpen(true); }}
-                            className="p-1 rounded text-gray-400 hover:text-accent hover:bg-gray-100 dark:hover:bg-gray-700"
-                            title="Edit profile"
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          <button
-                            onClick={() => deleteProfile(p.id)}
-                            className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-                            title="Delete profile"
-                          >
-                            <Trash2 size={13} />
-                          </button>
+                          {canEdit && (
+                            <>
+                              <button
+                                onClick={() => { setEditingProfile(p); setProfileModalOpen(true); }}
+                                className="p-1 rounded text-gray-400 hover:text-accent hover:bg-gray-100 dark:hover:bg-gray-700"
+                                title="Edit profile"
+                              >
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                onClick={() => deleteProfile(p.id)}
+                                className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+                                title="Delete profile"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     ))}

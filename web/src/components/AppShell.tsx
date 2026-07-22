@@ -3,7 +3,9 @@ import { LogOut } from 'lucide-react';
 import { UploadPanel } from './UploadPanel.js';
 import { ImportPanel } from './ImportPanel.js';
 import { ThemeToggle } from './ThemeToggle.js';
+import { RequireAdmin } from './RequireAdmin.js';
 import { useTheme } from '../hooks/useTheme.js';
+import { useMe } from '../hooks/useMe.js';
 import { VaultPage } from '../views/VaultPage.js';
 import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
@@ -71,16 +73,40 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 // is a nested route the same way /models/:id is -- ModelPage/CollectionPage
 // are both top-level routed pages, not something embedded in VaultPage's
 // sidebar-driven view-switching the way SetView is.
+//
+// Member-mode gating (Phase D4, #2180, plan §6): the ticket's scope is
+// "Vault nav item + AdminSettings entry + /convert visible to admins
+// only; members: Browse/Collections/Projects." The Vault and Projects
+// nav links point at the exact same /vault route today (Projects has no
+// route of its own yet -- it's a sidebar-selected view inside VaultPage,
+// see the "Projects" comment a few lines up), and VaultPage as a whole
+// is the raw asset-library-plus-admin-tools surface (folders, tags,
+// duplicates/orphans, network mounts, the Settings/AdminSettings entry
+// point) -- not something that cleanly splits into an
+// admin-only-half/member-reachable-half at this component's boundary
+// without a real refactor (a dedicated /projects route rendering just
+// VaultPage's Projects surface). That refactor is out of scope for this
+// UI-gating ticket, so both links are gated together here: a member
+// loses one-click Projects access via the top nav for now, rather than
+// this leaving a "Projects" link that silently bounces them to a
+// Not-authorized page every time they click it. Flagged to Derek as a
+// deviation from "members keep [the Projects nav item]" -- recommend a
+// follow-up ticket to give Projects its own member-reachable route.
 export function AppShell({ logout, authRequired }: Props) {
   const { theme, cycleTheme } = useTheme();
+  const { isAdmin } = useMe();
 
   return (
     <div className="flex flex-col h-screen">
       <nav className="flex items-center gap-1 px-3 py-1.5 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
         <NavLink to="/" end className={navLinkClass}>Browse</NavLink>
         <NavLink to="/collections" className={navLinkClass}>Collections</NavLink>
-        <NavLink to="/vault" className={navLinkClass}>Vault</NavLink>
-        <NavLink to="/vault" className={navLinkClass}>Projects</NavLink>
+        {isAdmin && (
+          <>
+            <NavLink to="/vault" className={navLinkClass}>Vault</NavLink>
+            <NavLink to="/vault" className={navLinkClass}>Projects</NavLink>
+          </>
+        )}
         <div className="flex-1" />
         <ThemeToggle theme={theme} onCycle={cycleTheme} />
         {authRequired && (
@@ -97,15 +123,21 @@ export function AppShell({ logout, authRequired }: Props) {
       <div className="flex-1 min-h-0">
         <Routes>
           <Route path="/" element={<BrowsePage />} />
-          <Route path="/vault" element={<VaultPage />} />
+          {/* Admin-only per the D4 ticket -- RequireAdmin shows a clean
+              Not-authorized state for a member on direct-URL access
+              rather than crashing or half-rendering the page (its
+              server-side calls would 401/403 anyway; this is the UX
+              layer on top of that, not the security boundary). */}
+          <Route path="/vault" element={<RequireAdmin><VaultPage /></RequireAdmin>} />
           <Route path="/library" element={<Navigate to="/" replace />} />
           <Route path="/models/:id" element={<ModelPage />} />
           <Route path="/collections" element={<CollectionsPage />} />
           <Route path="/collections/:id" element={<CollectionPage />} />
           {/* Bulk folder→model convert wizard (#2170) — admin-ish power
               tool, not on the persistent nav; reached via AdminSettings'
-              Library Tools section (see AdminSettings.tsx). */}
-          <Route path="/convert" element={<ConvertWizardPage />} />
+              Library Tools section (see AdminSettings.tsx). Admin-only
+              per the D4 ticket, same RequireAdmin guard as /vault. */}
+          <Route path="/convert" element={<RequireAdmin><ConvertWizardPage /></RequireAdmin>} />
           {/* Zip ImportWizard (#2173, Phase C) -- upload a MakerWorld/
               Printables/Thingiverse zip, edit the classified draft plan,
               commit into a real model. Entry point is BrowsePage's

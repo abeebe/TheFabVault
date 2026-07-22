@@ -57,6 +57,15 @@ export function BrowsePage() {
   const categoryParam = searchParams.get('category');
   const sortParam = searchParams.get('sort');
   const sort: BrowseSort = isBrowseSort(sortParam) ? sortParam : DEFAULT_SORT;
+  // 'My models' filter (Phase D4, #2180, plan §6) -- the `owner=me` param
+  // has existed on ModelListParams/the server since A2 (#2155); this is
+  // just the first UI consumer of it. No role check needed here (unlike
+  // ModelPage's/CollectionPage's edit-affordance gating) -- filtering to
+  // "models I own" is meaningful and available to every authenticated
+  // member, not an owner-or-admin-only action. Deep-linkable via ?owner=me
+  // same as q/category/sort above, so a "my models" Browse view stays
+  // bookmarkable/shareable too.
+  const myModelsOnly = searchParams.get('owner') === 'me';
 
   // Search input is local state so every keystroke is instantly
   // responsive in the box; it's debounced into the URL (and from there
@@ -93,6 +102,7 @@ export function BrowsePage() {
     Object.entries({
       q: qParam || undefined,
       category: categoryParam || undefined,
+      owner: myModelsOnly ? 'me' as const : undefined,
       sort,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
@@ -101,6 +111,15 @@ export function BrowsePage() {
 
   const { models, total, loading, error, refresh } = useModels(params);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  function handleMyModelsToggle() {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (myModelsOnly) next.delete('owner'); else next.set('owner', 'me');
+      return next;
+    });
+    setPage(0);
+  }
 
   function handleCategorySelect(id: string | null) {
     setSearchParams((prev) => {
@@ -146,6 +165,15 @@ export function BrowsePage() {
           />
         </div>
         <div className="flex-1" />
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 select-none cursor-pointer">
+          <input
+            type="checkbox"
+            checked={myModelsOnly}
+            onChange={handleMyModelsToggle}
+            className="accent-accent"
+          />
+          My models only
+        </label>
         <select
           value={sort}
           onChange={(e) => handleSortChange(e.target.value as BrowseSort)}

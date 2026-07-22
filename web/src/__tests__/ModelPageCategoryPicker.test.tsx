@@ -8,14 +8,23 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { ModelPage } from '../views/ModelPage.js';
+import { MeProvider } from '../hooks/useMe.js';
 import type { ModelDetailOut } from '../lib/api.js';
 
 const mockGet = vi.fn();
 const mockUpdate = vi.fn();
 const mockCategoriesList = vi.fn();
+// The Edit Details modal (where the category picker lives) is gated
+// owner-or-admin as of #2180 -- every test in this file needs to reach
+// it, so this file's identity is admin throughout, same convention
+// CollectionPage.test.tsx/router.test.tsx use.
+const mockMe = vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'admin1', username: 'root', displayName: null, role: 'admin' as const }));
 
 vi.mock('../lib/api.js', () => ({
   api: {
+    auth: {
+      me: (...args: unknown[]) => mockMe(...args),
+    },
     models: {
       get: (...args: unknown[]) => mockGet(...args),
       update: (...args: unknown[]) => mockUpdate(...args),
@@ -49,9 +58,11 @@ function baseModel(overrides: Partial<ModelDetailOut>): ModelDetailOut {
 function renderModelPage() {
   return render(
     <MemoryRouter initialEntries={['/models/m1']}>
-      <Routes>
-        <Route path="/models/:id" element={<ModelPage />} />
-      </Routes>
+      <MeProvider isAuthenticated={true}>
+        <Routes>
+          <Route path="/models/:id" element={<ModelPage />} />
+        </Routes>
+      </MeProvider>
     </MemoryRouter>
   );
 }
@@ -60,6 +71,7 @@ beforeEach(() => {
   mockGet.mockReset();
   mockUpdate.mockReset().mockResolvedValue(baseModel({}));
   mockCategoriesList.mockReset();
+  mockMe.mockClear();
 });
 
 afterEach(cleanup);
@@ -75,7 +87,7 @@ describe('ModelPage Edit Details -- category picker (#2164)', () => {
     renderModelPage();
 
     await screen.findByText('Widget X');
-    fireEvent.click(screen.getByTitle('Edit details'));
+    fireEvent.click(await screen.findByTitle('Edit details'));
 
     const select = await screen.findByLabelText('Category') as HTMLSelectElement;
     await waitFor(() => {
@@ -94,7 +106,7 @@ describe('ModelPage Edit Details -- category picker (#2164)', () => {
     renderModelPage();
 
     await screen.findByText('Widget X');
-    fireEvent.click(screen.getByTitle('Edit details'));
+    fireEvent.click(await screen.findByTitle('Edit details'));
 
     const select = await screen.findByLabelText('Category') as HTMLSelectElement;
     await waitFor(() => expect(select.options.length).toBe(2));
@@ -115,7 +127,7 @@ describe('ModelPage Edit Details -- category picker (#2164)', () => {
     renderModelPage();
 
     await screen.findByText('Widget X');
-    fireEvent.click(screen.getByTitle('Edit details'));
+    fireEvent.click(await screen.findByTitle('Edit details'));
 
     const select = await screen.findByLabelText('Category') as HTMLSelectElement;
     await waitFor(() => expect(select.options.length).toBe(2));
