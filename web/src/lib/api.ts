@@ -87,6 +87,33 @@ export interface PaginatedModels {
   total: number;
 }
 
+// ─── Categories (#2164, follow-up from Remy's A4 #2157 finding) ───────────────
+//
+// Types defined locally here rather than in ../types/index.ts, same
+// convention as the Models section above (and AssetListParams/
+// PaginatedAssets before that) -- this file is the single cross-engineer
+// contract for the new endpoints (api/src/routes/categories.ts). Mirrors
+// api/src/types/index.ts's CategoryRow/CategoryOut exactly -- keep both
+// in sync by hand if either changes.
+export interface CategoryOut {
+  id: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+}
+
+export interface CategoryCreateBody {
+  name: string;
+  parentId?: string | null;
+  sortOrder?: number;
+}
+
+export type CategoryUpdateBody = Partial<{
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+}>;
+
 export type ModelFileRole = 'part' | 'image' | 'doc' | 'other';
 export type ModelVisibility = 'public' | 'private';
 
@@ -459,6 +486,22 @@ export const api = {
       delete: (profileId: string): Promise<void> =>
         apiFetch(`/profile/${profileId}`, { method: 'DELETE' }),
     },
+  },
+
+  // GET is requireAuth (every user needs the list for a category
+  // picker); create/update/delete are requireAdmin server-side -- this
+  // client doesn't gate that itself, the API 401/403s a non-admin call.
+  categories: {
+    list: (): Promise<CategoryOut[]> => apiFetch('/categories'),
+
+    create: (body: CategoryCreateBody): Promise<CategoryOut> =>
+      apiFetch('/categories', { method: 'POST', body: JSON.stringify(body) }),
+
+    update: (id: string, body: CategoryUpdateBody): Promise<CategoryOut> =>
+      apiFetch(`/category/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    delete: (id: string): Promise<void> =>
+      apiFetch(`/category/${id}`, { method: 'DELETE' }),
   },
 
   folders: {
