@@ -57,6 +57,141 @@ export interface PaginatedAssets {
   total: number;
 }
 
+// ─── Models ("Local MakerWorld" restructure, #2154/#2155) ─────────────────────
+//
+// Types defined locally here (not in ../types/index.ts) — same convention
+// as AssetListParams/PaginatedAssets just above: this file is the single
+// cross-engineer contract for the new endpoints (api/src/routes/models.ts),
+// committed first so Remy's A4 (ModelPage/LibraryPage) can build against
+// it before the route implementation details are finalized. Mirrors the
+// shape of api/src/types/index.ts's ModelOut/ModelDetailOut/etc. exactly —
+// keep both in sync by hand if either changes.
+
+export interface ModelListParams {
+  q?: string;
+  // Filters models.category_id (the curated categories tree) — NOT the
+  // same concept as AssetListParams.category (a computed 3dmodel/2d/
+  // uncategorized bucket inferred from filename). Same param name,
+  // different underlying filter, because models actually have a real
+  // category table assets don't.
+  category?: string;
+  tags?: string;
+  owner?: 'me';
+  sort?: 'date_desc' | 'date_asc' | 'name_asc' | 'name_desc';
+  limit?: number;
+  offset?: number;
+}
+
+export interface PaginatedModels {
+  items: ModelOut[];
+  total: number;
+}
+
+export type ModelFileRole = 'part' | 'image' | 'doc' | 'other';
+export type ModelVisibility = 'public' | 'private';
+
+export interface ModelFileOut {
+  assetId: string;
+  role: ModelFileRole;
+  sortOrder: number;
+  label: string | null;
+  asset: AssetOut;
+}
+
+export interface PrintProfileOut {
+  id: string;
+  modelId: string;
+  name: string;
+  printer: string | null;
+  material: string | null;
+  nozzle: string | null;
+  layerHeight: number | null;
+  infill: number | null;
+  supports: boolean;
+  notes: string | null;
+  settings: Record<string, unknown>;
+  slicedAssetId: string | null;
+  sortOrder: number;
+  createdAt: number;
+}
+
+export interface ModelOut {
+  id: string;
+  title: string;
+  description: string | null;
+  categoryId: string | null;
+  tags: string[];
+  ownerId: string | null;
+  visibility: ModelVisibility;
+  coverAssetId: string | null;
+  coverThumbUrl: string | null;
+  sourceUrl: string | null;
+  sourceSite: string | null;
+  sourceAuthor: string | null;
+  license: string | null;
+  sourceFolderId: string | null;
+  fileCount: number;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt: number | null;
+}
+
+export interface ModelDetailOut extends ModelOut {
+  files: ModelFileOut[];
+  profiles: PrintProfileOut[];
+}
+
+export interface ModelCreateBody {
+  title: string;
+  description?: string;
+  categoryId?: string | null;
+  tags?: string[];
+  visibility?: ModelVisibility;
+  sourceUrl?: string;
+  sourceSite?: string;
+  sourceAuthor?: string;
+  license?: string;
+}
+
+export interface ModelUpdateBody {
+  title?: string;
+  description?: string | null;
+  categoryId?: string | null;
+  tags?: string[];
+  visibility?: ModelVisibility;
+  sourceUrl?: string | null;
+  sourceSite?: string | null;
+  sourceAuthor?: string | null;
+  license?: string | null;
+}
+
+export interface PrintProfileCreateBody {
+  name: string;
+  printer?: string;
+  material?: string;
+  nozzle?: string;
+  layerHeight?: number;
+  infill?: number;
+  supports?: boolean;
+  notes?: string;
+  settings?: Record<string, unknown>;
+  slicedAssetId?: string | null;
+}
+
+export type PrintProfileUpdateBody = Partial<{
+  name: string;
+  printer: string | null;
+  material: string | null;
+  nozzle: string | null;
+  layerHeight: number | null;
+  infill: number | null;
+  supports: boolean;
+  notes: string | null;
+  settings: Record<string, unknown>;
+  slicedAssetId: string | null;
+  sortOrder: number;
+}>;
+
 export const api = {
   health: (): Promise<HealthResponse> => apiFetch('/health'),
 
@@ -224,6 +359,94 @@ export const api = {
       const token = getToken();
       const base = `${API_BASE}${asset.thumbUrl}`;
       return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    },
+  },
+
+  models: {
+    list: (params: ModelListParams = {}): Promise<PaginatedModels> => {
+      const qs = new URLSearchParams();
+      if (params.q) qs.set('q', params.q);
+      if (params.category) qs.set('category', params.category);
+      if (params.tags) qs.set('tags', params.tags);
+      if (params.owner) qs.set('owner', params.owner);
+      if (params.sort) qs.set('sort', params.sort);
+      if (params.limit) qs.set('limit', String(params.limit));
+      if (params.offset !== undefined) qs.set('offset', String(params.offset));
+      const query = qs.toString();
+      return apiFetch(`/models${query ? `?${query}` : ''}`);
+    },
+
+    get: (id: string): Promise<ModelDetailOut> => apiFetch(`/model/${id}`),
+
+    create: (body: ModelCreateBody): Promise<ModelOut> =>
+      apiFetch('/models', { method: 'POST', body: JSON.stringify(body) }),
+
+    update: (id: string, body: ModelUpdateBody): Promise<ModelOut> =>
+      apiFetch(`/model/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+    // Soft-delete (hides only) by default. permanent: true removes the
+    // model + its model_files/print_profiles rows — never asset rows.
+    delete: (id: string, opts: { permanent?: boolean } = {}): Promise<void> =>
+      apiFetch(`/model/${id}${opts.permanent ? '?permanent=true' : ''}`, { method: 'DELETE' }),
+
+    // Explicit folder→model conversion — never silent/automatic. The
+    // folder and its assets are untouched; this only creates a new model
+    // + model_files links.
+    fromFolder: (folderId: string, title?: string): Promise<ModelDetailOut> =>
+      apiFetch('/models/from-folder', { method: 'POST', body: JSON.stringify({ folderId, title }) }),
+
+    // Link assets already in the vault onto a model.
+    attachExisting: (
+      id: string,
+      assetIds: string[],
+      role?: ModelFileRole,
+    ): Promise<{ attached: number; model: ModelDetailOut }> =>
+      apiFetch(`/model/${id}/files`, { method: 'POST', body: JSON.stringify({ assetIds, role }) }),
+
+    // Upload new files directly onto a model. Server dedups by content
+    // hash (findAssetByHash) — a byte-identical file already in the
+    // vault gets linked, not re-stored as a second copy.
+    uploadFiles: (
+      id: string,
+      files: File[],
+      role?: ModelFileRole,
+    ): Promise<{ attached: number; model: ModelDetailOut }> => {
+      const fd = new FormData();
+      for (const f of files) fd.append('files', f);
+      if (role) fd.append('role', role);
+      return apiFetch(`/model/${id}/files`, { method: 'POST', body: fd });
+    },
+
+    detachFile: (id: string, assetId: string): Promise<void> =>
+      apiFetch(`/model/${id}/file/${assetId}`, { method: 'DELETE' }),
+
+    // assetIds is the full desired order; sort_order is assigned as each
+    // id's array index.
+    reorderFiles: (id: string, assetIds: string[]): Promise<ModelDetailOut> =>
+      apiFetch(`/model/${id}/files/reorder`, { method: 'PATCH', body: JSON.stringify({ assetIds }) }),
+
+    // assetId must already be attached to the model; null clears the
+    // cover (falls back to the first image-role file, server-side).
+    setCover: (id: string, assetId: string | null): Promise<ModelDetailOut> =>
+      apiFetch(`/model/${id}/cover`, { method: 'PATCH', body: JSON.stringify({ assetId }) }),
+
+    downloadUrl: (id: string): string => {
+      const token = getToken();
+      const base = `${API_BASE}/model/${id}/download`;
+      return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    },
+
+    profiles: {
+      list: (modelId: string): Promise<PrintProfileOut[]> => apiFetch(`/model/${modelId}/profiles`),
+
+      create: (modelId: string, body: PrintProfileCreateBody): Promise<PrintProfileOut> =>
+        apiFetch(`/model/${modelId}/profiles`, { method: 'POST', body: JSON.stringify(body) }),
+
+      update: (profileId: string, body: PrintProfileUpdateBody): Promise<PrintProfileOut> =>
+        apiFetch(`/profile/${profileId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+      delete: (profileId: string): Promise<void> =>
+        apiFetch(`/profile/${profileId}`, { method: 'DELETE' }),
     },
   },
 
