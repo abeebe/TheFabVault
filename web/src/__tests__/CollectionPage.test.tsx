@@ -8,7 +8,8 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { CollectionPage } from '../views/CollectionPage.js';
-import type { CollectionDetailOut, ModelOut } from '../lib/api.js';
+import { MeProvider } from '../hooks/useMe.js';
+import type { CollectionDetailOut, ModelOut, AuthMeOut } from '../lib/api.js';
 
 const mockGet = vi.fn();
 const mockDelete = vi.fn();
@@ -18,6 +19,15 @@ const mockSetCover = vi.fn();
 const mockAddModels = vi.fn();
 const mockModelsList = vi.fn();
 const mockNavigate = vi.fn();
+// Phase D4 (#2180): CollectionPage now gates its mutation affordances on
+// isOwnerOrAdmin(collection.ownerId, me). Every pre-D4 test in this file
+// asserts the "everything is reachable" shape, which is exactly what an
+// admin should still see -- so this file's default identity is admin,
+// same convention router.test.tsx uses. The dedicated "member-mode
+// gating" describe below overrides it per-case.
+const mockMe = vi.fn((..._args: unknown[]) => Promise.resolve<AuthMeOut>({
+  id: 'admin1', username: 'root', displayName: null, role: 'admin',
+}));
 
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
@@ -26,6 +36,9 @@ vi.mock('react-router-dom', async () => {
 
 vi.mock('../lib/api.js', () => ({
   api: {
+    auth: {
+      me: (...args: unknown[]) => mockMe(...args),
+    },
     collections: {
       get: (...args: unknown[]) => mockGet(...args),
       delete: (...args: unknown[]) => mockDelete(...args),
@@ -69,6 +82,8 @@ beforeEach(() => {
   mockAddModels.mockReset().mockResolvedValue({ added: 1 });
   mockModelsList.mockReset().mockResolvedValue({ items: [], total: 0 });
   mockNavigate.mockReset();
+  mockMe.mockReset();
+  mockMe.mockResolvedValue({ id: 'admin1', username: 'root', displayName: null, role: 'admin' });
 });
 
 afterEach(cleanup);
@@ -76,7 +91,9 @@ afterEach(cleanup);
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={['/collections/c1']}>
-      <Routes><Route path="/collections/:id" element={<CollectionPage />} /></Routes>
+      <MeProvider isAuthenticated={true}>
+        <Routes><Route path="/collections/:id" element={<CollectionPage />} /></Routes>
+      </MeProvider>
     </MemoryRouter>
   );
 }
@@ -111,7 +128,10 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('Second');
 
-    const upButtons = screen.getAllByTitle('Move earlier');
+    // findAllByTitle (not getAllByTitle) -- these buttons are additionally
+    // gated on the async useMe() identity fetch resolving admin/owner
+    // (#2180), a second async boundary independent of mockGet's.
+    const upButtons = await screen.findAllByTitle('Move earlier');
     // First model's "move earlier" is disabled; the second model's is the
     // one that does something -- click it.
     fireEvent.click(upButtons[1]);
@@ -127,7 +147,7 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('Second');
 
-    const upButtons = screen.getAllByTitle('Move earlier') as HTMLButtonElement[];
+    const upButtons = await screen.findAllByTitle('Move earlier') as HTMLButtonElement[];
     const downButtons = screen.getAllByTitle('Move later') as HTMLButtonElement[];
     expect(upButtons[0].disabled).toBe(true);
     expect(downButtons[1].disabled).toBe(true);
@@ -142,7 +162,7 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('First');
 
-    fireEvent.click(screen.getByTitle('Set as cover'));
+    fireEvent.click(await screen.findByTitle('Set as cover'));
     await waitFor(() => expect(mockSetCover).toHaveBeenCalledWith('c1', 'm1'));
   });
 
@@ -155,7 +175,7 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('First');
 
-    fireEvent.click(screen.getByTitle('Cover image (click to clear)'));
+    fireEvent.click(await screen.findByTitle('Cover image (click to clear)'));
     await waitFor(() => expect(mockSetCover).toHaveBeenCalledWith('c1', null));
   });
 
@@ -167,7 +187,7 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('First');
 
-    fireEvent.click(screen.getByTitle('Remove from collection'));
+    fireEvent.click(await screen.findByTitle('Remove from collection'));
     await waitFor(() => expect(mockRemoveModel).toHaveBeenCalledWith('c1', 'm1'));
   });
 
@@ -176,7 +196,7 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('Dragons');
 
-    fireEvent.click(screen.getByTitle('Delete collection'));
+    fireEvent.click(await screen.findByTitle('Delete collection'));
     expect(await screen.findByText('Delete collection?')).toBeTruthy();
     expect(mockDelete).not.toHaveBeenCalled();
 
@@ -195,8 +215,78 @@ describe('CollectionPage', () => {
     renderPage();
     await screen.findByText('Dragons');
 
-    fireEvent.click(screen.getByRole('button', { name: /add models/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /add models/i }));
     expect(await screen.findByText('Add models to collection')).toBeTruthy();
     await waitFor(() => expect(mockModelsList).toHaveBeenCalled());
+  });
+});
+
+// Phase D4 (#2180) ownership gating: name/description edit, add-models,
+// delete, and per-member reorder/cover/remove are owner-or-admin only.
+// Every test above runs as an admin (this file's default mockMe); these
+// cover the two other points on the matrix -- a plain member with no
+// relationship to the collection, and a member who owns it.
+describe('CollectionPage ownership gating (#2180)', () => {
+  it('a non-owner member sees no edit affordances (name/desc/add/delete/reorder/cover/remove)', async () => {
+    mockMe.mockResolvedValue({ id: 'member1', username: 'bob', displayName: null, role: 'member' });
+    mockGet.mockResolvedValue(baseCollection({
+      ownerId: 'someone-else', modelCount: 1,
+      models: [baseModel({ id: 'm1', title: 'First' })],
+    }));
+    renderPage();
+    await screen.findByText('Dragons');
+    await screen.findByText('First');
+
+    expect(screen.queryByRole('button', { name: /add models/i })).toBeNull();
+    expect(screen.queryByTitle('Delete collection')).toBeNull();
+    expect(screen.queryByTitle('Move earlier')).toBeNull();
+    expect(screen.queryByTitle('Move later')).toBeNull();
+    expect(screen.queryByTitle('Set as cover')).toBeNull();
+    expect(screen.queryByTitle('Remove from collection')).toBeNull();
+    // Name/description are plain (non-interactive) text, not a click-to-edit
+    // control, for a non-owner member.
+    const nameHeading = screen.getByText('Dragons').closest('h1') as HTMLElement;
+    expect(nameHeading.className).not.toContain('cursor-pointer');
+  });
+
+  it('a member who owns the collection (ownerId matches their id) still sees edit affordances', async () => {
+    mockMe.mockResolvedValue({ id: 'owner1', username: 'alice', displayName: null, role: 'member' });
+    mockGet.mockResolvedValue(baseCollection({
+      ownerId: 'owner1', modelCount: 1,
+      models: [baseModel({ id: 'm1', title: 'First' })],
+    }));
+    renderPage();
+    await screen.findByText('Dragons');
+    await screen.findByText('First');
+
+    expect(await screen.findByRole('button', { name: /add models/i })).toBeTruthy();
+    expect(await screen.findByTitle('Delete collection')).toBeTruthy();
+    expect(await screen.findByTitle('Set as cover')).toBeTruthy();
+    expect(await screen.findByTitle('Remove from collection')).toBeTruthy();
+  });
+
+  // Legacy/pre-ownership rows (created before Phase D) carry owner_id
+  // NULL -- per D3's server-side isOwnerOrAdmin (row.owner_id === me.id
+  // is always false for a NULL owner_id, since me.id is never null),
+  // these are admin-editable only; a member sees them read-only even
+  // though nobody else "owns" it either. Client-side canEdit mirrors
+  // that exactly (lib/permissions.ts) -- this pins the two sides staying
+  // in lockstep.
+  it('a NULL-owner_id (legacy) collection is read-only for a member, editable for an admin', async () => {
+    mockMe.mockResolvedValue({ id: 'member1', username: 'bob', displayName: null, role: 'member' });
+    mockGet.mockResolvedValue(baseCollection({
+      ownerId: null, modelCount: 1,
+      models: [baseModel({ id: 'm1', title: 'First' })],
+    }));
+    renderPage();
+    await screen.findByText('Dragons');
+    await screen.findByText('First');
+    expect(screen.queryByTitle('Delete collection')).toBeNull();
+
+    cleanup();
+    mockMe.mockResolvedValue({ id: 'admin1', username: 'root', displayName: null, role: 'admin' });
+    renderPage();
+    await screen.findByText('Dragons');
+    expect(await screen.findByTitle('Delete collection')).toBeTruthy();
   });
 });

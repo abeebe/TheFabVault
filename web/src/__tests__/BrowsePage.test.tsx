@@ -142,6 +142,42 @@ describe('BrowsePage param round-trip (URL <-> state)', () => {
     ));
   });
 
+  // 'My models' filter (Phase D4, #2180, plan §6) -- owner=me has existed
+  // on ModelListParams/the server since A2 (#2155); this is its first UI
+  // consumer. No role/useMe dependency here (unlike ModelPage's/
+  // CollectionPage's edit-affordance gating) -- filtering to "models I
+  // own" is available to every authenticated member, not owner-or-admin
+  // gated, so this file doesn't need a MeProvider wrapper the way
+  // ModelPage.ownership.test.tsx / CollectionPage.test.tsx do.
+  it('checking "My models only" writes ?owner=me into the URL and refetches with owner: me', async () => {
+    renderAt('/');
+    await waitFor(() => expect(mockModelsList).toHaveBeenCalled());
+    mockModelsList.mockClear();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /my models only/i }));
+
+    await waitFor(() => expect(mockModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: 'me' }),
+    ));
+  });
+
+  it('unchecking "My models only" clears ?owner= and refetches without it', async () => {
+    renderAt('/?owner=me');
+    await waitFor(() => expect(mockModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: 'me' }),
+    ));
+    const checkbox = screen.getByRole('checkbox', { name: /my models only/i }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    mockModelsList.mockClear();
+
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      const call = mockModelsList.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      expect(call.owner).toBeUndefined();
+    });
+  });
+
   it('debounces search input into ?q= and the fetch, rather than firing per keystroke', async () => {
     renderAt('/');
     await waitFor(() => expect(mockModelsList).toHaveBeenCalled());

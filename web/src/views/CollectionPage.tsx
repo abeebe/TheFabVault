@@ -6,6 +6,8 @@ import { ModelCard } from '../components/ModelCard.js';
 import { ModelPicker } from '../components/ModelPicker.js';
 import { Modal } from '../components/Modal.js';
 import { Spinner } from '../components/Spinner.js';
+import { useMe } from '../hooks/useMe.js';
+import { isOwnerOrAdmin } from '../lib/permissions.js';
 import { api } from '../lib/api.js';
 import type { ModelOut } from '../lib/api.js';
 
@@ -21,12 +23,16 @@ import type { ModelOut } from '../lib/api.js';
 // (everywhere that isn't a button) still passes clicks through to the
 // card underneath; only the buttons re-enable pointer-events.
 function CollectionModelTile({
-  model, isFirst, isLast, isCover, onMoveUp, onMoveDown, onToggleCover, onRemove,
+  model, isFirst, isLast, isCover, canEdit, onMoveUp, onMoveDown, onToggleCover, onRemove,
 }: {
   model: ModelOut;
   isFirst: boolean;
   isLast: boolean;
   isCover: boolean;
+  // Membership mutations (reorder/cover/remove) are owner-or-admin only
+  // on the COLLECTION, same rule as everything else gated in this file --
+  // see CollectionPage's own `canEdit` for the full rationale.
+  canEdit: boolean;
   onMoveUp: () => void;
   onMoveDown: () => void;
   onToggleCover: () => void;
@@ -35,42 +41,44 @@ function CollectionModelTile({
   return (
     <div className="relative group/tile">
       <ModelCard model={model} />
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-2 left-2 flex gap-1 opacity-0 group-hover/tile:opacity-100 transition-opacity pointer-events-auto">
-          <button
-            onClick={onMoveUp}
-            disabled={isFirst}
-            title="Move earlier"
-            className="p-1 rounded bg-black/50 text-white hover:bg-black/70 disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            <ArrowUp size={12} />
-          </button>
-          <button
-            onClick={onMoveDown}
-            disabled={isLast}
-            title="Move later"
-            className="p-1 rounded bg-black/50 text-white hover:bg-black/70 disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            <ArrowDown size={12} />
-          </button>
+      {canEdit && (
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute top-2 left-2 flex gap-1 opacity-0 group-hover/tile:opacity-100 transition-opacity pointer-events-auto">
+            <button
+              onClick={onMoveUp}
+              disabled={isFirst}
+              title="Move earlier"
+              className="p-1 rounded bg-black/50 text-white hover:bg-black/70 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <ArrowUp size={12} />
+            </button>
+            <button
+              onClick={onMoveDown}
+              disabled={isLast}
+              title="Move later"
+              className="p-1 rounded bg-black/50 text-white hover:bg-black/70 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <ArrowDown size={12} />
+            </button>
+          </div>
+          <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 group-hover/tile:opacity-100 transition-opacity pointer-events-auto">
+            <button
+              onClick={onToggleCover}
+              title={isCover ? 'Cover image (click to clear)' : 'Set as cover'}
+              className={`p-1 rounded ${isCover ? 'bg-accent text-white' : 'bg-black/50 text-white hover:bg-black/70'}`}
+            >
+              <Star size={12} className={isCover ? 'fill-current' : ''} />
+            </button>
+            <button
+              onClick={onRemove}
+              title="Remove from collection"
+              className="p-1 rounded bg-black/50 text-white hover:bg-red-600"
+            >
+              <X size={12} />
+            </button>
+          </div>
         </div>
-        <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 group-hover/tile:opacity-100 transition-opacity pointer-events-auto">
-          <button
-            onClick={onToggleCover}
-            title={isCover ? 'Cover image (click to clear)' : 'Set as cover'}
-            className={`p-1 rounded ${isCover ? 'bg-accent text-white' : 'bg-black/50 text-white hover:bg-black/70'}`}
-          >
-            <Star size={12} className={isCover ? 'fill-current' : ''} />
-          </button>
-          <button
-            onClick={onRemove}
-            title="Remove from collection"
-            className="p-1 rounded bg-black/50 text-white hover:bg-red-600"
-          >
-            <X size={12} />
-          </button>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -90,6 +98,7 @@ export function CollectionPage() {
   const navigate = useNavigate();
   const { collection, loading, error, refresh, update, removeModel, addModels, reorderModels, setCover } =
     useCollection(id ?? null);
+  const { me } = useMe();
 
   const [editingName, setEditingName] = useState(false);
   const [editingDesc, setEditingDesc] = useState(false);
@@ -162,6 +171,12 @@ export function CollectionPage() {
   }
 
   const existingModelIds = new Set(collection.models.map((m) => m.id));
+  // Name/description edit, add-models, delete, and per-member reorder/
+  // cover/remove are owner-or-admin only on the COLLECTION (same rule as
+  // ModelPage's `canEdit`, see lib/permissions.ts) -- any member can
+  // still create their own collection (CollectionsPage, unchanged); this
+  // only gates mutating someone else's.
+  const canEdit = isOwnerOrAdmin(collection.ownerId, me);
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-surface">
@@ -184,11 +199,11 @@ export function CollectionPage() {
               />
             ) : (
               <h1
-                className="text-xl font-bold text-gray-900 dark:text-gray-100 cursor-pointer hover:text-accent flex items-center gap-2 group flex-wrap"
-                onClick={() => { setNameVal(collection.name); setEditingName(true); }}
+                className={`text-xl font-bold text-gray-900 dark:text-gray-100 flex items-center gap-2 group flex-wrap ${canEdit ? 'cursor-pointer hover:text-accent' : ''}`}
+                onClick={canEdit ? () => { setNameVal(collection.name); setEditingName(true); } : undefined}
               >
                 {collection.name}
-                <Pencil size={14} className="opacity-0 group-hover:opacity-100 text-gray-400" />
+                {canEdit && <Pencil size={14} className="opacity-0 group-hover:opacity-100 text-gray-400" />}
                 <span className="text-sm font-normal text-gray-400 ml-1">
                   ({collection.modelCount} model{collection.modelCount === 1 ? '' : 's'})
                 </span>
@@ -207,29 +222,33 @@ export function CollectionPage() {
               />
             ) : (
               <p
-                className="mt-1 text-sm text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 group flex items-center gap-1"
-                onClick={() => { setDescVal(collection.description ?? ''); setEditingDesc(true); }}
+                className={`mt-1 text-sm text-gray-500 dark:text-gray-400 group flex items-center gap-1 ${canEdit ? 'cursor-pointer hover:text-gray-700 dark:hover:text-gray-200' : ''}`}
+                onClick={canEdit ? () => { setDescVal(collection.description ?? ''); setEditingDesc(true); } : undefined}
               >
                 {collection.description || <span className="italic text-gray-300 dark:text-gray-600">Add description…</span>}
-                <Pencil size={12} className="opacity-0 group-hover:opacity-100" />
+                {canEdit && <Pencil size={12} className="opacity-0 group-hover:opacity-100" />}
               </p>
             )}
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0">
-            <button
-              onClick={() => setPickerOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-            >
-              <Plus size={14} /> Add models
-            </button>
-            <button
-              onClick={() => setConfirmDelete(true)}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-              title="Delete collection"
-            >
-              <Trash2 size={15} />
-            </button>
+            {canEdit && (
+              <>
+                <button
+                  onClick={() => setPickerOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <Plus size={14} /> Add models
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(true)}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+                  title="Delete collection"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -250,6 +269,7 @@ export function CollectionPage() {
                 isFirst={i === 0}
                 isLast={i === collection.models.length - 1}
                 isCover={collection.coverModelId === model.id}
+                canEdit={canEdit}
                 onMoveUp={() => handleMove(i, -1)}
                 onMoveDown={() => handleMove(i, 1)}
                 onToggleCover={() => handleToggleCover(model.id)}
