@@ -7,6 +7,8 @@ import { useTheme } from '../hooks/useTheme.js';
 import { VaultPage } from '../views/VaultPage.js';
 import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
+import { CollectionsPage } from '../views/CollectionsPage.js';
+import { CollectionPage } from '../views/CollectionPage.js';
 
 interface Props {
   logout: () => void;
@@ -59,6 +61,14 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 // state, so keeping both would just be two ways to reach the same
 // underlying view. Old bookmarks/links to /library still land somewhere
 // correct.
+//
+// Collections (#2169, Phase B3): added between Browse and Vault --
+// Browse/Collections are both "find something" surfaces (discovery by
+// search vs. by curated grouping), so they sit together before Vault/
+// Projects, which are "manage what's here" surfaces. /collections/:id
+// is a nested route the same way /models/:id is -- ModelPage/CollectionPage
+// are both top-level routed pages, not something embedded in VaultPage's
+// sidebar-driven view-switching the way SetView is.
 export function AppShell({ logout, authRequired }: Props) {
   const { theme, cycleTheme } = useTheme();
 
@@ -66,6 +76,7 @@ export function AppShell({ logout, authRequired }: Props) {
     <div className="flex flex-col h-screen">
       <nav className="flex items-center gap-1 px-3 py-1.5 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
         <NavLink to="/" end className={navLinkClass}>Browse</NavLink>
+        <NavLink to="/collections" className={navLinkClass}>Collections</NavLink>
         <NavLink to="/vault" className={navLinkClass}>Vault</NavLink>
         <NavLink to="/vault" className={navLinkClass}>Projects</NavLink>
         <div className="flex-1" />
@@ -87,6 +98,8 @@ export function AppShell({ logout, authRequired }: Props) {
           <Route path="/vault" element={<VaultPage />} />
           <Route path="/library" element={<Navigate to="/" replace />} />
           <Route path="/models/:id" element={<ModelPage />} />
+          <Route path="/collections" element={<CollectionsPage />} />
+          <Route path="/collections/:id" element={<CollectionPage />} />
         </Routes>
       </div>
 

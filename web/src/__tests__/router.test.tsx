@@ -21,6 +21,8 @@ const mockAssetsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [
 const mockModelsList = vi.fn((..._args: unknown[]) => Promise.resolve({ items: [] as unknown[], total: 0 }));
 const mockModelGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as ModelDetailOut));
 const mockCategoriesList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+const mockCollectionsList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+const mockCollectionGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as unknown));
 
 const emptyModelDetail: ModelDetailOut = {
   id: 'abc123', title: 'Widget X', description: null, categoryId: null, tags: [],
@@ -60,6 +62,12 @@ vi.mock('../lib/api.js', () => ({
     categories: {
       list: (...args: unknown[]) => mockCategoriesList(...args),
     },
+    collections: {
+      list: (...args: unknown[]) => mockCollectionsList(...args),
+      get: (...args: unknown[]) => mockCollectionGet(...args),
+      create: () => Promise.resolve({ id: 'newcol1' }),
+      coverThumbUrl: () => null,
+    },
   },
 }));
 
@@ -73,6 +81,13 @@ beforeEach(() => {
   mockModelGet.mockImplementation(() => Promise.resolve(emptyModelDetail));
   mockCategoriesList.mockClear();
   mockCategoriesList.mockImplementation(() => Promise.resolve([]));
+  mockCollectionsList.mockClear();
+  mockCollectionsList.mockImplementation(() => Promise.resolve([]));
+  mockCollectionGet.mockClear();
+  mockCollectionGet.mockImplementation(() => Promise.resolve({
+    id: 'col1', name: 'My Collection', description: null, ownerId: null, visibility: 'public',
+    coverModelId: null, coverThumbUrl: null, modelCount: 0, createdAt: 0, models: [],
+  }));
   // Pin an explicit theme so useTheme's 'system' default doesn't depend on
   // matchMedia support in the test environment.
   localStorage.setItem('mv_theme', 'light');
@@ -124,8 +139,26 @@ describe('AppShell routing', () => {
   it('renders the persistent nav switch on every route', () => {
     renderAt('/vault');
     expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Collections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Vault' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
+  });
+
+  // #2169 (Phase B3): Collections list + detail added as top-level routes,
+  // same shape as Browse/ModelPage's own smoke coverage above -- confirms
+  // the route table wires the right view to the right path, not a deep
+  // test of CollectionsPage/CollectionPage's own behavior (see
+  // CollectionsPage.test.tsx / CollectionPage.test.tsx for that).
+  it('renders CollectionsPage at /collections', async () => {
+    renderAt('/collections');
+    expect(await screen.findByRole('button', { name: /new collection/i })).toBeTruthy();
+    expect(mockCollectionsList).toHaveBeenCalled();
+  });
+
+  it('renders CollectionPage at /collections/:id with the id threaded through to the fetch', async () => {
+    renderAt('/collections/col1');
+    expect(await screen.findByText('My Collection')).toBeTruthy();
+    expect(mockCollectionGet).toHaveBeenCalledWith('col1');
   });
 
   // Nav affordances (#2168): theme toggle + logout used to live in
@@ -136,7 +169,7 @@ describe('AppShell routing', () => {
   // move) -- theme toggle isn't conditional, so it's checked at every path
   // regardless.
   describe('theme toggle + logout render on every route (#2168 nav restructure)', () => {
-    it.each(['/', '/vault', '/models/abc123'])('on %s', async (path) => {
+    it.each(['/', '/vault', '/models/abc123', '/collections'])('on %s', async (path) => {
       renderAt(path, true);
       await waitFor(() => expect(screen.getByTitle(/^Theme:/)).toBeTruthy());
       expect(screen.getByTitle('Sign out')).toBeTruthy();

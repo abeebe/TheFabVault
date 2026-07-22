@@ -11,6 +11,8 @@ import { AssetPicker } from '../components/AssetPicker.js';
 import { TagInput, TagBadge } from '../components/TagInput.js';
 import { Modal } from '../components/Modal.js';
 import { Spinner } from '../components/Spinner.js';
+import { LikeButton } from '../components/LikeButton.js';
+import { AddToCollectionMenu } from '../components/AddToCollectionMenu.js';
 import { renderMarkdown, isSafeUrl } from '../lib/markdown.js';
 import { buildCategoryOptions } from '../lib/categoryTree.js';
 import { api } from '../lib/api.js';
@@ -483,6 +485,7 @@ export function ModelPage() {
                 {model.visibility === 'private' ? <Lock size={10} /> : <Globe size={10} />}
                 {model.visibility}
               </span>
+              <LikeButton modelId={model.id} likeCount={model.likeCount} likedByMe={model.likedByMe} size="md" />
             </h1>
             <div className="flex flex-wrap gap-1 mt-1.5">
               {model.tags.map((t) => <TagBadge key={t} tag={t} />)}
@@ -492,13 +495,16 @@ export function ModelPage() {
             </div>
           </div>
 
-          <button
-            onClick={() => setConfirmDeleteOpen(true)}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 shrink-0"
-            title="Delete model"
-          >
-            <Trash2 size={15} />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <AddToCollectionMenu modelId={model.id} />
+            <button
+              onClick={() => setConfirmDeleteOpen(true)}
+              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+              title="Delete model"
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}

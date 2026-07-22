@@ -591,6 +591,17 @@ export const api = {
     // back server-side to the first member model with a usable thumb).
     setCover: (id: string, modelId: string | null): Promise<CollectionOut> =>
       apiFetch(`/collection/${id}/cover`, { method: 'PATCH', body: JSON.stringify({ modelId }) }),
+
+    // Additive convenience (B3, #2169) -- same token-appending treatment
+    // as models.coverThumbUrl above; CollectionOut.coverThumbUrl is a raw
+    // path (same shape as AssetOut.thumbUrl/ModelOut.coverThumbUrl) that
+    // needs the auth-token query param to actually load.
+    coverThumbUrl: (collection: CollectionOut): string | null => {
+      if (!collection.coverThumbUrl) return null;
+      const token = getToken();
+      const base = `${API_BASE}${collection.coverThumbUrl}`;
+      return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    },
   },
 
   folders: {

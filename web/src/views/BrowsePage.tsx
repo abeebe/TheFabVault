@@ -19,20 +19,22 @@ const PAGE_SIZE = 60;
 // search input.
 const SEARCH_DEBOUNCE_MS = 300;
 
-// Phase B scope (#2168 ticket): only two sort options ship now -- "likes"
-// is explicitly deferred until B1 (#2167, collections/likes API) merges;
-// wiring it in ahead of that would mean shipping a sort value the API
-// can't yet satisfy. Values match ModelListParams['sort'] so no
-// translation layer is needed between URL state and the fetch params.
-type BrowseSort = 'date_desc' | 'name_asc';
+// Phase B scope (#2168 ticket originally shipped only date_desc/name_asc
+// -- "likes" was explicitly deferred until B1, #2167, collections/likes
+// API, merged). B1 is now in main (#2169 routing brief), so "Most liked"
+// is added here as a small in-scope rider rather than its own ticket.
+// Values match ModelListParams['sort'] so no translation layer is needed
+// between URL state and the fetch params.
+type BrowseSort = 'date_desc' | 'name_asc' | 'likes';
 const DEFAULT_SORT: BrowseSort = 'date_desc';
 const SORT_OPTIONS: Array<{ value: BrowseSort; label: string }> = [
   { value: 'date_desc', label: 'Newest' },
   { value: 'name_asc', label: 'Title A→Z' },
+  { value: 'likes', label: 'Most liked' },
 ];
 
 function isBrowseSort(value: string | null): value is BrowseSort {
-  return value === 'date_desc' || value === 'name_asc';
+  return value === 'date_desc' || value === 'name_asc' || value === 'likes';
 }
 
 // Browse landing page (#2168, Phase B) -- the new / route. Search-first:
