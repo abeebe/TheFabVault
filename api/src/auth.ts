@@ -15,6 +15,15 @@ export interface JwtPayload {
 // against the classic RS256/HS256 key-confusion attack.
 const JWT_ALGORITHMS: jwt.Algorithm[] = ['HS256'];
 
+// Deliberately still just `{ sub: username }` — no role/id/disabled claim
+// was added for Phase D (#2177), on purpose. role and disabled are always
+// read from the live `users` row on every request (requireAuth/
+// requireAdmin below), never trusted off the token itself. That is
+// exactly why disabling a user or demoting an admin takes effect on their
+// very next request instead of waiting for the JWT to expire (config.jwtTtl
+// can be hours) — baking role/disabled into the claims would reintroduce
+// that staleness window. Do not add either claim without re-deriving this
+// property some other way first.
 export function createToken(username: string): string {
   return jwt.sign({ sub: username }, getJwtSecret(), {
     expiresIn: config.jwtTtl,
@@ -65,7 +74,14 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   // getUserByUsername fails closed (returns null on any DB error), so a
   // transient SQLite hiccup denies the request rather than granting it.
   const user = getUserByUsername(decoded.sub);
-  if (!user) {
+  if (!user || user.disabled) {
+    // Same response for "no such user" and "disabled user" — don't leak
+    // which one it is. This re-fetch happens on every request (there is
+    // no session/claims cache), so an admin flipping `disabled` to 1
+    // (routes/users.ts PATCH) revokes every existing JWT for that user
+    // immediately — the token itself never encodes role/disabled state
+    // (see createToken's comment), so there is nothing to revoke except
+    // by re-checking the live row, which this already does.
     res.status(401).json({ error: 'Invalid or expired token' });
     return;
   }
@@ -78,11 +94,12 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 /**
- * Same token-validity + live-user check as requireAuth, plus role ===
- * 'admin'. The schema only allows 'admin' today (CHECK constraint), so
- * this is currently equivalent to requireAuth's user-existence check —
- * kept as an explicit, separate check so a future multi-role pass
- * doesn't silently grant admin to a new non-admin role by omission.
+ * Same token-validity + live-user check as requireAuth (including the
+ * disabled-user re-fetch below), plus role === 'admin'. As of migration
+ * v15 / Phase D (#2177) the schema genuinely allows a non-admin 'member'
+ * role, so this check is no longer a formality — it is what keeps a
+ * member out of every admin-only route (mounts config, routes/users.ts,
+ * etc.).
  */
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const token = extractToken(req);
@@ -100,8 +117,12 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
+  // Same fail-closed disabled check as requireAuth — see that function's
+  // comment for why this re-fetch is what makes disabling a user (or, via
+  // the role check just below, demoting an admin) take effect on the very
+  // next request rather than waiting out the token's TTL.
   const user = getUserByUsername(decoded.sub);
-  if (!user) {
+  if (!user || user.disabled) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return;
   }
