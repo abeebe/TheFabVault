@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { FileBox, Lock } from 'lucide-react';
 import { api } from '../lib/api.js';
+import { LikeButton } from './LikeButton.js';
 import type { ModelOut } from '../lib/api.js';
 
 interface ModelCardProps {
@@ -64,6 +65,12 @@ export function ModelCard({ model }: ModelCardProps) {
             </p>
           )}
         </div>
+        <LikeButton
+          modelId={model.id}
+          likeCount={model.likeCount}
+          likedByMe={model.likedByMe}
+          className="self-start -ml-1.5"
+        />
       </div>
     </Link>
   );

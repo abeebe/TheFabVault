@@ -129,6 +129,19 @@ describe('BrowsePage param round-trip (URL <-> state)', () => {
     ));
   });
 
+  // #2169 rider (per the routing brief): "likes" sort was deferred out of
+  // #2168's scope pending B1 (#2167, collections/likes API); now that B1
+  // is in main, it's added as a third sort option here.
+  it('supports the "likes" sort option now that B1 has shipped', async () => {
+    renderAt('/?sort=likes');
+
+    const select = screen.getByRole('combobox') as HTMLSelectElement;
+    expect(select.value).toBe('likes');
+    await waitFor(() => expect(mockModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ sort: 'likes' }),
+    ));
+  });
+
   it('debounces search input into ?q= and the fetch, rather than firing per keystroke', async () => {
     renderAt('/');
     await waitFor(() => expect(mockModelsList).toHaveBeenCalled());

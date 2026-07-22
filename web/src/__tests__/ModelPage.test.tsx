@@ -22,10 +22,21 @@ vi.mock('../lib/api.js', () => ({
     models: {
       get: (...args: unknown[]) => mockGet(...args),
       downloadUrl: () => '',
+      like: () => Promise.resolve({ likeCount: 1, likedByMe: true }),
+      unlike: () => Promise.resolve({ likeCount: 0, likedByMe: false }),
     },
     assets: {
       thumbUrl: () => null,
       fileUrl: () => '',
+    },
+    // AddToCollectionMenu (#2169) mounts useCollections on every ModelPage
+    // render (to populate its popover), independent of whether the menu
+    // is ever opened -- stubbed here so that mount doesn't 404 against an
+    // undefined api.collections and spam console.error in every test in
+    // this file, none of which touch collections behavior themselves
+    // (see AddToCollectionMenu.test.tsx / useCollections.test.ts for that).
+    collections: {
+      list: () => Promise.resolve([]),
     },
   },
 }));

@@ -28,6 +28,11 @@ vi.mock('../lib/api.js', () => ({
     categories: {
       list: (...args: unknown[]) => mockCategoriesList(...args),
     },
+    // Same reasoning as ModelPage.test.tsx's stub (#2169): AddToCollectionMenu
+    // mounts useCollections unconditionally on every ModelPage render.
+    collections: {
+      list: () => Promise.resolve([]),
+    },
   },
 }));
 
