@@ -228,6 +228,63 @@ describe('extractZip — Critical fix: malformed/ordinary entries no longer cras
   });
 });
 
+// Vera's security review, #2172 catch-triage follow-up (MEDIUM, found by
+// attacking the prior fix round): the earlier try/catch treated every
+// caught fs error identically -- skip this entry, keep going -- which
+// silently absorbed a genuinely ENVIRONMENTAL failure (disk full, quota,
+// permission denied) as "some entries were skipped," no signal it ever
+// happened. These tests pin BOTH directions of the fixed triage: an
+// entry-SHAPE problem (collision, already covered above) still skips;
+// an ENVIRONMENTAL problem fails the whole extraction loudly.
+describe('extractZip — catch-triage fix: entry-shape errors skip, environmental errors fail loud', () => {
+  it('an EACCES from a permission-locked destination directory fails the WHOLE extraction with a clear error, not a silent skip', async () => {
+    const { mod, dataDir } = await loadModule();
+    const destDir = path.join(dataDir, 'dest-eacces');
+    const locked = path.join(destDir, 'locked');
+    fs.mkdirSync(locked, { recursive: true });
+    fs.chmodSync(locked, 0o000); // no read/write/execute -- stand-in for Vera's ENOSPC/EDQUOT repro class
+
+    try {
+      const zipPath = path.join(dataDir, 'eacces.zip');
+      fs.writeFileSync(zipPath, buildRawZip([
+        { name: 'locked/file.stl', content: 'this needs the locked dir to accept a write' },
+        { name: 'fine.txt', content: 'ok' },
+      ]));
+
+      await expect(mod.extractZip(zipPath, destDir)).rejects.toThrow(/locked\/file\.stl/);
+    } finally {
+      // Restore permissions before the shared afterEach's recursive rm,
+      // so cleanup doesn't itself get blocked by the lock this test set up.
+      fs.chmodSync(locked, 0o755);
+    }
+  });
+
+  it('a synthetic error with an unrecognized code also fails loud -- proves the allowlist is a true allowlist, not merely "not EACCES"', async () => {
+    const { mod, dataDir } = await loadModule();
+    const destDir = path.join(dataDir, 'dest-unclassified');
+    fs.mkdirSync(destDir, { recursive: true });
+    const zipPath = path.join(dataDir, 'unclassified.zip');
+    fs.writeFileSync(zipPath, buildRawZip([{ name: 'ordinary.stl', content: 'nothing wrong with this path at all' }]));
+
+    // Force the very first fs call the entry handler makes
+    // (mkdirSync(dirname(dest))) to throw a code that is neither an
+    // entry-shape code NOR a real-world environmental one this test can
+    // easily reproduce live -- isolating the assertion to "is the
+    // allowlist actually narrow" rather than "does EACCES happen to work."
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementationOnce(() => {
+      const err = new Error('synthetic unrecognized failure') as NodeJS.ErrnoException;
+      err.code = 'EWEIRDUNKNOWNCODE';
+      throw err;
+    });
+
+    try {
+      await expect(mod.extractZip(zipPath, destDir)).rejects.toThrow(/ordinary\.stl/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('extractZip — MEDIUM fix: entry-count cap', () => {
   it('rejects a zip whose entry count exceeds MAX_ZIP_ENTRIES, even though every entry is zero bytes', async () => {
     const { mod, dataDir } = await loadModule();

@@ -229,6 +229,34 @@ function openZip(zipPath: string): Promise<yauzl.ZipFile> {
 // re-run every target through resolveContainedPath first, with the same
 // rigor as file entries get here -- see the regression test in
 // zipImportDraft.test.ts pinning the current (safe) behavior.
+// Error-code triage for the per-entry try/catch below (Vera's security
+// review, #2172 catch-triage follow-up, MEDIUM -- found by attacking the
+// prior fix round). The earlier fix treated every caught error the same
+// way -- skip this one entry, keep going -- which silently absorbed a
+// genuinely ENVIRONMENTAL failure (disk full, quota exceeded, permission
+// denied) as if it were just one more malformed entry. That's the wrong
+// call: dataDir shares its disk with the production SQLite DB (see this
+// file's header), so a household running low on space deserves a loud,
+// clear extraction failure, not a plan quietly missing some files with
+// no signal why. This set is deliberately narrow and code-based, listing
+// only the codes that mean "this ONE entry's path/name is unwritable for
+// a reason baked into the entry itself" -- everything else, INCLUDING
+// any code this set doesn't recognize, aborts the whole extraction
+// (fail-closed on observability, not fail-open: an unclassified error is
+// treated as a signal something is wrong with the environment, not
+// shrugged off as another bad filename).
+const SKIP_ENTRY_ERROR_CODES = new Set([
+  'EEXIST', // mkdirSync where a FILE already sits at that path
+  'ENOTDIR', // a path component that should be a directory is a file
+  'EISDIR', // a DIRECTORY already sits where a file entry wants to write (both the real syscall code and the synthetic code this module attaches to its own pre-check error just below)
+  'ERR_INVALID_ARG_VALUE', // NUL byte or similarly malformed path string (belt-and-suspenders -- resolveContainedPath already rejects NUL bytes before reaching here)
+]);
+
+function isSkippableEntryError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code !== undefined && SKIP_ENTRY_ERROR_CODES.has(code);
+}
+
 export async function extractZip(zipPath: string, destDir: string): Promise<RawZipEntry[]> {
   const entries: RawZipEntry[] = [];
   const zipfile = await openZip(zipPath);
@@ -248,32 +276,38 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       resolve();
     };
 
-    // Logs and moves on to the next entry rather than failing the whole
-    // extraction — the per-entry skip path (Vera's security review,
-    // #2172 follow-up, CRITICAL finding). Every fs call inside the
-    // 'entry' handler below used to be an unguarded synchronous call;
-    // yauzl invokes that handler from its own internal fs-read callback
-    // chain, outside this Promise executor's own call stack, so a throw
-    // there was a true UNCAUGHT exception -- not a rejected promise, not
-    // caught by this function's fail()/reject() at all. Confirmed two
-    // independent, no-exotic-bytes-required triggers: a NUL byte in an
-    // entry name (fs.mkdirSync/fs.createWriteStream both throw
-    // ERR_INVALID_ARG_VALUE synchronously) and an ordinary file/directory
-    // name collision, e.g. "foo" as a file followed by "foo/bar.stl"
-    // implying foo must be a directory (fs.mkdirSync throws EEXIST
-    // synchronously). Both are full-process crashes via
-    // processGuards.ts's uncaughtException handler (#2044) — a single
-    // authenticated upload, no auth bypass, no cleverness, malformed
-    // zips included, not just malicious ones. NUL bytes are additionally
-    // rejected a layer earlier by resolveContainedPath itself (never
-    // reaching these calls at all); this catch is the backstop for that
-    // AND the true belt-and-suspenders case a path-level check can't
-    // characterize at all: an ordinary collision between two otherwise
-    // perfectly legal entry names.
-    function skipEntry(context: string, err: unknown): void {
+    // Triages a caught fs error from the per-entry handler below (Vera's
+    // security review, #2172 follow-up, CRITICAL finding + catch-triage
+    // follow-up MEDIUM finding). Every fs call inside the 'entry' handler
+    // used to be an unguarded synchronous call; yauzl invokes that
+    // handler from its own internal fs-read callback chain, outside this
+    // Promise executor's own call stack, so a throw there was a true
+    // UNCAUGHT exception -- not a rejected promise, not caught by this
+    // function's fail()/reject() at all. Confirmed crash triggers: a NUL
+    // byte in an entry name (ERR_INVALID_ARG_VALUE) and an ordinary
+    // file/directory name collision, e.g. "foo" as a file followed by
+    // "foo/bar.stl" implying foo must be a directory (EEXIST). Both are
+    // full-process crashes via processGuards.ts's uncaughtException
+    // handler (#2044) — a single authenticated upload, no auth bypass,
+    // no cleverness, malformed zips included, not just malicious ones.
+    //
+    // Catching the exception was only half the fix: whether to SKIP just
+    // this entry (entry-shape problem, see SKIP_ENTRY_ERROR_CODES above)
+    // or FAIL the whole extraction (environmental problem -- disk full,
+    // quota, permissions) is decided here, not assumed. Skipping
+    // everything uniformly is what let a genuine ENOSPC/EACCES silently
+    // absorb as "some entries skipped" with zero signal it ever
+    // happened -- exactly the disk-fill scenario this file's own header
+    // comment already worries about (dataDir shares its disk with the
+    // production SQLite DB).
+    function handleEntryFsError(fileName: string, err: unknown): void {
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[zipImportDraft] Skipping unwritable entry (${context}): ${message}`);
-      zipfile.readEntry();
+      if (isSkippableEntryError(err)) {
+        console.warn(`[zipImportDraft] Skipping unwritable entry (${fileName}): ${message}`);
+        zipfile.readEntry();
+        return;
+      }
+      fail(new Error(`Zip extraction aborted -- unexpected error on entry "${fileName}": ${message}`));
     }
 
     zipfile.on('error', fail);
@@ -321,7 +355,7 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
         try {
           fs.mkdirSync(dest, { recursive: true });
         } catch (err) {
-          skipEntry(fileName, err);
+          handleEntryFsError(fileName, err);
           return;
         }
         zipfile.readEntry();
@@ -331,7 +365,7 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       try {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
       } catch (err) {
-        skipEntry(fileName, err);
+        handleEntryFsError(fileName, err);
         return;
       }
 
@@ -343,11 +377,14 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       // stream's own 'error' event (already wired to fail() below),
       // which is not a crash, but WOULD reject the whole extraction over
       // one bad entry, same problem this whole fix round exists to close
-      // for the synchronous cases. Checking for it explicitly here, same
-      // skip-this-entry treatment as every other unwritable-entry case
-      // above, keeps both collision directions symmetric.
+      // for the synchronous cases. Checking for it explicitly here, with
+      // an explicit code: 'EISDIR' so handleEntryFsError's triage
+      // classifies it the same as the real syscall error it's standing
+      // in for, keeps both collision directions symmetric.
       if (fs.existsSync(dest) && fs.statSync(dest).isDirectory()) {
-        skipEntry(fileName, new Error(`refusing to overwrite an existing directory with a file: ${fileName}`));
+        const collisionErr = new Error(`refusing to overwrite an existing directory with a file: ${fileName}`) as NodeJS.ErrnoException;
+        collisionErr.code = 'EISDIR';
+        handleEntryFsError(fileName, collisionErr);
         return;
       }
 
@@ -355,7 +392,7 @@ export async function extractZip(zipPath: string, destDir: string): Promise<RawZ
       try {
         writeStream = fs.createWriteStream(dest);
       } catch (err) {
-        skipEntry(fileName, err);
+        handleEntryFsError(fileName, err);
         return;
       }
 
