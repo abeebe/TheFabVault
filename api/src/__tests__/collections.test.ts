@@ -14,8 +14,10 @@ import express from 'express';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
 import type { AddressInfo } from 'net';
 import type Database from 'better-sqlite3';
+import { hashPassword } from '../passwords.js';
 
 interface Booted {
   baseUrl: string;
@@ -106,6 +108,48 @@ async function createModel(app: Booted, title: string): Promise<{ id: string }> 
     body: JSON.stringify({ title }),
   });
   return (await res.json()) as { id: string };
+}
+
+// Real login, same convention as models.test.ts / modelImport.test.ts's
+// createMemberUser — kept as its own local copy per this suite's
+// established one-helper-per-test-file pattern.
+async function createMemberUser(app: Booted, username: string): Promise<{ token: string; userId: string }> {
+  const userId = uuidv4();
+  const password = 'correct-horse-battery-staple-2';
+  app.db.prepare(
+    "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, 'member')"
+  ).run(userId, username, hashPassword(password));
+
+  const loginRes = await fetch(`${app.baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (loginRes.status !== 200) throw new Error(`test setup: member login failed with ${loginRes.status}`);
+  const { token } = await loginRes.json() as { token: string };
+  return { token, userId };
+}
+
+async function createModelAs(
+  app: Booted, token: string, opts: { title: string; visibility?: 'public' | 'private' },
+): Promise<{ id: string; ownerId: string; visibility: string }> {
+  const res = await fetch(`${app.baseUrl}/models`, {
+    method: 'POST',
+    headers: jsonHeaders(token),
+    body: JSON.stringify({ title: opts.title, visibility: opts.visibility }),
+  });
+  return (await res.json()) as { id: string; ownerId: string; visibility: string };
+}
+
+async function createCollectionAs(
+  app: Booted, token: string, opts: { name: string; visibility?: 'public' | 'private'; modelIds?: string[] },
+): Promise<{ id: string; ownerId: string; visibility: string }> {
+  const res = await fetch(`${app.baseUrl}/collections`, {
+    method: 'POST',
+    headers: jsonHeaders(token),
+    body: JSON.stringify({ name: opts.name, visibility: opts.visibility, modelIds: opts.modelIds }),
+  });
+  return (await res.json()) as { id: string; ownerId: string; visibility: string };
 }
 
 describe('GET/POST /collections — list + create', () => {
@@ -403,5 +447,210 @@ describe('auth', () => {
     const app = await bootApp();
     const res = await fetch(`${app.baseUrl}/collections`);
     expect(res.status).toBe(401);
+  });
+});
+
+// ─── Visibility / ownership authz matrix (#2179, Phase D3) ────────────────────
+//
+// Same two-rule split as routes/models.ts's matrix (see that file's test
+// suite header): READ (visibility) governs list/detail; WRITE
+// (ownership) governs everything that mutates a collection or its
+// membership. The bootApp() seeded user (app.token) is always admin.
+describe('Visibility / ownership authz matrix (#2179)', () => {
+  it('GET /collections list — member sees public + own private, never another member\'s private; admin sees everything', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const aPublic = await createCollectionAs(app, memberA.token, { name: 'A Public', visibility: 'public' });
+    const aPrivate = await createCollectionAs(app, memberA.token, { name: 'A Private', visibility: 'private' });
+
+    const asB = await fetch(`${app.baseUrl}/collections`, { headers: bearer(memberB.token) });
+    const bIds = (await asB.json() as Array<{ id: string }>).map((c) => c.id);
+    expect(bIds).toContain(aPublic.id);
+    expect(bIds).not.toContain(aPrivate.id);
+
+    const asA = await fetch(`${app.baseUrl}/collections`, { headers: bearer(memberA.token) });
+    const aIds = (await asA.json() as Array<{ id: string }>).map((c) => c.id);
+    expect(aIds).toContain(aPublic.id);
+    expect(aIds).toContain(aPrivate.id);
+
+    const asAdmin = await fetch(`${app.baseUrl}/collections`, { headers: bearer(app.token) });
+    const adminIds = (await asAdmin.json() as Array<{ id: string }>).map((c) => c.id);
+    expect(adminIds).toContain(aPublic.id);
+    expect(adminIds).toContain(aPrivate.id);
+  });
+
+  it('GET /collection/:id detail — 404s a private collection for a non-owner, 200s a public one, 200s private for owner/admin', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const priv = await createCollectionAs(app, memberA.token, { name: 'Secret Collection', visibility: 'private' });
+    const pub = await createCollectionAs(app, memberA.token, { name: 'Open Collection', visibility: 'public' });
+
+    const privByB = await fetch(`${app.baseUrl}/collection/${priv.id}`, { headers: bearer(memberB.token) });
+    expect(privByB.status).toBe(404);
+
+    const pubByB = await fetch(`${app.baseUrl}/collection/${pub.id}`, { headers: bearer(memberB.token) });
+    expect(pubByB.status).toBe(200);
+
+    const privByOwner = await fetch(`${app.baseUrl}/collection/${priv.id}`, { headers: bearer(memberA.token) });
+    expect(privByOwner.status).toBe(200);
+
+    const privByAdmin = await fetch(`${app.baseUrl}/collection/${priv.id}`, { headers: bearer(app.token) });
+    expect(privByAdmin.status).toBe(200);
+  });
+
+  it('private-model-in-a-public-collection: a non-owner viewing GET /collection/:id sees only the visible member models, and modelCount reflects that filtered count (not the true total) — the stated decision', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const publicModel = await createModelAs(app, memberA.token, { title: 'Visible Part', visibility: 'public' });
+    const privateModel = await createModelAs(app, memberA.token, { title: 'Secret Part', visibility: 'private' });
+    const collection = await createCollectionAs(app, memberA.token, {
+      name: 'Mixed Collection', visibility: 'public', modelIds: [publicModel.id, privateModel.id],
+    });
+
+    const asB = await fetch(`${app.baseUrl}/collection/${collection.id}`, { headers: bearer(memberB.token) });
+    expect(asB.status).toBe(200);
+    const bBody = await asB.json() as { modelCount: number; models: Array<{ id: string; title: string }> };
+    expect(bBody.models.map((m) => m.id)).toEqual([publicModel.id]);
+    expect(bBody.models.map((m) => m.title)).not.toContain('Secret Part');
+    expect(bBody.modelCount).toBe(1);
+
+    // Owner and admin see the true total, including the private member.
+    const asOwner = await fetch(`${app.baseUrl}/collection/${collection.id}`, { headers: bearer(memberA.token) });
+    const ownerBody = await asOwner.json() as { modelCount: number; models: Array<{ id: string }> };
+    expect(ownerBody.models.map((m) => m.id).sort()).toEqual([privateModel.id, publicModel.id].sort());
+    expect(ownerBody.modelCount).toBe(2);
+
+    const asAdmin = await fetch(`${app.baseUrl}/collection/${collection.id}`, { headers: bearer(app.token) });
+    const adminBody = await asAdmin.json() as { modelCount: number };
+    expect(adminBody.modelCount).toBe(2);
+  });
+
+  it('GET /collections list — modelCount for the same mixed collection is consistent with the detail view per viewer (1 for a non-owner, 2 for owner/admin)', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const publicModel = await createModelAs(app, memberA.token, { title: 'Visible Part', visibility: 'public' });
+    const privateModel = await createModelAs(app, memberA.token, { title: 'Secret Part', visibility: 'private' });
+    const collection = await createCollectionAs(app, memberA.token, {
+      name: 'Mixed Collection', visibility: 'public', modelIds: [publicModel.id, privateModel.id],
+    });
+
+    const listAsB = await fetch(`${app.baseUrl}/collections`, { headers: bearer(memberB.token) });
+    const bRow = (await listAsB.json() as Array<{ id: string; modelCount: number }>).find((c) => c.id === collection.id)!;
+    expect(bRow.modelCount).toBe(1);
+
+    const listAsOwner = await fetch(`${app.baseUrl}/collections`, { headers: bearer(memberA.token) });
+    const ownerRow = (await listAsOwner.json() as Array<{ id: string; modelCount: number }>).find((c) => c.id === collection.id)!;
+    expect(ownerRow.modelCount).toBe(2);
+  });
+
+  it('PATCH /collection/:id — a non-owner member 404s editing even a PUBLIC collection; owner and admin succeed', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const collection = await createCollectionAs(app, memberA.token, { name: 'Open', visibility: 'public' });
+
+    const byB = await fetch(`${app.baseUrl}/collection/${collection.id}`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ name: 'Hijacked' }),
+    });
+    expect(byB.status).toBe(404);
+
+    const byOwner = await fetch(`${app.baseUrl}/collection/${collection.id}`, {
+      method: 'PATCH', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'Renamed' }),
+    });
+    expect(byOwner.status).toBe(200);
+
+    const byAdmin = await fetch(`${app.baseUrl}/collection/${collection.id}`, {
+      method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ name: 'Admin Renamed' }),
+    });
+    expect(byAdmin.status).toBe(200);
+  });
+
+  it('DELETE /collection/:id — a non-owner member 404s, owner succeeds, admin succeeds on another member\'s collection', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const ownColl = await createCollectionAs(app, memberA.token, { name: 'Mine', visibility: 'public' });
+
+    const byB = await fetch(`${app.baseUrl}/collection/${ownColl.id}`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(byB.status).toBe(404);
+
+    const byOwner = await fetch(`${app.baseUrl}/collection/${ownColl.id}`, { method: 'DELETE', headers: bearer(memberA.token) });
+    expect(byOwner.status).toBe(204);
+
+    const adminTarget = await createCollectionAs(app, memberA.token, { name: 'Admin Target', visibility: 'private' });
+    const byAdmin = await fetch(`${app.baseUrl}/collection/${adminTarget.id}`, { method: 'DELETE', headers: bearer(app.token) });
+    expect(byAdmin.status).toBe(204);
+  });
+
+  it('POST /collection/:id/models (add member) and DELETE .../model/:modelId (remove member) — 404 for a non-owner on a PUBLIC collection', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const collection = await createCollectionAs(app, memberA.token, { name: 'Open', visibility: 'public' });
+    const model = await createModel(app, 'Some Model');
+
+    const addByB = await fetch(`${app.baseUrl}/collection/${collection.id}/models`, {
+      method: 'POST', headers: jsonHeaders(memberB.token), body: JSON.stringify({ modelIds: [model.id] }),
+    });
+    expect(addByB.status).toBe(404);
+
+    // Owner adds it for real, then B tries to remove it.
+    await fetch(`${app.baseUrl}/collection/${collection.id}/models`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ modelIds: [model.id] }),
+    });
+    const removeByB = await fetch(`${app.baseUrl}/collection/${collection.id}/model/${model.id}`, {
+      method: 'DELETE', headers: bearer(memberB.token),
+    });
+    expect(removeByB.status).toBe(404);
+
+    const removeByOwner = await fetch(`${app.baseUrl}/collection/${collection.id}/model/${model.id}`, {
+      method: 'DELETE', headers: bearer(memberA.token),
+    });
+    expect(removeByOwner.status).toBe(204);
+  });
+
+  it('PATCH /collection/:id/models/reorder and PATCH .../cover — 404 for a non-owner on a PUBLIC collection', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const model = await createModel(app, 'M');
+    const collection = await createCollectionAs(app, memberA.token, { name: 'Open', visibility: 'public', modelIds: [model.id] });
+
+    const reorderByB = await fetch(`${app.baseUrl}/collection/${collection.id}/models/reorder`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ modelIds: [model.id] }),
+    });
+    expect(reorderByB.status).toBe(404);
+
+    const coverByB = await fetch(`${app.baseUrl}/collection/${collection.id}/cover`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ modelId: model.id }),
+    });
+    expect(coverByB.status).toBe(404);
+
+    const reorderByOwner = await fetch(`${app.baseUrl}/collection/${collection.id}/models/reorder`, {
+      method: 'PATCH', headers: jsonHeaders(memberA.token), body: JSON.stringify({ modelIds: [model.id] }),
+    });
+    expect(reorderByOwner.status).toBe(200);
+  });
+
+  it('single-admin UX does not regress: admin bypasses both the visibility fragment and the ownership check on every collection operation', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const priv = await createCollectionAs(app, memberA.token, { name: 'Admin Sees All', visibility: 'private' });
+
+    const listRes = await fetch(`${app.baseUrl}/collections`, { headers: bearer(app.token) });
+    const ids = (await listRes.json() as Array<{ id: string }>).map((c) => c.id);
+    expect(ids).toContain(priv.id);
+
+    const detailRes = await fetch(`${app.baseUrl}/collection/${priv.id}`, { headers: bearer(app.token) });
+    expect(detailRes.status).toBe(200);
+
+    const patchRes = await fetch(`${app.baseUrl}/collection/${priv.id}`, {
+      method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ name: 'Admin Edited' }),
+    });
+    expect(patchRes.status).toBe(200);
   });
 });

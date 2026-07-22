@@ -21,6 +21,7 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { AddressInfo } from 'net';
 import type Database from 'better-sqlite3';
+import { hashPassword } from '../passwords.js';
 
 interface Booted {
   baseUrl: string;
@@ -132,6 +133,41 @@ function insertFolder(app: Booted, name = 'Test Folder'): string {
   const id = uuidv4();
   app.db.prepare('INSERT INTO folders (id, name) VALUES (?, ?)').run(id, name);
   return id;
+}
+
+// Real login (not a bare createToken()) — same convention as
+// modelImport.test.ts's createMemberUser, kept as its own local copy
+// per this suite's established one-helper-file-per-router pattern
+// (auth.test.ts's own createToken re-export is the one place that
+// convention is broken, and only because it's specifically testing
+// token validity itself). role='member' matches the v15 schema default
+// (see enumValidators.ts's USER_ROLES / db.ts's users_new table-copy).
+async function createMemberUser(app: Booted, username: string): Promise<{ token: string; userId: string }> {
+  const userId = uuidv4();
+  const password = 'correct-horse-battery-staple-2';
+  app.db.prepare(
+    "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, 'member')"
+  ).run(userId, username, hashPassword(password));
+
+  const loginRes = await fetch(`${app.baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (loginRes.status !== 200) throw new Error(`test setup: member login failed with ${loginRes.status}`);
+  const { token } = await loginRes.json() as { token: string };
+  return { token, userId };
+}
+
+async function createModelAs(
+  app: Booted, token: string, opts: { title: string; visibility?: 'public' | 'private' },
+): Promise<{ id: string; ownerId: string; visibility: string }> {
+  const res = await fetch(`${app.baseUrl}/models`, {
+    method: 'POST',
+    headers: jsonHeaders(token),
+    body: JSON.stringify({ title: opts.title, visibility: opts.visibility }),
+  });
+  return (await res.json()) as { id: string; ownerId: string; visibility: string };
 }
 
 describe('GET/POST /models — list + create', () => {
@@ -893,5 +929,296 @@ describe('PUT/DELETE /model/:id/like — idempotency + count/likedByMe threading
     expect(items.find((m) => m.id === b.id)!.likeCount).toBe(2);
     expect(items.find((m) => m.id === c.id)!.likeCount).toBe(1);
     expect(items.find((m) => m.id === a.id)!.likeCount).toBe(0);
+  });
+});
+
+// ─── Visibility / ownership authz matrix (#2179, Phase D3) ────────────────────
+//
+// Two rules, kept deliberately distinct across this whole matrix:
+//   - READ (visibility): list / detail / download / like. Public rows
+//     visible to everyone; private rows to owner + admin only.
+//   - WRITE (ownership): edit / delete / file attach-detach-reorder-cover
+//     / print_profiles CRUD (including profiles' own GET — see that
+//     section's comment in routes/models.ts for why it's stricter than
+//     every other GET here). Owner + admin only, REGARDLESS of
+//     visibility — a public model is still not everyone's to edit.
+//
+// The seeded bootApp() user (app.token) is always admin (see
+// seedAdminIfNeeded in db.ts) — every "admin" case below rides that
+// existing token rather than minting a second admin, since there is
+// exactly one admin path to prove and it's already the default fixture.
+describe('Visibility / ownership authz matrix (#2179)', () => {
+  it('GET /models list — member sees public + own private, never another member\'s private; admin sees everything', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+
+    const aPublic = await createModelAs(app, memberA.token, { title: 'A Public', visibility: 'public' });
+    const aPrivate = await createModelAs(app, memberA.token, { title: 'A Private', visibility: 'private' });
+
+    const asB = await fetch(`${app.baseUrl}/models`, { headers: bearer(memberB.token) });
+    const bIds = (await asB.json() as { items: Array<{ id: string }> }).items.map((m) => m.id);
+    expect(bIds).toContain(aPublic.id);
+    expect(bIds).not.toContain(aPrivate.id);
+
+    const asA = await fetch(`${app.baseUrl}/models`, { headers: bearer(memberA.token) });
+    const aIds = (await asA.json() as { items: Array<{ id: string }> }).items.map((m) => m.id);
+    expect(aIds).toContain(aPublic.id);
+    expect(aIds).toContain(aPrivate.id);
+
+    const asAdmin = await fetch(`${app.baseUrl}/models`, { headers: bearer(app.token) });
+    const adminIds = (await asAdmin.json() as { items: Array<{ id: string }> }).items.map((m) => m.id);
+    expect(adminIds).toContain(aPublic.id);
+    expect(adminIds).toContain(aPrivate.id);
+  });
+
+  it('GET /model/:id detail — 404s a private model for a non-owner member, 200s for owner and admin', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const aPrivate = await createModelAs(app, memberA.token, { title: 'Secret', visibility: 'private' });
+
+    const asB = await fetch(`${app.baseUrl}/model/${aPrivate.id}`, { headers: bearer(memberB.token) });
+    expect(asB.status).toBe(404);
+
+    const asA = await fetch(`${app.baseUrl}/model/${aPrivate.id}`, { headers: bearer(memberA.token) });
+    expect(asA.status).toBe(200);
+
+    const asAdmin = await fetch(`${app.baseUrl}/model/${aPrivate.id}`, { headers: bearer(app.token) });
+    expect(asAdmin.status).toBe(200);
+  });
+
+  it('GET /model/:id detail — a PUBLIC model IS visible to a non-owner member', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const aPublic = await createModelAs(app, memberA.token, { title: 'Open', visibility: 'public' });
+
+    const asB = await fetch(`${app.baseUrl}/model/${aPublic.id}`, { headers: bearer(memberB.token) });
+    expect(asB.status).toBe(200);
+  });
+
+  it('PATCH /model/:id — a non-owner member 404s editing even a PUBLIC model (write rule beats read visibility)', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const aPublic = await createModelAs(app, memberA.token, { title: 'Open', visibility: 'public' });
+
+    const editByB = await fetch(`${app.baseUrl}/model/${aPublic.id}`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ title: 'Hijacked' }),
+    });
+    expect(editByB.status).toBe(404);
+
+    const editByOwner = await fetch(`${app.baseUrl}/model/${aPublic.id}`, {
+      method: 'PATCH', headers: jsonHeaders(memberA.token), body: JSON.stringify({ title: 'Renamed By Owner' }),
+    });
+    expect(editByOwner.status).toBe(200);
+
+    const editByAdmin = await fetch(`${app.baseUrl}/model/${aPublic.id}`, {
+      method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Renamed By Admin' }),
+    });
+    expect(editByAdmin.status).toBe(200);
+  });
+
+  it('DELETE /model/:id — a non-owner member 404s, owner and admin succeed', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const target = await createModelAs(app, memberA.token, { title: 'Delete Me', visibility: 'public' });
+
+    const byB = await fetch(`${app.baseUrl}/model/${target.id}`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(byB.status).toBe(404);
+
+    const byOwner = await fetch(`${app.baseUrl}/model/${target.id}`, { method: 'DELETE', headers: bearer(memberA.token) });
+    expect(byOwner.status).toBe(200);
+  });
+
+  it('DELETE /model/:id — admin can delete another member\'s model', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const target = await createModelAs(app, memberA.token, { title: 'Delete Me Too', visibility: 'private' });
+
+    const byAdmin = await fetch(`${app.baseUrl}/model/${target.id}`, { method: 'DELETE', headers: bearer(app.token) });
+    expect(byAdmin.status).toBe(200);
+  });
+
+  it('POST /model/:id/files, PATCH .../files/reorder, PATCH .../cover — all 404 for a non-owner member on a PUBLIC model', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const target = await createModelAs(app, memberA.token, { title: 'Open Model', visibility: 'public' });
+    const asset = insertAsset(app, { filename: 'part.stl' });
+
+    const attachRes = await fetch(`${app.baseUrl}/model/${target.id}/files`, {
+      method: 'POST', headers: jsonHeaders(memberB.token), body: JSON.stringify({ assetIds: [asset.id] }),
+    });
+    expect(attachRes.status).toBe(404);
+
+    const reorderRes = await fetch(`${app.baseUrl}/model/${target.id}/files/reorder`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ assetIds: [asset.id] }),
+    });
+    expect(reorderRes.status).toBe(404);
+
+    const coverRes = await fetch(`${app.baseUrl}/model/${target.id}/cover`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ assetId: null }),
+    });
+    expect(coverRes.status).toBe(404);
+
+    // Owner's own equivalent attach succeeds — proves the 404s above were
+    // ownership-specific, not a general breakage of these endpoints.
+    const attachByOwner = await fetch(`${app.baseUrl}/model/${target.id}/files`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ assetIds: [asset.id] }),
+    });
+    expect(attachByOwner.status).toBe(201);
+  });
+
+  it('DELETE /model/:id/file/:assetId — a non-owner member 404s detaching a file from a PUBLIC model', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const target = await createModelAs(app, memberA.token, { title: 'Open Model', visibility: 'public' });
+    const asset = insertAsset(app, { filename: 'part.stl' });
+    await fetch(`${app.baseUrl}/model/${target.id}/files`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ assetIds: [asset.id] }),
+    });
+
+    const detachByB = await fetch(`${app.baseUrl}/model/${target.id}/file/${asset.id}`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(detachByB.status).toBe(404);
+  });
+
+  it('GET /model/:id/download (zip) — 404s a private model for a non-owner, 200s a public model for a non-owner, 200s for owner/admin on private', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const priv = await createModelAs(app, memberA.token, { title: 'Private Zip', visibility: 'private' });
+    const pub = await createModelAs(app, memberA.token, { title: 'Public Zip', visibility: 'public' });
+
+    const privByB = await fetch(`${app.baseUrl}/model/${priv.id}/download`, { headers: bearer(memberB.token) });
+    expect(privByB.status).toBe(404);
+
+    const pubByB = await fetch(`${app.baseUrl}/model/${pub.id}/download`, { headers: bearer(memberB.token) });
+    expect(pubByB.status).toBe(200);
+
+    const privByOwner = await fetch(`${app.baseUrl}/model/${priv.id}/download`, { headers: bearer(memberA.token) });
+    expect(privByOwner.status).toBe(200);
+
+    const privByAdmin = await fetch(`${app.baseUrl}/model/${priv.id}/download`, { headers: bearer(app.token) });
+    expect(privByAdmin.status).toBe(200);
+  });
+
+  it('PUT/DELETE /model/:id/like — visibility rule, not ownership: any member can like a PUBLIC model they don\'t own; a private model 404s for a non-owner', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const pub = await createModelAs(app, memberA.token, { title: 'Likeable', visibility: 'public' });
+    const priv = await createModelAs(app, memberA.token, { title: 'Unlikeable', visibility: 'private' });
+
+    // B (non-owner) liking a public model they don't own — this is the
+    // whole point of likes, must succeed.
+    const likePub = await fetch(`${app.baseUrl}/model/${pub.id}/like`, { method: 'PUT', headers: bearer(memberB.token) });
+    expect(likePub.status).toBe(200);
+    expect((await likePub.json() as { likedByMe: boolean }).likedByMe).toBe(true);
+
+    const unlikePub = await fetch(`${app.baseUrl}/model/${pub.id}/like`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(unlikePub.status).toBe(200);
+
+    // B liking a private model they can't see — 404, existence-hiding.
+    const likePriv = await fetch(`${app.baseUrl}/model/${priv.id}/like`, { method: 'PUT', headers: bearer(memberB.token) });
+    expect(likePriv.status).toBe(404);
+
+    // The owner can like their own model (visible to themselves via the
+    // owner branch of the rule, not just the public branch).
+    const ownerLikesOwn = await fetch(`${app.baseUrl}/model/${priv.id}/like`, { method: 'PUT', headers: bearer(memberA.token) });
+    expect(ownerLikesOwn.status).toBe(200);
+  });
+
+  it('likeCount never reveals WHO liked a model — only a count, regardless of caller', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const pub = await createModelAs(app, memberA.token, { title: 'Popular', visibility: 'public' });
+    await fetch(`${app.baseUrl}/model/${pub.id}/like`, { method: 'PUT', headers: bearer(memberB.token) });
+
+    const detailAsA = await fetch(`${app.baseUrl}/model/${pub.id}`, { headers: bearer(memberA.token) });
+    const body = await detailAsA.json() as Record<string, unknown>;
+    expect(body.likeCount).toBe(1);
+    // No field anywhere in the payload names the liking user.
+    expect(JSON.stringify(body)).not.toContain(memberB.userId);
+  });
+
+  it('print_profiles CRUD (GET list, POST, PATCH, DELETE) all inherit the write rule — a non-owner 404s on every one, even GET, even on a PUBLIC model', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const target = await createModelAs(app, memberA.token, { title: 'Profiled', visibility: 'public' });
+
+    const createRes = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'PLA 0.2mm' }),
+    });
+    const profile = await createRes.json() as { id: string };
+
+    const listByB = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(memberB.token) });
+    expect(listByB.status).toBe(404);
+
+    const createByB = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, {
+      method: 'POST', headers: jsonHeaders(memberB.token), body: JSON.stringify({ name: 'Sneaky Profile' }),
+    });
+    expect(createByB.status).toBe(404);
+
+    const patchByB = await fetch(`${app.baseUrl}/profile/${profile.id}`, {
+      method: 'PATCH', headers: jsonHeaders(memberB.token), body: JSON.stringify({ notes: 'hijacked' }),
+    });
+    expect(patchByB.status).toBe(404);
+
+    const deleteByB = await fetch(`${app.baseUrl}/profile/${profile.id}`, { method: 'DELETE', headers: bearer(memberB.token) });
+    expect(deleteByB.status).toBe(404);
+
+    // Owner and admin can do all of the above.
+    const listByOwner = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(memberA.token) });
+    expect(listByOwner.status).toBe(200);
+    const listByAdmin = await fetch(`${app.baseUrl}/model/${target.id}/profiles`, { headers: bearer(app.token) });
+    expect(listByAdmin.status).toBe(200);
+
+    const patchByAdmin = await fetch(`${app.baseUrl}/profile/${profile.id}`, {
+      method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ notes: 'admin edit ok' }),
+    });
+    expect(patchByAdmin.status).toBe(200);
+
+    const deleteByOwner = await fetch(`${app.baseUrl}/profile/${profile.id}`, { method: 'DELETE', headers: bearer(memberA.token) });
+    expect(deleteByOwner.status).toBe(204);
+  });
+
+  it('GET /model/:id detail still embeds `profiles` for a PUBLIC model viewed by a non-owner (the standalone profiles endpoint is stricter, the embedded detail view is not — stated deviation)', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+    const target = await createModelAs(app, memberA.token, { title: 'Profiled Public', visibility: 'public' });
+    await fetch(`${app.baseUrl}/model/${target.id}/profiles`, {
+      method: 'POST', headers: jsonHeaders(memberA.token), body: JSON.stringify({ name: 'PLA 0.2mm' }),
+    });
+
+    const detailByB = await fetch(`${app.baseUrl}/model/${target.id}`, { headers: bearer(memberB.token) });
+    expect(detailByB.status).toBe(200);
+    const body = await detailByB.json() as { profiles: Array<{ name: string }> };
+    expect(body.profiles).toHaveLength(1);
+    expect(body.profiles[0].name).toBe('PLA 0.2mm');
+  });
+
+  it('single-admin UX does not regress: admin bypasses both the visibility fragment (1=1) and the ownership check on every operation', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const priv = await createModelAs(app, memberA.token, { title: 'Admin Sees All', visibility: 'private' });
+
+    const listRes = await fetch(`${app.baseUrl}/models`, { headers: bearer(app.token) });
+    const ids = (await listRes.json() as { items: Array<{ id: string }> }).items.map((m) => m.id);
+    expect(ids).toContain(priv.id);
+
+    const detailRes = await fetch(`${app.baseUrl}/model/${priv.id}`, { headers: bearer(app.token) });
+    expect(detailRes.status).toBe(200);
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${priv.id}`, {
+      method: 'PATCH', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Admin Edited' }),
+    });
+    expect(patchRes.status).toBe(200);
   });
 });

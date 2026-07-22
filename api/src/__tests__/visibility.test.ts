@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { visibilityFragment } from '../services/visibility.js';
+import { visibilityFragment, isVisible } from '../services/visibility.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
@@ -80,5 +80,56 @@ describe('visibilityFragment: spliced into a real query', () => {
   it('a user who owns nothing sees only public rows, same as logged-out', () => {
     const db = makeDb();
     expect(visibleIds(db, { userId: 'carol', isAdmin: false })).toEqual(['pub-a', 'pub-b']);
+  });
+});
+
+// isVisible (#2179, Phase D3): same rule, evaluated against an
+// already-fetched row instead of spliced into SQL. Table-driven so the
+// full admin/owner/other × public/private matrix is visible at a
+// glance, and so it stays trivially comparable to visibilityFragment's
+// own spliced-query results above.
+describe('isVisible: row-in-hand equivalent of visibilityFragment', () => {
+  const publicRow = { visibility: 'public', owner_id: 'alice' };
+  const privateRow = { visibility: 'private', owner_id: 'alice' };
+
+  const cases: Array<{
+    label: string;
+    row: { visibility: string; owner_id: string | null };
+    ctx: Parameters<typeof isVisible>[1];
+    expected: boolean;
+  }> = [
+    { label: 'admin sees a public row they do not own', row: publicRow, ctx: { userId: 'carol', isAdmin: true }, expected: true },
+    { label: 'admin sees a private row they do not own', row: privateRow, ctx: { userId: 'carol', isAdmin: true }, expected: true },
+    { label: 'owner sees their own public row', row: publicRow, ctx: { userId: 'alice', isAdmin: false }, expected: true },
+    { label: 'owner sees their own private row', row: privateRow, ctx: { userId: 'alice', isAdmin: false }, expected: true },
+    { label: 'non-owner member sees a public row', row: publicRow, ctx: { userId: 'bob', isAdmin: false }, expected: true },
+    { label: 'non-owner member does NOT see a private row', row: privateRow, ctx: { userId: 'bob', isAdmin: false }, expected: false },
+    { label: 'logged-out sees a public row', row: publicRow, ctx: { userId: null, isAdmin: false }, expected: true },
+    { label: 'logged-out does NOT see a private row', row: privateRow, ctx: { userId: null, isAdmin: false }, expected: false },
+  ];
+
+  for (const { label, row, ctx, expected } of cases) {
+    it(label, () => {
+      expect(isVisible(row, ctx)).toBe(expected);
+    });
+  }
+
+  it('agrees with visibilityFragment across the full admin/owner/other × public/private matrix', () => {
+    const db = makeDb();
+    const rows = db.prepare('SELECT id, owner_id, visibility FROM models').all() as
+      Array<{ id: string; owner_id: string; visibility: string }>;
+    const contexts: Array<Parameters<typeof isVisible>[1]> = [
+      { userId: 'alice', isAdmin: true },
+      { userId: 'alice', isAdmin: false },
+      { userId: 'bob', isAdmin: false },
+      { userId: 'carol', isAdmin: false },
+      { userId: null, isAdmin: false },
+    ];
+    for (const ctx of contexts) {
+      const sqlVisibleIds = new Set(visibleIds(db, ctx));
+      for (const row of rows) {
+        expect(isVisible(row, ctx)).toBe(sqlVisibleIds.has(row.id));
+      }
+    }
   });
 });
