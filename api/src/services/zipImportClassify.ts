@@ -66,6 +66,13 @@ export interface ClassifiedZipFile {
   // never extract or link them.
   invalid: boolean;
   invalidReason?: 'absolute path' | 'path traversal (..)' | 'empty path';
+  // Passthrough of the corresponding ZipEntryInput.size, unmodified --
+  // never read by any classification heuristic in this module (see
+  // ZipEntryInput.size's own comment). Threaded onto the output so C3's
+  // plan-review UI can show per-file size without re-joining against the
+  // original entry list by path (Remy's C1 review finding, #2171
+  // follow-up). Omitted when the input entry didn't include a size.
+  size?: number;
 }
 
 export type GuessedSourceSite = 'makerworld' | 'printables' | 'thingiverse' | null;
@@ -134,6 +141,15 @@ interface NormalizedEntry {
   isDirMarker: boolean;
 }
 
+// Deliberately requires the slash after the colon (`C:/...`), so a
+// drive-RELATIVE form like `C:evil` (relative to the current directory on
+// that drive — an obscure Windows path shape with no slash after the
+// colon) is NOT matched here. Confirmed inert on this stack (Remy, C1
+// review, #2171 follow-up): this app only ever runs on Linux/ext4 (see
+// zipImportDraft.ts's header), where "C:evil" is just a filename
+// containing a colon, not a path — the extraction-time containment check
+// (services/zipImportDraft.ts's resolveContainedPath) resolves it as an
+// ordinary contained relative path with no escape, matching that.
 const WINDOWS_DRIVE_ABS_RE = /^[A-Za-z]:\//;
 const README_RE = /^readme\.(md|txt)$/i;
 const LICENSE_RE = /^(license|licence|copying)(\.(md|txt))?$/i;
@@ -318,11 +334,15 @@ export function classifyZipEntries(entries: ZipEntryInput[], zipFilename: string
 
   const plan: ZipImportPlan = {
     suggestedTitle,
-    files: normalized.map((e) => ({
+    files: normalized.map((e, i) => ({
       path: e.original,
       role: roleFor(e),
       invalid: e.invalid,
       ...(e.invalidReason ? { invalidReason: e.invalidReason } : {}),
+      // Passthrough only -- entries[i] lines up with normalized[i]
+      // one-to-one (normalized is entries.map(...) above), never
+      // re-derived or validated here.
+      ...(entries[i].size !== undefined ? { size: entries[i].size } : {}),
     })),
     descriptionSource: findDescriptionSource(files),
     profileCandidates: files.filter(isProfileCandidate).map((e) => e.original),

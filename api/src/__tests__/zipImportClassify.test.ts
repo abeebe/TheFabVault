@@ -194,16 +194,31 @@ describe('classifyZipEntries — structural correctness', () => {
     expect(first).toEqual(second);
   });
 
-  it('accepts an optional per-entry size without it affecting classification', () => {
+  it('threads each entry\'s size through to the matching file, unmodified, when provided', () => {
     const withSize: ZipEntryInput[] = [
       { path: 'model.stl', size: 123456 },
       { path: 'cover.jpg', size: 0 },
     ];
+    const plan = classifyZipEntries(withSize, 'sized.zip');
+    expect(fileRole(plan, 'model.stl')).toBe('part'); // size never influences role
+    expect(plan.files.find((f) => f.path === 'model.stl')?.size).toBe(123456);
+    expect(plan.files.find((f) => f.path === 'cover.jpg')?.size).toBe(0); // 0 is a real size, not "missing"
+  });
+
+  it('omits size entirely when the input entry did not include one, and never lets its presence/absence affect classification', () => {
+    const withSize: ZipEntryInput[] = [{ path: 'model.stl', size: 123456 }, { path: 'cover.jpg', size: 0 }];
     const withoutSize: ZipEntryInput[] = [{ path: 'model.stl' }, { path: 'cover.jpg' }];
+
+    const plan = classifyZipEntries(withoutSize, 'sized.zip');
+    expect(plan.files.find((f) => f.path === 'model.stl')).not.toHaveProperty('size');
 
     const a = classifyZipEntries(withSize, 'sized.zip');
     const b = classifyZipEntries(withoutSize, 'sized.zip');
-    expect(a).toEqual(b);
+    // Strip size before comparing -- that's the one field size legitimately
+    // changes; everything else (role, invalid, title, description,
+    // license, profile candidates, site guess) must be identical.
+    const stripSize = (p: typeof a) => ({ ...p, files: p.files.map(({ size: _size, ...rest }) => rest) });
+    expect(stripSize(a)).toEqual(stripSize(b));
   });
 
   it('returns an empty plan for an empty entry list', () => {
@@ -214,6 +229,11 @@ describe('classifyZipEntries — structural correctness', () => {
     expect(plan.profileCandidates).toEqual([]);
     expect(plan.guessedSourceSite).toBeNull();
     expect(plan.suggestedTitle).toBe('Empty');
+  });
+
+  it('does not flag a Windows drive-RELATIVE path ("C:evil", no slash after the colon) as invalid — confirmed inert on this Linux-only stack (Remy, C1 review)', () => {
+    const plan = classifyZipEntries(entries('C:evil'), 'drive_relative.zip');
+    expect(plan.files[0].invalid).toBe(false);
   });
 
   it('handles a bare ".." entry with no separators as invalid traversal', () => {
