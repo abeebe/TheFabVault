@@ -1,0 +1,598 @@
+import { useState, useCallback, useEffect } from 'react';
+import { LogOut, Settings, RefreshCw } from 'lucide-react';
+import { Sidebar } from '../components/Sidebar.js';
+import { AssetGrid } from '../components/AssetGrid.js';
+import { SearchBar } from '../components/SearchBar.js';
+import { ThemeToggle } from '../components/ThemeToggle.js';
+import { UploadZone } from '../components/UploadZone.js';
+import { GlobalDropZone } from '../components/GlobalDropZone.js';
+import { setOnUploaded } from '../lib/uploadStore.js';
+import { setOnViewManifestRequested } from '../lib/importStore.js';
+import { Modal } from '../components/Modal.js';
+import { ProjectView } from '../components/ProjectView.js';
+import { SetView } from '../components/SetView.js';
+import { SetSuggestions } from '../components/SetSuggestions.js';
+import { AdminSettings } from '../components/AdminSettings.js';
+import { TrashView } from '../components/TrashView.js';
+import { useAssets } from '../hooks/useAssets.js';
+import { useFolders } from '../hooks/useFolders.js';
+import { useTheme } from '../hooks/useTheme.js';
+import { useProjects } from '../hooks/useProjects.js';
+import { useSets } from '../hooks/useSets.js';
+import { useAssetStats } from '../hooks/useAssetStats.js';
+import { api } from '../lib/api.js';
+import type { AssetOut } from '../types/index.js';
+
+// Category filter values — server now does the actual matching.
+type Category = '3dmodel' | '2d' | 'uncategorized';
+
+// This is the (nearly verbatim) body of the pre-router `AuthenticatedApp`
+// from App.tsx. It rendered unconditionally as the app's only view; now it
+// renders at the `/` and `/vault` routes via AppShell. Behavior is meant to
+// be pixel-identical to before the router landed (#2156) — see AppShell.tsx
+// for what moved out (UploadPanel/ImportPanel, hoisted so they survive
+// route navigation) and what stayed here (GlobalDropZone — its drop targets
+// depend on this page's folder/project selection state, which isn't lifted
+// yet; see PR notes for #2156).
+export function VaultPage({ logout, authRequired }: { logout: () => void; authRequired: boolean }) {
+  const { theme, cycleTheme } = useTheme();
+
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
+  const [setSuggestionsOpen, setSetSuggestionsOpen] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [sort, setSort] = useState('date_desc');
+  const [rethumbingFailed, setRethumbingFailed] = useState(false);
+  const PAGE_SIZE = 100;
+
+  // New project modal
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
+
+  // Admin settings modal
+  const [adminSettingsOpen, setAdminSettingsOpen] = useState(false);
+
+  // Trash modal
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashCount, setTrashCount] = useState(0);
+
+  const cleanParams = Object.fromEntries(
+    Object.entries({
+      q: searchQuery || undefined,
+      tags: selectedTags.length ? selectedTags.join(',') : undefined,
+      folder_id: selectedFolderId ?? undefined,
+      category: selectedCategory ?? undefined,
+      favorites: showFavoritesOnly ? true : undefined,
+      limit: PAGE_SIZE,
+      offset: currentPage * PAGE_SIZE,
+      sort,
+    }).filter(([, v]) => v !== undefined)
+  );
+
+  const { assets, total, loading, refresh: refreshAssets, updateAsset, removeAsset, addAssets } = useAssets(cleanParams);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const { folders, createFolder, renameFolder, moveFolder, deleteFolder, refresh: refreshFolders } = useFolders();
+  const { projects, refresh: refreshProjects, createProject } = useProjects();
+  const { sets, refresh: refreshSets } = useSets();
+  const { stats: assetStats, refresh: refreshAssetStats } = useAssetStats();
+
+  // Keep trash count in sync
+  const refreshTrashCount = useCallback(async () => {
+    try {
+      const result = await api.trash.list();
+      setTrashCount(result.total);
+    } catch {}
+  }, []);
+
+  // Load trash count on mount
+  useEffect(() => { refreshTrashCount(); }, [refreshTrashCount]);
+
+  const refresh = useCallback(() => {
+    refreshAssets();
+    refreshTrashCount();
+  }, [refreshAssets, refreshTrashCount]);
+
+  function handleTagToggle(tag: string) {
+    setSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+    setCurrentPage(0);
+  }
+
+  function handleCategorySelect(category: Category | null) {
+    if (category === selectedCategory) {
+      setSelectedCategory(null);
+    } else {
+      setSelectedCategory(category);
+      setSelectedFolderId(null);
+      setSelectedTags([]);
+      setSearchQuery('');
+      setSelectedProjectId(null);
+      setShowFavoritesOnly(false);
+    }
+    setCurrentPage(0);
+  }
+
+  function handleFavoritesToggle() {
+    setShowFavoritesOnly((prev) => {
+      const next = !prev;
+      if (next) {
+        // Clear other filters when switching to favorites
+        setSelectedCategory(null);
+        setSelectedFolderId(null);
+        setSelectedTags([]);
+        setSearchQuery('');
+        setSelectedProjectId(null);
+        setCurrentPage(0);
+      }
+      return next;
+    });
+  }
+
+  // Server now applies category/favorites/tag filters via query params,
+  // so `assets` is already the filtered, paginated slice.
+  const displayAssets = assets;
+
+  const handleUploaded = useCallback((newAssets: AssetOut[]) => {
+    addAssets(newAssets);
+    // Sidebar project counts include "All assets"–style aggregates; refresh
+    // so newly uploaded files are reflected immediately.
+    refreshProjects();
+    refreshAssetStats();
+  }, [addAssets, refreshProjects, refreshAssetStats]);
+
+  // Register the upload-completion callback with the module-level upload
+  // store so uploads kicked off from any view feed back into App state.
+  useEffect(() => {
+    setOnUploaded(handleUploaded);
+    return () => setOnUploaded(null);
+  }, [handleUploaded]);
+
+  // Register the folder-import "View manifest" navigation callback (Result
+  // screen, ImportPanel.tsx) — mirrors setOnUploaded's registration above.
+  // Inlined rather than referencing handleProjectSelect so this effect can
+  // register once at mount (state setters are stable across renders; no
+  // dependency-array churn from a non-memoized handler).
+  useEffect(() => {
+    setOnViewManifestRequested((projectId) => {
+      setSelectedProjectId(projectId);
+      setSelectedSetId(null);
+      setSelectedFolderId(null);
+      setSelectedTags([]);
+      setSearchQuery('');
+    });
+    return () => setOnViewManifestRequested(null);
+  }, []);
+
+  // Wrap removeAsset so deleting (trashing) an asset also refreshes sidebar
+  // project counts — the deleted asset may have been a member of a project.
+  const handleRemoveAsset = useCallback((id: string) => {
+    removeAsset(id);
+    refreshProjects();
+    refreshAssetStats();
+  }, [removeAsset, refreshProjects, refreshAssetStats]);
+
+  // Sidebar drag-drop: assets dropped onto a folder row → move them.
+  // If we're currently filtered by folder, the moved-out assets vanish
+  // from the grid so refreshAssets to pick up the new pagination.
+  const handleAssetsDropToFolder = useCallback(async (assetIds: string[], folderId: string | null) => {
+    try {
+      await Promise.all(assetIds.map((id) => api.assets.moveToFolder(id, folderId)));
+      refreshAssets();
+      refreshFolders();
+      refreshAssetStats();
+    } catch (err) {
+      console.error('[VaultPage] Failed to move asset(s) to folder:', err);
+      alert(`Couldn't move file${assetIds.length > 1 ? 's' : ''}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshAssets, refreshFolders, refreshAssetStats]);
+
+  // Sidebar drag-drop: assets dropped onto a project row → add them.
+  const handleAssetsDropToProject = useCallback(async (assetIds: string[], projectId: string) => {
+    try {
+      await api.projects.addAssets(projectId, assetIds);
+      refreshProjects();
+    } catch (err) {
+      console.error('[VaultPage] Failed to add asset(s) to project:', err);
+      alert(`Couldn't add to project: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshProjects]);
+
+  // Sidebar drag-drop: assets dropped onto a set row → add them.
+  const handleAssetsDropToSet = useCallback(async (assetIds: string[], setId: string) => {
+    try {
+      await api.sets.addAssets(setId, assetIds);
+      refreshSets();
+    } catch (err) {
+      console.error('[VaultPage] Failed to add asset(s) to set:', err);
+      alert(`Couldn't add to set: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refreshSets]);
+
+  function handleProjectSelect(id: string) {
+    setSelectedProjectId(id);
+    setSelectedSetId(null);
+    setSelectedFolderId(null);
+    setSelectedTags([]);
+    setSearchQuery('');
+  }
+
+  function handleSetSelect(id: string) {
+    setSelectedSetId(id);
+    setSelectedProjectId(null);
+    setSelectedFolderId(null);
+    setSelectedTags([]);
+    setSearchQuery('');
+  }
+
+  async function handleAddToProject(assetId: string, projectId: string) {
+    try {
+      await api.projects.addAssets(projectId, [assetId]);
+      console.log(`[VaultPage] Asset ${assetId} added to project ${projectId}`);
+      refreshProjects();
+    } catch (err) {
+      console.error('[VaultPage] Failed to add asset to project:', err);
+    }
+  }
+
+  async function handleRethumbFailed() {
+    setRethumbingFailed(true);
+    try {
+      const result = await api.assets.rethumbFailed();
+      if (result.queued > 0) {
+        // Refresh after a short delay to pick up newly queued thumbs
+        setTimeout(() => refresh(), 2000);
+      }
+    } catch (err) {
+      console.error('[VaultPage] rethumb-failed error:', err);
+    } finally {
+      setRethumbingFailed(false);
+    }
+  }
+
+  async function handleCreateProject() {
+    const name = newProjectName.trim();
+    if (!name) return;
+    setCreatingProject(true);
+    try {
+      const created = await createProject(name);
+      setNewProjectOpen(false);
+      setNewProjectName('');
+      setSelectedProjectId(created.id);
+    } finally {
+      setCreatingProject(false);
+    }
+  }
+
+  return (
+    // h-full (not h-screen, unlike the pre-router AuthenticatedApp this was
+    // extracted from) — AppShell now renders a persistent nav strip above
+    // this view, so "fill the space my flex parent gives me" is correct
+    // where "fill the whole viewport" would double-count that nav strip's
+    // height and force a second scrollbar. Forced by the move; see #2156.
+    <div className="flex h-full bg-surface overflow-hidden">
+      <Sidebar
+        folders={folders}
+        assets={assets}
+        assetStats={assetStats}
+        selectedFolderId={selectedFolderId}
+        selectedTags={selectedTags}
+        onFolderSelect={(id) => { setSelectedFolderId(id); setSelectedTags([]); setSelectedProjectId(null); setCurrentPage(0); }}
+        onTagToggle={handleTagToggle}
+        onFolderCreate={createFolder}
+        onFolderRename={renameFolder}
+        onFolderMove={(id, parentId) => {
+          // Toast on error — backend rejects descendant-of-self moves.
+          moveFolder(id, parentId).catch((err) => {
+            console.error('[VaultPage] Failed to move folder:', err);
+            alert(`Couldn't move folder: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }}
+        onFolderDelete={deleteFolder}
+        onAssetsDropToFolder={handleAssetsDropToFolder}
+        onAssetsDropToProject={handleAssetsDropToProject}
+        onOpenSettings={() => setAdminSettingsOpen(true)}
+        onOpenTrash={() => setTrashOpen(true)}
+        trashCount={trashCount}
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        onProjectSelect={handleProjectSelect}
+        onProjectCreate={() => setNewProjectOpen(true)}
+        sets={sets}
+        selectedSetId={selectedSetId}
+        onSetSelect={handleSetSelect}
+        onOpenSetSuggestions={() => setSetSuggestionsOpen(true)}
+        onAssetsDropToSet={handleAssetsDropToSet}
+        selectedCategory={selectedCategory}
+        onCategorySelect={handleCategorySelect}
+        showFavoritesOnly={showFavoritesOnly}
+        onFavoritesToggle={handleFavoritesToggle}
+      />
+
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {selectedSetId ? (
+          <SetView
+            setId={selectedSetId}
+            folders={folders}
+            projects={projects}
+            onAddToProject={handleAddToProject}
+            onDeleted={() => { setSelectedSetId(null); refreshSets(); refreshAssetStats(); }}
+            onSetUpdated={refreshSets}
+          />
+        ) : selectedProjectId ? (
+          <ProjectView
+            // Keyed on projectId so switching projects fully remounts the
+            // view instead of reusing the same instance. Without this,
+            // the previous project's header/manifest can flash on screen
+            // while the new project's data is still loading (found while
+            // removing the over-eager `loading` spinner guard, which used
+            // to mask this). Same-project manifest edits don't change this
+            // key, so ManifestView's drill-down state (currentNodeId /
+            // breadcrumbPath) still survives edits as expected.
+            key={selectedProjectId}
+            projectId={selectedProjectId}
+            folders={folders}
+            onDeleted={() => { setSelectedProjectId(null); refreshProjects(); }}
+            onProjectUpdated={refreshProjects}
+          />
+        ) : (
+          <>
+            {/* Top bar */}
+            <header className="flex items-center gap-3 px-5 py-3 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+              <div className="flex-1 max-w-sm">
+                <SearchBar value={searchQuery} onChange={(v) => { setSearchQuery(v); setCurrentPage(0); }} />
+              </div>
+              <div className="flex-1" />
+              <UploadZone currentFolderId={selectedFolderId} />
+              <ThemeToggle theme={theme} onCycle={cycleTheme} />
+              <button
+                onClick={() => setAdminSettingsOpen(true)}
+                title="Admin settings"
+                className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              >
+                <Settings size={16} />
+              </button>
+              {authRequired && (
+                <button
+                  onClick={logout}
+                  title="Sign out"
+                  className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <LogOut size={16} />
+                </button>
+              )}
+            </header>
+
+            {/* Breadcrumb / context */}
+            <div className="px-5 py-2 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-surface border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+              <span
+                className="hover:text-gray-700 dark:hover:text-gray-200 cursor-pointer"
+                onClick={() => { setSelectedFolderId(null); setSelectedTags([]); setSearchQuery(''); setSelectedCategory(null); setShowFavoritesOnly(false); setCurrentPage(0); }}
+              >
+                All Files
+              </span>
+              {showFavoritesOnly && (
+                <>
+                  <span>/</span>
+                  <span className="text-red-500 font-medium">Favorites</span>
+                </>
+              )}
+              {!showFavoritesOnly && selectedCategory && (
+                <>
+                  <span>/</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-medium">
+                    {selectedCategory === '3dmodel' ? '3D Models' : selectedCategory === '2d' ? '2D Designs' : 'Uncategorized'}
+                  </span>
+                </>
+              )}
+              {selectedFolderId && (
+                <>
+                  <span>/</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-medium">
+                    {folders.find((f) => f.id === selectedFolderId)?.name ?? 'Folder'}
+                  </span>
+                </>
+              )}
+              {selectedTags.length > 0 && (
+                <>
+                  <span>/</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-medium">
+                    Tagged: {selectedTags.join(', ')}
+                  </span>
+                </>
+              )}
+              {searchQuery && (
+                <>
+                  <span>/</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-medium">
+                    Search: &quot;{searchQuery}&quot;
+                  </span>
+                </>
+              )}
+              <div className="flex-1" />
+              <span className="text-xs text-gray-400">{total} {total === 1 ? 'file' : 'files'}</span>
+              <button
+                onClick={handleRethumbFailed}
+                disabled={rethumbingFailed}
+                title="Re-generate missing/failed thumbnails"
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw size={12} className={rethumbingFailed ? 'animate-spin' : ''} />
+                {rethumbingFailed ? 'Queuing…' : 'Rethumb failed'}
+              </button>
+              <select
+                value={sort}
+                onChange={(e) => { setSort(e.target.value); setCurrentPage(0); }}
+                className="text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-2 py-1 outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
+              >
+                <option value="date_desc">Newest first</option>
+                <option value="date_asc">Oldest first</option>
+                <option value="name_asc">Name A→Z</option>
+                <option value="name_desc">Name Z→A</option>
+              </select>
+            </div>
+
+            {/* Main content */}
+            <div className="flex-1 overflow-y-auto p-5">
+              <AssetGrid
+                assets={displayAssets}
+                folders={folders}
+                loading={loading}
+                onUpdate={updateAsset}
+                onDelete={handleRemoveAsset}
+                projects={projects}
+                onAddToProject={handleAddToProject}
+                sets={sets}
+                onSetsChanged={refreshSets}
+              />
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-2 pt-6 pb-2">
+                  <button
+                    onClick={() => setCurrentPage(0)}
+                    disabled={currentPage === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    First
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+                    disabled={currentPage === 0}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Prev
+                  </button>
+
+                  {/* Page numbers */}
+                  {Array.from({ length: totalPages }, (_, i) => i)
+                    .filter(i => i === 0 || i === totalPages - 1 || Math.abs(i - currentPage) <= 2)
+                    .reduce<(number | 'gap')[]>((acc, i, idx, arr) => {
+                      if (idx > 0 && i - (arr[idx - 1] as number) > 1) acc.push('gap');
+                      acc.push(i);
+                      return acc;
+                    }, [])
+                    .map((item, idx) =>
+                      item === 'gap' ? (
+                        <span key={`gap-${idx}`} className="px-1 text-xs text-gray-400">…</span>
+                      ) : (
+                        <button
+                          key={item}
+                          onClick={() => setCurrentPage(item)}
+                          className={`min-w-[2rem] px-2 py-1.5 text-xs rounded-lg border transition-colors ${
+                            item === currentPage
+                              ? 'bg-accent text-white border-accent font-medium'
+                              : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {item + 1}
+                        </button>
+                      )
+                    )}
+
+                  <button
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={currentPage >= totalPages - 1}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Last
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </main>
+
+      {/* New project modal */}
+      {newProjectOpen && (
+        <Modal title="New Project" onClose={() => { setNewProjectOpen(false); setNewProjectName(''); }}>
+          <div className="p-1 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Project name</label>
+              <input
+                autoFocus
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleCreateProject(); }}
+                placeholder="My awesome project"
+                className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setNewProjectOpen(false); setNewProjectName(''); }}
+                className="px-3 py-1.5 text-sm rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateProject}
+                disabled={!newProjectName.trim() || creatingProject}
+                className="px-4 py-1.5 text-sm rounded bg-accent text-white hover:bg-accent-hover disabled:opacity-60"
+              >
+                {creatingProject ? 'Creating…' : 'Create project'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Admin settings modal */}
+      <AdminSettings isOpen={adminSettingsOpen} onClose={() => setAdminSettingsOpen(false)} />
+
+      {/* Trash modal */}
+      {trashOpen && (
+        <TrashView
+          onClose={() => { setTrashOpen(false); refreshTrashCount(); }}
+          onRestored={() => { refresh(); refreshFolders(); refreshAssetStats(); refreshProjects(); }}
+        />
+      )}
+
+      {/* Auto-detect Sets modal */}
+      <SetSuggestions
+        isOpen={setSuggestionsOpen}
+        onClose={() => setSetSuggestionsOpen(false)}
+        onCreated={(count) => {
+          if (count > 0) {
+            refreshSets();
+            console.log(`[VaultPage] Created ${count} set(s) from suggestions`);
+          }
+        }}
+      />
+
+      {/* Drag-drop overlay — works on every view; drops go to the current
+          project if one is selected, otherwise the current folder. Stays
+          here (not hoisted to AppShell like UploadPanel/ImportPanel) because
+          its drop targets are this page's folder/project selection state,
+          which isn't lifted above the route switch yet — see #2156 notes. */}
+      <GlobalDropZone
+        currentFolderId={selectedFolderId}
+        currentFolderName={selectedFolderId ? (folders.find((f) => f.id === selectedFolderId)?.name ?? null) : null}
+        currentProjectId={selectedProjectId}
+        currentProjectName={
+          selectedProjectId
+            ? (projects.find((p) => p.id === selectedProjectId)?.name ?? null)
+            : null
+        }
+        currentProjectFolderId={
+          selectedProjectId
+            ? (projects.find((p) => p.id === selectedProjectId)?.folderId ?? null)
+            : null
+        }
+        currentProjectFolderName={(() => {
+          if (!selectedProjectId) return null;
+          const fid = projects.find((p) => p.id === selectedProjectId)?.folderId;
+          if (!fid) return null;
+          return folders.find((f) => f.id === fid)?.name ?? null;
+        })()}
+      />
+    </div>
+  );
+}
