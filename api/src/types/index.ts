@@ -116,6 +116,14 @@ export interface FolderOut {
   name: string;
   parentId: string | null;
   createdAt: number;
+  // #2175: true when `name` is a standalone 8-4-4-4-12 hex UUID (see
+  // services/modelConvert.ts's isBareGuidName) — bulk/manifest import's
+  // "no better name available" leaf-folder convention. Surfaced so the
+  // bulk convert wizard's Mode B ("each named subfolder -> its own
+  // model") can grey/skip these without duplicating the regex
+  // client-side; the server is the single source of truth for the
+  // classification both grouping modes rely on.
+  isBareGuid: boolean;
 }
 
 export interface ProjectOut {
@@ -537,9 +545,23 @@ export interface FolderConversionPreviewFile {
   sortOrder: number;
 }
 
-export interface FolderConversionPreviewOut {
-  folderId: string;
-  folderName: string;
+// #2175 — two grouping modes, one shared per-resulting-model shape.
+// 'single': the selected folder becomes exactly one model, recursively
+// collecting every descendant asset. 'each-child': the selected folder
+// is a container — each of its IMMEDIATE named (non-bare-GUID) child
+// folders becomes its own recursive model; bare-GUID children and any
+// assets sitting directly in the container are never converted by this
+// mode (see services/modelConvert.ts's planEachChildConversion for the
+// exact rule + rationale).
+export type FolderConversionMode = 'single' | 'each-child';
+
+// One resulting model's breakdown — same shape regardless of mode, per
+// Aaron's spec: "for Mode A, one entry ...; for Mode B, N entries ...
+// with the same shape". This is the trust mechanism the preview exists
+// for — exactly what will be created, before the user confirms anything.
+export interface FolderConversionResultEntry {
+  sourceFolderId: string;
+  sourceFolderName: string;
   // Same folder-name fallback POST /models/from-folder itself uses when
   // no title override is given — surfaced so the wizard can show/edit
   // the title it would submit, matching what would actually happen.
@@ -549,11 +571,58 @@ export interface FolderConversionPreviewOut {
   files: FolderConversionPreviewFile[];
   coverAssetId: string | null;
   // True when a non-deleted model already has source_folder_id === this
-  // folder. The wizard uses this to show an "already converted" marker
-  // and require an explicit re-check before allowing a second convert of
-  // the same folder (see routes/models.ts's batch idempotence guard).
+  // entry's sourceFolderId. The wizard uses this to show an "already
+  // converted" marker and require an explicit re-check before allowing a
+  // second convert of the same folder (see routes/models.ts's batch
+  // idempotence guard — there is deliberately no uniqueness constraint
+  // stopping it).
   alreadyConverted: boolean;
   existingModelIds: string[];
+}
+
+export interface FolderConversionSkippedChild {
+  folderId: string;
+  folderName: string;
+  reason: 'bare-guid-leaf';
+}
+
+export interface FolderConversionPreviewOut {
+  // NEW (#2175). Always present; 'single' when the caller omits mode
+  // entirely — see routes/models.ts's handler comment for why 'single'
+  // is the default rather than requiring every caller to specify it.
+  mode: FolderConversionMode;
+  folderId: string;
+  folderName: string;
+  // ── Back-compat flat fields (pre-#2175 shape) ──────────────────────
+  // Mirror results[0] exactly when mode is 'single' — every caller of
+  // the original single-folder preview keeps working unchanged (only
+  // the *values* change, from direct-children-only to the recursive
+  // superset, which is identical for any folder with no subfolders).
+  // Absent for mode 'each-child', which has no single "the" result —
+  // use `results` there instead.
+  suggestedTitle?: string;
+  assetCount?: number;
+  countsByRole?: Record<'part' | 'image' | 'doc' | 'other', number>;
+  files?: FolderConversionPreviewFile[];
+  coverAssetId?: string | null;
+  alreadyConverted?: boolean;
+  existingModelIds?: string[];
+  // ── Unified breakdown (#2175) ──────────────────────────────────────
+  // One entry per resulting model, regardless of mode: exactly 1 for
+  // 'single' (identical to the flat fields above), N for 'each-child'
+  // (one per eligible immediate child folder).
+  results: FolderConversionResultEntry[];
+  // 'each-child' only (always [] for 'single') — immediate children
+  // excluded from `results` because their name is a bare GUID.
+  skippedChildren: FolderConversionSkippedChild[];
+  // Count of assets sitting directly in the selected/container folder
+  // itself, not under any child. Always 0 for 'single' (its recursive
+  // collection already includes them in the one result). For
+  // 'each-child' this is informational only — these assets are never
+  // converted by this mode; surfaced so the wizard can flag "N files in
+  // this folder itself won't be included" instead of silently dropping
+  // them (Aaron's "handle loose direct assets explicitly" requirement).
+  looseAssetCount: number;
 }
 
 // ─── Collections (Phase B, #2167) ─────────────────────────────────────────────

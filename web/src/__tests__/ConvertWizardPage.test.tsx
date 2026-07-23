@@ -27,25 +27,51 @@ vi.mock('../lib/api.js', () => ({
 }));
 
 function folder(id: string, name: string) {
-  return { id, name, parentId: null, createdAt: 0 };
+  return {
+    id, name, parentId: null, createdAt: 0, isBareGuid: false,
+  };
 }
 
+// #2175: the response shape grew `mode` + a unified `results[]`
+// breakdown (api/src/routes/models.ts's handler comment). This page
+// only ever drives mode 'single', whose `results` always has exactly
+// one entry mirroring the flat fields — built here from the same
+// `overrides` so every existing override pattern below (assetCount,
+// alreadyConverted, etc.) still lands in the one place
+// ConvertWizardPage.tsx actually reads (results[0], post-#2175 adapter).
 function preview(overrides: Partial<FolderConversionPreviewOut>): FolderConversionPreviewOut {
-  return {
+  const flat = {
     folderId: 'f1',
     folderName: 'Dragon Prints',
     suggestedTitle: 'Dragon Prints',
     assetCount: 3,
     countsByRole: { part: 1, image: 1, doc: 1, other: 0 },
     files: [
-      { assetId: 'a-stl', filename: 'body.stl', role: 'part', sortOrder: 0 },
-      { assetId: 'a-png', filename: 'cover.png', role: 'image', sortOrder: 1 },
-      { assetId: 'a-txt', filename: 'readme.txt', role: 'doc', sortOrder: 2 },
+      { assetId: 'a-stl', filename: 'body.stl', role: 'part' as const, sortOrder: 0 },
+      { assetId: 'a-png', filename: 'cover.png', role: 'image' as const, sortOrder: 1 },
+      { assetId: 'a-txt', filename: 'readme.txt', role: 'doc' as const, sortOrder: 2 },
     ],
-    coverAssetId: 'a-png',
+    coverAssetId: 'a-png' as string | null,
     alreadyConverted: false,
-    existingModelIds: [],
+    existingModelIds: [] as string[],
     ...overrides,
+  };
+  return {
+    mode: 'single',
+    skippedChildren: [],
+    looseAssetCount: 0,
+    ...flat,
+    results: [{
+      sourceFolderId: flat.folderId,
+      sourceFolderName: flat.folderName,
+      suggestedTitle: flat.suggestedTitle,
+      assetCount: flat.assetCount,
+      countsByRole: flat.countsByRole,
+      files: flat.files,
+      coverAssetId: flat.coverAssetId,
+      alreadyConverted: flat.alreadyConverted,
+      existingModelIds: flat.existingModelIds,
+    }],
   };
 }
 
@@ -117,7 +143,7 @@ describe('ConvertWizardPage — review step', () => {
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: /Review/ }));
 
-    await waitFor(() => expect(mockPreviewFromFolder).toHaveBeenCalledWith('f1'));
+    await waitFor(() => expect(mockPreviewFromFolder).toHaveBeenCalledWith('f1', 'single'));
     expect(await screen.findByDisplayValue('Dragon Prints')).toBeTruthy();
     expect(await screen.findByText('1 Part')).toBeTruthy();
     expect(await screen.findByText('1 Image')).toBeTruthy();
@@ -172,7 +198,7 @@ describe('ConvertWizardPage — confirm + results', () => {
     const confirmButton = await screen.findByRole('button', { name: /Confirm & convert 1 folder/ });
     fireEvent.click(confirmButton);
 
-    await waitFor(() => expect(mockFromFolder).toHaveBeenCalledWith('f1', undefined));
+    await waitFor(() => expect(mockFromFolder).toHaveBeenCalledWith('f1', undefined, 'single'));
     expect(await screen.findByText('Step 3 of 3 — Results')).toBeTruthy();
     const link = await screen.findByRole('link', { name: /View model/ });
     expect(link.getAttribute('href')).toBe('/models/new-model-1');
@@ -203,7 +229,7 @@ describe('ConvertWizardPage — confirm + results', () => {
     const confirmButton = await screen.findByRole('button', { name: /Confirm & convert 1 folder/ });
     fireEvent.click(confirmButton);
 
-    await waitFor(() => expect(mockFromFolder).toHaveBeenCalledWith('f1', undefined));
+    await waitFor(() => expect(mockFromFolder).toHaveBeenCalledWith('f1', undefined, 'single'));
     // ...but conversion still ran for f1, so fromFolder must never have
     // been called for f2 (the bug's failure mode was silent omission from
     // Results, not an accidental conversion attempt).

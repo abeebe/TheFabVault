@@ -34,16 +34,20 @@ import { getDb } from '../db.js';
 import { assetFilePath, thumbExists, sanitizeFilename } from '../services/fileStore.js';
 import { enqueueThumb } from '../services/thumbGen.js';
 import { saveUploadedFile, needsThumbnail, findAssetByHash } from '../services/assetUpload.js';
-import { planFolderConversion } from '../services/modelConvert.js';
+import {
+  planFolderConversion, getRecursiveConvertibleAssets, getImmediateChildFolders,
+  planEachChildConversion,
+} from '../services/modelConvert.js';
 import {
   MODEL_FILE_ROLES, isModelFileRole, MODEL_VISIBILITY, isModelVisibility,
 } from '../services/enumValidators.js';
 import { isValidSourceUrl } from '../services/urlValidators.js';
-import { visibilityFragment, isVisible, type VisibilityContext } from '../services/visibility.js';
+import { visibilityFragment, isVisible, type VisibilityContext, type SqlFragment } from '../services/visibility.js';
 import type {
   AssetOut, AssetRow, FolderRow,
   ModelRow, ModelOut, ModelDetailOut, ModelFileOut,
   PrintProfileRow, PrintProfileOut,
+  FolderConversionMode, FolderConversionResultEntry, FolderConversionPreviewOut,
 } from '../types/index.js';
 
 const router = Router();
@@ -117,7 +121,14 @@ function assetRowToOut(row: AssetRow): AssetOut {
 
 // Resolves the cover thumb URL: the explicit cover_asset_id if it has a
 // usable thumbnail, else the first role='image' file (by sort_order),
-// else null. Same fallback shape as routes/sets.ts#resolveCoverThumb.
+// else — #2187, companion to the shipped #2186 gallery fallback — the
+// first role='part' file with a finished thumbnail (the 3D-render
+// thumb slicers/thumbGen produce for STL/3MF/etc.), else null. Many
+// models created by #2175's from-folder conversion have no image at
+// all (a folder of loose STLs with no photo), so without this last
+// step ModelCard grid tiles fell straight through to the generic
+// placeholder even though a perfectly good part thumbnail existed.
+// Same fallback shape as routes/sets.ts#resolveCoverThumb.
 function resolveCoverThumb(db: Database.Database, coverAssetId: string | null, modelId: string): string | null {
   if (coverAssetId) {
     const row = db.prepare('SELECT id, thumb_status FROM assets WHERE id = ? AND deleted_at IS NULL')
@@ -126,14 +137,24 @@ function resolveCoverThumb(db: Database.Database, coverAssetId: string | null, m
       return `/thumb/${row.id}.jpg`;
     }
   }
-  const fallback = db.prepare(
+  const imageFallback = db.prepare(
     `SELECT a.id FROM model_files mf
      JOIN assets a ON a.id = mf.asset_id
      WHERE mf.model_id = ? AND mf.role = 'image' AND a.deleted_at IS NULL AND a.thumb_status = 'done'
      ORDER BY mf.sort_order ASC, a.created_at DESC
      LIMIT 1`
   ).get(modelId) as { id: string } | undefined;
-  if (fallback && thumbExists(fallback.id)) return `/thumb/${fallback.id}.jpg`;
+  if (imageFallback && thumbExists(imageFallback.id)) return `/thumb/${imageFallback.id}.jpg`;
+
+  const partFallback = db.prepare(
+    `SELECT a.id FROM model_files mf
+     JOIN assets a ON a.id = mf.asset_id
+     WHERE mf.model_id = ? AND mf.role = 'part' AND a.deleted_at IS NULL AND a.thumb_status = 'done'
+     ORDER BY mf.sort_order ASC, a.created_at DESC
+     LIMIT 1`
+  ).get(modelId) as { id: string } | undefined;
+  if (partFallback && thumbExists(partFallback.id)) return `/thumb/${partFallback.id}.jpg`;
+
   return null;
 }
 
@@ -562,25 +583,185 @@ router.delete('/model/:id', requireAuth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// ─── POST /models/from-folder — explicit folder→model conversion ─────────────
+// ─── #2175 — folder→model conversion, both grouping modes ─────────────────────
 //
-// Purely additive: only INSERTs a new models row + model_files rows.
-// Never writes to folders or assets — the folder and its assets are
-// left exactly as they were (plan §Key design decisions #7, "never
-// silent auto-conversion" — this endpoint IS the explicit user action).
+// Root cause fixed here: the original POST /models/from-folder only ever
+// looked at a folder's DIRECT assets. Pointing it at a meaningfully-named
+// parent folder ("Droidkyn") grabbed near nothing, because real parts
+// live several levels down in bare-GUID-named leaf folders left behind
+// by bulk/manifest import. Both modes below now walk the full subtree
+// (services/modelConvert.ts's getRecursiveConvertibleAssets) instead of
+// one level.
+//
+// Two modes, one per selected folder, user's choice (Aaron's spec):
+//   'single'     — the selected folder becomes exactly ONE model,
+//                   recursively collecting every descendant asset.
+//   'each-child' — the selected folder is a CONTAINER; each of its
+//                   IMMEDIATE named (non-bare-GUID) child folders becomes
+//                   its own recursive model. Bare-GUID children and any
+//                   assets sitting directly in the container are
+//                   deliberately skipped, not folded into a catch-all
+//                   model — see modelConvert.ts's planEachChildConversion
+//                   for the full rationale on that choice. Both preview
+//                   and commit surface exactly what's excluded
+//                   (skippedChildren / looseAssetCount) so nothing about
+//                   the batch is a silent surprise.
+//
+// Purely additive in both modes: only INSERTs models + model_files rows.
+// Never writes to folders or assets (plan §Key design decisions #7,
+// "never silent auto-conversion" — this endpoint IS the explicit user
+// action).
+//
+// Builds one FolderConversionResultEntry for a folder that will become
+// (or, in preview, would become) exactly one model — the same shape
+// whether it's the 'single' mode's one result or one of 'each-child's N.
+// Shared by both the preview and commit handlers below so the two can
+// never quietly drift out of agreement on what a given folder converts
+// to.
+function buildConversionEntry(
+  db: Database.Database, folder: FolderRow, visFrag: SqlFragment,
+): FolderConversionResultEntry {
+  const assetRows = getRecursiveConvertibleAssets(db, folder.id);
+  const plan = planFolderConversion(
+    assetRows.map((a) => ({ assetId: a.id, filename: a.filename, thumbStatus: a.thumb_status }))
+  );
+
+  const assetsById = new Map(assetRows.map((a) => [a.id, a]));
+  const countsByRole: Record<'part' | 'image' | 'doc' | 'other', number> = {
+    part: 0, image: 0, doc: 0, other: 0,
+  };
+  const files = plan.files.map((f) => {
+    countsByRole[f.role] += 1;
+    return {
+      assetId: f.assetId,
+      filename: assetsById.get(f.assetId)!.filename,
+      role: f.role,
+      sortOrder: f.sortOrder,
+    };
+  });
+
+  // Already-converted marker: any non-deleted model whose source_folder_id
+  // points at this folder. A folder can only be walked into a model via
+  // this same explicit action, and there's deliberately no uniqueness
+  // constraint stopping a second from-folder conversion of the same
+  // folder (a wizard re-check is the explicit override), so this can
+  // legitimately be more than one.
+  //
+  // Visibility-filtered (Vera phase-D review, #2179 fast-follow): a
+  // private model someone else owns must not surface its real UUID here
+  // even though GET /model/:id, the list, and download all correctly
+  // 404/omit it for the same caller. Same existence-hiding semantics as
+  // before this rework — see the pre-#2175 version of this comment in
+  // git history for the full walkthrough; unchanged by the mode split.
+  const existing = db.prepare(
+    `SELECT id FROM models WHERE source_folder_id = ? AND deleted_at IS NULL AND (${visFrag.sql})`
+  ).all(folder.id, ...visFrag.params) as Array<{ id: string }>;
+
+  return {
+    sourceFolderId: folder.id,
+    sourceFolderName: folder.name,
+    suggestedTitle: folder.name,
+    assetCount: assetRows.length,
+    countsByRole,
+    files,
+    coverAssetId: plan.coverAssetId,
+    alreadyConverted: existing.length > 0,
+    existingModelIds: existing.map((m) => m.id),
+  };
+}
+
+function normalizeMode(raw: unknown): FolderConversionMode {
+  return raw === 'each-child' ? 'each-child' : 'single';
+}
+
+// Count of assets sitting directly in a folder (not any subfolder) —
+// the 'each-child' mode's looseAssetCount signal.
+function directAssetCount(db: Database.Database, folderId: string): number {
+  return (
+    db.prepare('SELECT COUNT(*) as c FROM assets WHERE folder_id = ? AND deleted_at IS NULL').get(folderId) as { c: number }
+  ).c;
+}
 
 router.post('/models/from-folder', requireAuth, asyncHandler(async (req: Request, res: Response) => {
-  const { folderId, title } = req.body as { folderId?: string; title?: string };
+  const {
+    folderId, title, mode: modeRaw, childTitles,
+  } = req.body as { folderId?: string; title?: string; mode?: string; childTitles?: Record<string, string> };
   if (!folderId) { res.status(400).json({ error: 'folderId is required' }); return; }
+  const mode = normalizeMode(modeRaw);
 
   const db = getDb();
   const folder = db.prepare('SELECT * FROM folders WHERE id = ?').get(folderId) as FolderRow | undefined;
   if (!folder) { res.status(404).json({ error: 'Folder not found' }); return; }
 
-  const assetRows = db.prepare(
-    'SELECT * FROM assets WHERE folder_id = ? AND deleted_at IS NULL ORDER BY filename ASC'
-  ).all(folderId) as AssetRow[];
+  if (mode === 'each-child') {
+    const children = getImmediateChildFolders(db, folderId);
+    const { eligible, skipped } = planEachChildConversion(children);
 
+    // Plan every eligible child's assets up front, outside the
+    // transaction — a child with zero convertible assets (e.g. it only
+    // contains other bare-GUID grandchildren the wizard's preview never
+    // recursed into for a title) is excluded here exactly like mode
+    // 'single' 400s on an empty folder, just per-child instead of
+    // failing the whole request. The wizard is expected to have already
+    // excluded empty children via the preview's assetCount:0, same
+    // convention as 'single'.
+    const withAssets: Array<{ folder: FolderRow; assetRows: AssetRow[] }> = [];
+    for (const child of eligible) {
+      const assetRows = getRecursiveConvertibleAssets(db, child.id);
+      if (assetRows.length > 0) withAssets.push({ folder: child, assetRows });
+    }
+
+    if (withAssets.length === 0) {
+      res.status(400).json({ error: 'No eligible child folder has convertible assets' });
+      return;
+    }
+
+    // Single transaction for the whole batch — all child models are
+    // created atomically or none are. There's no partial-failure mode
+    // here worth modeling (every step is a plain INSERT against
+    // already-validated folders/assets, no external I/O), so unlike
+    // per-folder failure isolation elsewhere (e.g. the wizard's
+    // sequential single-mode loop, which is a client-side convenience
+    // over N independent requests) this is one request, one outcome.
+    const created: ModelDetailOut[] = [];
+    const commit = db.transaction(() => {
+      for (const { folder: child, assetRows } of withAssets) {
+        const plan = planFolderConversion(
+          assetRows.map((a) => ({ assetId: a.id, filename: a.filename, thumbStatus: a.thumb_status }))
+        );
+        const modelId = uuidv4();
+        const modelTitle = childTitles?.[child.id]?.trim() || child.name;
+
+        db.prepare(
+          `INSERT INTO models (id, title, owner_id, source_folder_id, cover_asset_id)
+           VALUES (?, ?, ?, ?, ?)`
+        ).run(modelId, modelTitle, req.user!.id, child.id, plan.coverAssetId);
+
+        const insertFile = db.prepare(
+          'INSERT INTO model_files (model_id, asset_id, role, sort_order) VALUES (?, ?, ?, ?)'
+        );
+        for (const f of plan.files) insertFile.run(modelId, f.assetId, f.role, f.sortOrder);
+
+        created.push(loadModelDetail(db, modelId, req.user!.id)!);
+      }
+    });
+    commit();
+
+    res.status(201).json({
+      mode,
+      created,
+      skippedChildren: skipped.map((c) => ({ folderId: c.id, folderName: c.name, reason: 'bare-guid-leaf' as const })),
+    });
+    return;
+  }
+
+  // mode === 'single' — response shape UNCHANGED from pre-#2175 (the
+  // created ModelDetailOut directly): every existing caller of this
+  // default path keeps working with no adaptation. Only the underlying
+  // asset collection changed, from direct-children-only to the
+  // recursive subtree — a strict superset, identical result for any
+  // folder that has no subfolders.
+  const assetRows = getRecursiveConvertibleAssets(db, folderId);
   if (assetRows.length === 0) { res.status(400).json({ error: 'Folder has no assets to convert' }); return; }
 
   const plan = planFolderConversion(
@@ -609,100 +790,75 @@ router.post('/models/from-folder', requireAuth, asyncHandler(async (req: Request
 
 // ─── GET /models/from-folder/preview — dry-run classification, no writes ──────
 //
-// Bulk convert wizard (#2170) needs to show what conversion WOULD produce
-// before the user confirms, per-folder, without ever creating a model
-// just to preview it. This calls the exact same planFolderConversion()
-// pure function as the POST above and returns its plan directly — no
-// INSERT anywhere, no transaction, nothing under this handler touches
-// the models or model_files tables. (Verified by the paired test: asserts
+// Bulk convert wizard (#2170, mode support #2175) needs to show what
+// conversion WOULD produce before the user confirms, without ever
+// creating a model just to preview it. Calls the exact same
+// buildConversionEntry() the POST commit above builds from — no INSERT
+// anywhere, no transaction, nothing under this handler touches the
+// models or model_files tables. (Verified by the paired tests: assert
 // row counts on both tables are identical before and after the call.)
 //
-// Deliberately does NOT 400 on a folder with zero assets the way the real
-// POST does — "nothing to convert" is itself a useful preview result for
-// an admin browsing many folders (assetCount: 0, empty files/counts), and
-// the wizard uses that to grey out the folder's checkbox rather than
-// making the user click in to discover the same 400 the POST would give.
+// Deliberately does NOT 400 on a folder with zero assets the way the
+// real POST does — "nothing to convert" is itself a useful preview
+// result for an admin browsing many folders (assetCount: 0, empty
+// files/counts), and the wizard uses that to grey out the folder's
+// checkbox rather than making the user click in to discover the same
+// 400 the POST would give.
 //
-// Query param is snake_case `folder_id`, matching every other list
-// endpoint's folder filter (AssetListParams.folder_id) — not the camelCase
-// `folderId` the POST body above uses. Deliberate: this is a query string
-// (GET), that's a JSON body (POST), and the rest of this file already
-// uses different casing conventions for the two surfaces (route params/
-// query strings stay snake_case or plain; JSON bodies are camelCase).
+// Query params are snake_case (`folder_id`, `mode`), matching every
+// other list endpoint's filters — not the camelCase the POST body above
+// uses. Deliberate: this is a query string (GET), that's a JSON body
+// (POST), and the rest of this file already uses different casing
+// conventions for the two surfaces.
 router.get('/models/from-folder/preview', requireAuth, asyncHandler(async (req: Request, res: Response) => {
-  const { folder_id: folderId } = req.query as { folder_id?: string };
+  const { folder_id: folderId, mode: modeRaw } = req.query as { folder_id?: string; mode?: string };
   if (!folderId) { res.status(400).json({ error: 'folder_id is required' }); return; }
+  const mode = normalizeMode(modeRaw);
 
   const db = getDb();
   const folder = db.prepare('SELECT * FROM folders WHERE id = ?').get(folderId) as FolderRow | undefined;
   if (!folder) { res.status(404).json({ error: 'Folder not found' }); return; }
 
-  const assetRows = db.prepare(
-    'SELECT * FROM assets WHERE folder_id = ? AND deleted_at IS NULL ORDER BY filename ASC'
-  ).all(folderId) as AssetRow[];
-
-  const plan = planFolderConversion(
-    assetRows.map((a) => ({ assetId: a.id, filename: a.filename, thumbStatus: a.thumb_status }))
-  );
-
-  const assetsById = new Map(assetRows.map((a) => [a.id, a]));
-  const countsByRole: Record<'part' | 'image' | 'doc' | 'other', number> = {
-    part: 0, image: 0, doc: 0, other: 0,
-  };
-  const files = plan.files.map((f) => {
-    countsByRole[f.role] += 1;
-    return {
-      assetId: f.assetId,
-      filename: assetsById.get(f.assetId)!.filename,
-      role: f.role,
-      sortOrder: f.sortOrder,
-    };
-  });
-
-  // Already-converted marker: any non-deleted model whose source_folder_id
-  // points at this folder. A folder can only be walked into a model via
-  // this same explicit action, and there's deliberately no uniqueness
-  // constraint stopping a second from-folder conversion of the same
-  // folder (a wizard re-check is the explicit override), so this can
-  // legitimately be more than one.
-  //
-  // Visibility filter (Vera phase-D review, #2179 fast-follow — this
-  // handler was the one query in this file that predated the D3 pass and
-  // hadn't been threaded): without it, a private model someone else owns
-  // still surfaced its real UUID here even though GET /model/:id, the
-  // list, and download all correctly 404/omit it for the same caller.
-  // Same fragment, same splice pattern as GET /models above — this is a
-  // filtered existence check, not a single row already in hand, so this
-  // uses visibilityFragment (query-level) rather than isVisible
-  // (single-row) for the same reason GET /models does: a JS post-filter
-  // here would be trivial to get right today but is the wrong shape to
-  // copy from if this query ever grows a LIMIT.
-  //
-  // Semantics note: this means alreadyConverted/existingModelIds now
-  // reflects only what THIS caller can see. If Alice already converted
-  // folder F into a private model, Bob's preview correctly reads
-  // "not yet converted" (assetCount/files still reflect the folder's
-  // real, shared contents — only the marker is scoped) — confirming
-  // conversion creates a second model row, owned by Bob. That's the
-  // intended existence-hiding behavior, not a bug: models are per-owner,
-  // and the alternative (leaking that *some* private model already
-  // claims this folder) is exactly the disclosure this fix closes.
   const visFrag = visibilityFragment(visCtx(req));
-  const existing = db.prepare(
-    `SELECT id FROM models WHERE source_folder_id = ? AND deleted_at IS NULL AND (${visFrag.sql})`
-  ).all(folderId, ...visFrag.params) as Array<{ id: string }>;
 
-  res.json({
+  if (mode === 'each-child') {
+    const children = getImmediateChildFolders(db, folderId);
+    const { eligible, skipped } = planEachChildConversion(children);
+    const results = eligible.map((child) => buildConversionEntry(db, child, visFrag));
+
+    const out: FolderConversionPreviewOut = {
+      mode,
+      folderId,
+      folderName: folder.name,
+      results,
+      skippedChildren: skipped.map((c) => ({ folderId: c.id, folderName: c.name, reason: 'bare-guid-leaf' as const })),
+      looseAssetCount: directAssetCount(db, folderId),
+    };
+    res.json(out);
+    return;
+  }
+
+  // mode === 'single' — flat top-level fields kept identical to the
+  // pre-#2175 shape (back-compat for every existing caller), now backed
+  // by the recursive collection; `results` additionally carries the same
+  // single entry in the new unified shape.
+  const entry = buildConversionEntry(db, folder, visFrag);
+  const out: FolderConversionPreviewOut = {
+    mode,
     folderId,
     folderName: folder.name,
-    suggestedTitle: folder.name,
-    assetCount: assetRows.length,
-    countsByRole,
-    files,
-    coverAssetId: plan.coverAssetId,
-    alreadyConverted: existing.length > 0,
-    existingModelIds: existing.map((m) => m.id),
-  });
+    suggestedTitle: entry.suggestedTitle,
+    assetCount: entry.assetCount,
+    countsByRole: entry.countsByRole,
+    files: entry.files,
+    coverAssetId: entry.coverAssetId,
+    alreadyConverted: entry.alreadyConverted,
+    existingModelIds: entry.existingModelIds,
+    results: [entry],
+    skippedChildren: [],
+    looseAssetCount: 0,
+  };
+  res.json(out);
 }));
 
 // ─── POST /model/:id/files — attach existing asset ids OR multipart upload ────

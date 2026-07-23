@@ -189,6 +189,41 @@ describe('getSubAssemblyRollups — recursive bottom-up progress', () => {
     const rollups = getSubAssemblyRollups(db, projectId);
     expect(rollups.get(sa)?.percent).toBe(33);
   });
+
+  // Defensive-depth-cap fold-in (#2175 closing-api review, third site):
+  // this closure CTE has the same unbounded-cycle risk as
+  // getRecursiveFolderIds/getSubtreeIds, just keyed on (ancestor_id,
+  // descendant_id) pairs rather than a single walked id, since it seeds
+  // every sub_assembly in the project as its own ancestor in one query.
+  // Hand-built cycle, bypassing validateReparent entirely, same
+  // reproduction method as the other two sites' tests.
+  it('terminates fast on a cyclic parent_id, and leaves an unrelated branch in the same project unaffected', () => {
+    const projectId = makeProject(db);
+    const a = makeSubAssembly(db, projectId, 'A');
+    const b = makeSubAssembly(db, projectId, 'B', a);
+    // Hand-built cycle: A's parent_id now points at B, so A -> B -> A.
+    db.prepare('UPDATE sub_assemblies SET parent_id = ? WHERE id = ?').run(b, a);
+
+    // Unrelated sibling branch elsewhere in the same project, with a
+    // real part placed on it — this must roll up correctly regardless
+    // of the cycle living in A/B's branch (per-row depth tracking means
+    // a cycle reachable from one ancestor doesn't block others).
+    const dome = makeSubAssembly(db, projectId, 'Dome');
+    const domeAsset = makeAsset(db);
+    placePart(db, dome, domeAsset, 4, 2);
+
+    const start = Date.now();
+    const rollups = getSubAssemblyRollups(db, projectId);
+    const elapsedMs = Date.now() - start;
+
+    expect(elapsedMs).toBeLessThan(2000);
+    // The cyclic nodes still get a (truncated, but present) rollup entry
+    // rather than being dropped or crashing the whole query.
+    expect(rollups.has(a)).toBe(true);
+    expect(rollups.has(b)).toBe(true);
+    // The unrelated branch is completely unaffected by the cycle.
+    expect(rollups.get(dome)).toEqual({ needed: 4, done: 2, percent: 50 });
+  });
 });
 
 describe('getAllProjectRollups / getSingleProjectManifestInfo — hasManifest signal', () => {
@@ -248,6 +283,31 @@ describe('getSubtreeIds', () => {
     const projectId = makeProject(db);
     const leaf = makeSubAssembly(db, projectId, 'Leaf');
     expect(getSubtreeIds(db, leaf)).toEqual([leaf]);
+  });
+
+  // Defensive-depth-cap fold-in (#2175 closing-api review): same
+  // unbounded-cycle risk as services/modelConvert.ts's
+  // getRecursiveFolderIds (sub_assemblies.parent_id is structurally
+  // identical to folders.parent_id, and validateReparent guards only the
+  // normal reparent mutation path, not the schema). Hand-built cycle,
+  // bypassing that guard entirely, same reproduction method as the
+  // folders-side test — this is the regression guard: must terminate
+  // fast with a bounded result, not hang the process.
+  it('terminates fast and returns a bounded set on a cyclic parent_id, instead of hanging', () => {
+    const projectId = makeProject(db);
+    const a = makeSubAssembly(db, projectId, 'A');
+    const b = makeSubAssembly(db, projectId, 'B', a);
+    // Hand-built cycle: A's parent_id now points at B, so A -> B -> A.
+    db.prepare('UPDATE sub_assemblies SET parent_id = ? WHERE id = ?').run(b, a);
+
+    const start = Date.now();
+    const ids = getSubtreeIds(db, a);
+    const elapsedMs = Date.now() - start;
+
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(ids.length).toBeLessThanOrEqual(101);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids)).toEqual(new Set([a, b]));
   });
 });
 

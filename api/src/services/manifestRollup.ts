@@ -18,6 +18,23 @@ function toPercent(needed: number, done: number): number | null {
   return Math.round((100 * done) / needed);
 }
 
+// Defensive recursion cap (#2175 closing-api review, third and final
+// site — see getRecursiveFolderIds in modelConvert.ts and getSubtreeIds
+// just below for the first two): this closure CTE has the same
+// unbounded UNION ALL shape as those, just keyed on a PAIR
+// (ancestor_id, descendant_id) rather than a single walked id, because
+// it seeds EVERY sub_assembly in the project as its own ancestor in one
+// query rather than walking from a single root. A cyclic parent_id
+// still hangs it exactly the same way: for whichever ancestor(s) can
+// reach into the cycle, the recursive step keeps re-adding the same
+// pair of descendant ids under that ancestor forever (unrelated
+// ancestors elsewhere in the project terminate normally, since depth is
+// tracked per-row, per-ancestor — a cycle affecting one branch doesn't
+// block the whole query, it just never stops expanding that branch).
+// Same bound, same rationale: Aaron's real manifests are nowhere near
+// 100 levels deep.
+const MAX_ROLLUP_DEPTH = 100;
+
 // Rollup for every sub_assembly in one project, keyed by sub_assembly id.
 // The closure CTE expands each node to (itself + every descendant), then
 // joins sub_assembly_parts and sums, clamping each placement's contribution
@@ -31,12 +48,13 @@ export function getSubAssemblyRollups(
 ): Map<string, SubAssemblyRollup> {
   const rows = db
     .prepare(
-      `WITH RECURSIVE closure(ancestor_id, descendant_id) AS (
-         SELECT id, id FROM sub_assemblies WHERE project_id = ?
+      `WITH RECURSIVE closure(ancestor_id, descendant_id, depth) AS (
+         SELECT id, id, 0 FROM sub_assemblies WHERE project_id = ?
          UNION ALL
-         SELECT c.ancestor_id, sa.id
+         SELECT c.ancestor_id, sa.id, c.depth + 1
          FROM closure c
          JOIN sub_assemblies sa ON sa.parent_id = c.descendant_id
+         WHERE c.depth < ?
        ),
        -- #2027: a placement whose asset has been soft-deleted (trashed but
        -- still "placed") must drop out of the rollup entirely — it's not a
@@ -53,16 +71,31 @@ export function getSubAssemblyRollups(
        )
        SELECT c.ancestor_id AS sub_assembly_id,
               COALESCE(SUM(lp.quantity), 0) AS needed,
-              COALESCE(SUM(MIN(lp.printed_count, lp.quantity)), 0) AS done
+              COALESCE(SUM(MIN(lp.printed_count, lp.quantity)), 0) AS done,
+              MAX(c.depth) AS max_depth
        FROM closure c
        LEFT JOIN live_parts lp ON lp.sub_assembly_id = c.descendant_id
        GROUP BY c.ancestor_id`
     )
-    .all(projectId) as { sub_assembly_id: string; needed: number; done: number }[];
+    .all(projectId, MAX_ROLLUP_DEPTH) as { sub_assembly_id: string; needed: number; done: number; max_depth: number }[];
 
   const map = new Map<string, SubAssemblyRollup>();
+  const cappedAncestors: string[] = [];
   for (const r of rows) {
+    if (r.max_depth === MAX_ROLLUP_DEPTH) cappedAncestors.push(r.sub_assembly_id);
     map.set(r.sub_assembly_id, { needed: r.needed, done: r.done, percent: toPercent(r.needed, r.done) });
+  }
+  // Same graceful-termination rationale as getRecursiveFolderIds/
+  // getSubtreeIds: an ancestor whose deepest reached descendant sits
+  // exactly at the cap means either a cycle reachable from it or a
+  // genuinely unusual depth — log and return the (per-ancestor)
+  // truncated rollup rather than hanging or throwing.
+  if (cappedAncestors.length > 0) {
+    console.warn(
+      `[manifestRollup] getSubAssemblyRollups hit the ${MAX_ROLLUP_DEPTH}-level depth cap for project `
+      + `${projectId} (ancestor sub_assembly ids: ${cappedAncestors.join(', ')}) — likely a cyclic `
+      + 'parent_id reachable from these. Their rollup totals are truncated instead of hanging.'
+    );
   }
   return map;
 }
@@ -159,6 +192,21 @@ export function getAllUngroupedCounts(db: Database.Database): Map<string, number
   return new Map(rows.map((r) => [r.project_id, r.cnt]));
 }
 
+// Defensive recursion cap (fold-in, #2175 closing-api review): same
+// unbounded WITH RECURSIVE pattern services/modelConvert.ts's
+// getRecursiveFolderIds had before this fold-in, on the structurally
+// identical parent_id shape (sub_assemblies vs folders). No DB-level
+// cycle constraint backs sub_assemblies.parent_id either — services/
+// subAssemblyTree.ts's validateReparent guards the one normal mutation
+// path (reparenting), not a schema guarantee — so a cyclic parent_id
+// arriving some other way would hang this synchronous, single-threaded
+// better-sqlite3 query (and the whole Node process with it) forever,
+// since UNION ALL never dedupes and just keeps re-adding the cycle's
+// ids. depth caps the walk at MAX_SUBTREE_DEPTH levels — real build
+// manifests are nowhere near this deep — guaranteeing termination
+// instead of a freeze.
+const MAX_SUBTREE_DEPTH = 100;
+
 // All sub_assembly ids in a subtree, self included — used by the delete
 // path to know which placements are about to be cascade-deleted before
 // they're gone, so the affected assets can be evaluated for return to the
@@ -166,14 +214,28 @@ export function getAllUngroupedCounts(db: Database.Database): Map<string, number
 export function getSubtreeIds(db: Database.Database, rootId: string): string[] {
   const rows = db
     .prepare(
-      `WITH RECURSIVE subtree(id) AS (
-         SELECT ?
+      `WITH RECURSIVE subtree(id, depth) AS (
+         SELECT ?, 0
          UNION ALL
-         SELECT sa.id FROM subtree s JOIN sub_assemblies sa ON sa.parent_id = s.id
+         SELECT sa.id, subtree.depth + 1
+         FROM subtree JOIN sub_assemblies sa ON sa.parent_id = subtree.id
+         WHERE subtree.depth < ?
        )
-       SELECT id FROM subtree`
+       SELECT id, depth FROM subtree`
     )
-    .all(rootId) as { id: string }[];
+    .all(rootId, MAX_SUBTREE_DEPTH) as { id: string; depth: number }[];
+
+  // Same graceful-termination rationale as getRecursiveFolderIds: a row
+  // at the cap means either a cycle or a genuinely unusual depth — log
+  // and return the truncated set, never throw on what might be a
+  // legitimate (if extreme) deep tree.
+  if (rows.some((r) => r.depth === MAX_SUBTREE_DEPTH)) {
+    console.warn(
+      `[manifestRollup] getSubtreeIds hit the ${MAX_SUBTREE_DEPTH}-level depth cap under sub_assembly `
+      + `${rootId} — likely a cyclic parent_id. Returning the truncated set instead of hanging.`
+    );
+  }
+
   return rows.map((r) => r.id);
 }
 

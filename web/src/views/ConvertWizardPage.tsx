@@ -7,7 +7,7 @@ import { useFolders } from '../hooks/useFolders.js';
 import { useModels } from '../hooks/useModels.js';
 import { api } from '../lib/api.js';
 import { foldersWithPaths } from '../lib/folderTreePaths.js';
-import type { FolderConversionPreviewOut, ModelFileRole } from '../lib/api.js';
+import type { FolderConversionPreviewFile, ModelFileRole } from '../lib/api.js';
 
 // Bulk folder→model convert wizard (#2170, Phase B4). Admin-ish power
 // tool: routed at /convert (see AppShell.tsx), entry point placed in
@@ -27,10 +27,33 @@ import type { FolderConversionPreviewOut, ModelFileRole } from '../lib/api.js';
 // a custom hook, since none of this state is needed anywhere else.
 type Step = 'select' | 'review' | 'results';
 
+// #2175 adapter note: the API contract grew a mode ('single' |
+// 'each-child') and moved the per-model breakdown into a `results[]`
+// array so both modes share one shape (api/src/routes/models.ts's
+// handler comment has the full rationale). THIS page still only drives
+// the pre-#2175 "one folder -> one model" flow (mode 'single' always),
+// so it keeps consuming the same flat shape it always did — just sourced
+// from `results[0]` at the fetch boundary below instead of the
+// response's now-optional top-level fields. Mode 'each-child' (bulk
+// "each named subfolder -> its own model", bare-GUID-aware tree
+// filtering via FolderOut.isBareGuid) is a real UX addition Remy owns as
+// a follow-up, not a mechanical adapter.
+interface SingleFolderPreview {
+  folderId: string;
+  folderName: string;
+  suggestedTitle: string;
+  assetCount: number;
+  countsByRole: Record<ModelFileRole, number>;
+  files: FolderConversionPreviewFile[];
+  coverAssetId: string | null;
+  alreadyConverted: boolean;
+  existingModelIds: string[];
+}
+
 type PreviewState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; preview: FolderConversionPreviewOut };
+  | { status: 'ready'; preview: SingleFolderPreview };
 
 interface ResultRow {
   folderId: string;
@@ -105,7 +128,25 @@ export function ConvertWizardPage() {
       if (previews.has(folderId)) continue;
       setPreviews((prev) => new Map(prev).set(folderId, { status: 'loading' }));
       try {
-        const preview = await api.models.previewFromFolder(folderId);
+        // mode 'single' explicit (this page never offers 'each-child' —
+        // see the SingleFolderPreview comment above). The response's
+        // per-model breakdown always has exactly one entry for mode
+        // 'single' (api/src/routes/models.ts's handler guarantees this),
+        // so results[0] is the one true source — reading it here rather
+        // than the response's now-optional flat top-level fields.
+        const raw = await api.models.previewFromFolder(folderId, 'single');
+        const entry = raw.results[0];
+        const preview: SingleFolderPreview = {
+          folderId: raw.folderId,
+          folderName: raw.folderName,
+          suggestedTitle: entry.suggestedTitle,
+          assetCount: entry.assetCount,
+          countsByRole: entry.countsByRole,
+          files: entry.files,
+          coverAssetId: entry.coverAssetId,
+          alreadyConverted: entry.alreadyConverted,
+          existingModelIds: entry.existingModelIds,
+        };
         setPreviews((prev) => new Map(prev).set(folderId, { status: 'ready', preview }));
       } catch (err) {
         setPreviews((prev) => new Map(prev).set(
@@ -135,7 +176,7 @@ export function ConvertWizardPage() {
         : rows.find((r) => r.folder.id === folderId)?.folder.name ?? folderId;
       const title = titleOverrides.get(folderId)?.trim() || undefined;
       try {
-        const created = await api.models.fromFolder(folderId, title);
+        const created = await api.models.fromFolder(folderId, title, 'single');
         setResults((prev) => [...prev, { folderId, folderName, status: 'converted', modelId: created.id }]);
       } catch (err) {
         setResults((prev) => [...prev, {

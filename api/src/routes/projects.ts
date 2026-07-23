@@ -129,11 +129,20 @@ router.get('/project/:id', requireAuth, (req: Request, res: Response) => {
   const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) as ProjectRow | undefined;
   if (!row) { res.status(404).json({ error: 'Not found' }); return; }
 
+  // #2188: the sibling gap flagged during #2027 — every other joined
+  // asset list in the codebase (models.ts's loadModelDetail, sets.ts,
+  // manifestRollup.ts's live_parts) filters a.deleted_at IS NULL so a
+  // trashed asset silently drops out of the list instead of showing a
+  // dead row; this one join predates that convention and hadn't been
+  // brought in line. A soft-deleted asset never leaves project_assets
+  // (soft-delete only marks the asset row, see routes/assets.ts's DELETE
+  // handler), so without this filter a trashed asset kept showing up in
+  // the project detail view forever.
   const paRows = db.prepare(
     `SELECT pa.*, a.*
      FROM project_assets pa
      JOIN assets a ON a.id = pa.asset_id
-     WHERE pa.project_id = ?
+     WHERE pa.project_id = ? AND a.deleted_at IS NULL
      ORDER BY pa.sort_order ASC, a.created_at DESC`
   ).all(row.id) as (AssetRow & { project_id: string; sort_order: number; overrides_json: string })[];
 

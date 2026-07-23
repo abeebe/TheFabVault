@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAuth } from '../auth.js';
 import { getDb } from '../db.js';
+import { isBareGuidName } from '../services/modelConvert.js';
 import type { FolderOut, FolderRow } from '../types/index.js';
 
 const router = Router();
@@ -12,6 +13,12 @@ function toOut(row: FolderRow): FolderOut {
     name: row.name,
     parentId: row.parent_id,
     createdAt: row.created_at,
+    // #2175: single source of truth for "named vs bare-GUID" — the bulk
+    // convert wizard's Mode B relies on the exact same isBareGuidName
+    // check the server applies when deciding which immediate children
+    // become models, so the tree filter and the actual conversion rule
+    // can never drift apart.
+    isBareGuid: isBareGuidName(row.name),
   };
 }
 
