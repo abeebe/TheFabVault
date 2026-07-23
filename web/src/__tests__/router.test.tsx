@@ -197,12 +197,12 @@ describe('AppShell routing', () => {
     expect(screen.queryByText(/coming soon/i)).toBeNull();
   });
 
-  it('renders ConvertWizardPage at /convert (#2170)', async () => {
+  it('renders ConvertWizardPage at /convert (#2170; header text updated #2175)', async () => {
     mockFoldersList.mockImplementation(() => Promise.resolve([
-      { id: 'f1', name: 'Dragon Prints', parentId: null, createdAt: 0 },
+      { id: 'f1', name: 'Dragon Prints', parentId: null, createdAt: 0, isBareGuid: false },
     ]));
     renderAt('/convert');
-    expect(await screen.findByText('Bulk Convert Folders to Models')).toBeTruthy();
+    expect(await screen.findByText('Convert Folder to Models')).toBeTruthy();
     expect(await screen.findByText('Dragon Prints')).toBeTruthy();
   });
 
@@ -319,7 +319,7 @@ describe('AppShell member-mode gating (#2180)', () => {
   it('shows a clean Not-authorized state on direct-URL access to /convert as a member', async () => {
     renderAt('/convert');
     expect(await screen.findByText('Not authorized')).toBeTruthy();
-    expect(screen.queryByText('Bulk Convert Folders to Models')).toBeNull();
+    expect(screen.queryByText('Convert Folder to Models')).toBeNull();
   });
 
   it('does not show Not-authorized while the identity fetch is still in flight (no flash of the wrong state)', async () => {
