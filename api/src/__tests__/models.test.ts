@@ -129,9 +129,12 @@ function insertAsset(
   return { id, hash };
 }
 
-function insertFolder(app: Booted, name = 'Test Folder'): string {
+// parentId added #2175 — the recursive/each-child conversion tests need
+// nested folders; every pre-existing call site passes no parentId and
+// gets the old flat-folder behavior unchanged.
+function insertFolder(app: Booted, name = 'Test Folder', parentId: string | null = null): string {
   const id = uuidv4();
-  app.db.prepare('INSERT INTO folders (id, name) VALUES (?, ?)').run(id, name);
+  app.db.prepare('INSERT INTO folders (id, name, parent_id) VALUES (?, ?, ?)').run(id, name, parentId);
   return id;
 }
 
@@ -671,6 +674,272 @@ describe('GET /models/from-folder/preview — dry run, no writes', () => {
     const adminBody = await adminRes.json() as { alreadyConverted: boolean; existingModelIds: string[] };
     expect(adminBody.alreadyConverted).toBe(true);
     expect(adminBody.existingModelIds).toEqual([created.id]);
+  });
+});
+
+// #2175 — root-cause fix: pointing conversion at a meaningfully-named
+// parent whose real assets live several levels down in bare-GUID leaf
+// folders (the exact "Droidkyn" shape from Aaron's bug report).
+describe('mode=single — recursive collection (#2175)', () => {
+  it('pulls deep descendant assets, not just direct children, into one model', async () => {
+    const app = await bootApp();
+    const droidkyn = insertFolder(app, 'Droidkyn');
+    const guidLeaf1 = insertFolder(app, uuidv4(), droidkyn);
+    const guidLeaf2 = insertFolder(app, uuidv4(), guidLeaf1);
+    const arm = insertAsset(app, { filename: 'arm.stl', folderId: guidLeaf1 });
+    const leg = insertAsset(app, { filename: 'leg.stl', folderId: guidLeaf2 });
+    const readme = insertAsset(app, { filename: 'readme.txt', folderId: droidkyn }); // direct child too
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: droidkyn, mode: 'single' }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { title: string; files: Array<{ assetId: string }> };
+    expect(body.title).toBe('Droidkyn');
+    const ids = body.files.map((f) => f.assetId).sort();
+    expect(ids).toEqual([arm.id, leg.id, readme.id].sort());
+  });
+
+  it('defaults to mode=single (recursive) when mode is omitted — back-compat with pre-#2175 callers', async () => {
+    const app = await bootApp();
+    const root = insertFolder(app, 'Root');
+    const nested = insertFolder(app, uuidv4(), root);
+    const deep = insertAsset(app, { filename: 'deep.stl', folderId: nested });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: root }), // no mode
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { files: Array<{ assetId: string }> };
+    expect(body.files.map((f) => f.assetId)).toEqual([deep.id]);
+  });
+
+  it('preview breakdown (results[0]) matches exactly what the commit creates', async () => {
+    const app = await bootApp();
+    const root = insertFolder(app, 'Droidkyn');
+    const leaf = insertFolder(app, uuidv4(), root);
+    insertAsset(app, { filename: 'part.stl', folderId: leaf });
+    insertAsset(app, { filename: 'cover.png', folderId: root, thumbStatus: 'done' });
+
+    const previewRes = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${root}&mode=single`, { headers: bearer(app.token) });
+    const preview = await previewRes.json() as {
+      mode: string; assetCount: number; countsByRole: Record<string, number>;
+      results: Array<{ assetCount: number; countsByRole: Record<string, number> }>;
+    };
+    expect(preview.mode).toBe('single');
+    expect(preview.assetCount).toBe(2);
+    expect(preview.results).toHaveLength(1);
+    expect(preview.results[0].assetCount).toBe(2);
+    expect(preview.results[0].countsByRole).toEqual({ part: 1, image: 1, doc: 0, other: 0 });
+
+    const commitRes = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: root, mode: 'single' }),
+    });
+    const commit = await commitRes.json() as { files: unknown[] };
+    expect(commit.files).toHaveLength(preview.assetCount);
+  });
+
+  it('flat top-level fields on the preview are unchanged in shape from pre-#2175 callers', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app, 'Flat Folder');
+    insertAsset(app, { filename: 'a.stl', folderId });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(app.token) });
+    const body = await res.json() as {
+      folderId: string; folderName: string; suggestedTitle: string; assetCount: number;
+      coverAssetId: string | null; alreadyConverted: boolean; existingModelIds: string[];
+      files: unknown[]; countsByRole: Record<string, number>;
+    };
+    expect(body.folderName).toBe('Flat Folder');
+    expect(body.suggestedTitle).toBe('Flat Folder');
+    expect(body.assetCount).toBe(1);
+    expect(Array.isArray(body.files)).toBe(true);
+  });
+});
+
+describe('mode=each-child — batch convert per named immediate child (#2175)', () => {
+  it("converts Aaron's Minis example: named children each become their own model, bare-GUID child is skipped", async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const circuitMaster = insertFolder(app, 'Circuit Master', minis);
+    const heavyWeapons = insertFolder(app, 'Heavy Weapons', minis);
+    const bareGuidChild = insertFolder(app, uuidv4(), minis);
+
+    insertAsset(app, { filename: 'body.stl', folderId: droidkyn });
+    insertAsset(app, { filename: 'turret.stl', folderId: circuitMaster });
+    insertAsset(app, { filename: 'gun.stl', folderId: heavyWeapons });
+    insertAsset(app, { filename: 'orphan.stl', folderId: bareGuidChild }); // must NOT be converted
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: minis, mode: 'each-child' }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as {
+      mode: string;
+      created: Array<{ title: string; sourceFolderId: string }>;
+      skippedChildren: Array<{ folderId: string; reason: string }>;
+    };
+    expect(body.mode).toBe('each-child');
+    expect(body.created.map((m) => m.title).sort()).toEqual(['Circuit Master', 'Droidkyn', 'Heavy Weapons']);
+    expect(body.created.map((m) => m.sourceFolderId).sort()).toEqual([circuitMaster, droidkyn, heavyWeapons].sort());
+
+    expect(body.skippedChildren).toHaveLength(1);
+    expect(body.skippedChildren[0].folderId).toBe(bareGuidChild);
+    expect(body.skippedChildren[0].reason).toBe('bare-guid-leaf');
+
+    // The bare-GUID child's asset was never modeled by this batch.
+    const allModels = await (await fetch(`${app.baseUrl}/models?limit=100`, { headers: bearer(app.token) })).json() as
+      { items: Array<{ sourceFolderId: string | null }> };
+    expect(allModels.items.some((m) => m.sourceFolderId === bareGuidChild)).toBe(false);
+  });
+
+  it('recurses each named child\'s own subtree, not just its direct assets', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const nestedLeaf = insertFolder(app, uuidv4(), droidkyn); // GUID leaf under a named child
+    const direct = insertAsset(app, { filename: 'body.stl', folderId: droidkyn });
+    const deep = insertAsset(app, { filename: 'arm.stl', folderId: nestedLeaf });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: minis, mode: 'each-child' }),
+    });
+    const body = await res.json() as { created: Array<{ files: Array<{ assetId: string }> }> };
+    expect(body.created).toHaveLength(1);
+    expect(body.created[0].files.map((f) => f.assetId).sort()).toEqual([direct.id, deep.id].sort());
+  });
+
+  it('honors childTitles overrides, falling back to the child folder name', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const circuitMaster = insertFolder(app, 'Circuit Master', minis);
+    insertAsset(app, { filename: 'a.stl', folderId: droidkyn });
+    insertAsset(app, { filename: 'b.stl', folderId: circuitMaster });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({
+        folderId: minis, mode: 'each-child', childTitles: { [droidkyn]: 'Custom Droidkyn Name' },
+      }),
+    });
+    const body = await res.json() as { created: Array<{ title: string; sourceFolderId: string }> };
+    const titles = new Map(body.created.map((m) => [m.sourceFolderId, m.title]));
+    expect(titles.get(droidkyn)).toBe('Custom Droidkyn Name');
+    expect(titles.get(circuitMaster)).toBe('Circuit Master');
+  });
+
+  it('400s when every immediate child is either bare-GUID or empty', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    insertFolder(app, uuidv4(), minis); // bare-GUID, skipped
+    const empty = insertFolder(app, 'Empty Named Child', minis); // named but no assets
+    void empty;
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: minis, mode: 'each-child' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('surfaces looseAssetCount for assets sitting directly in the container, never converting them', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    insertAsset(app, { filename: 'child.stl', folderId: droidkyn });
+    insertAsset(app, { filename: 'loose1.stl', folderId: minis });
+    insertAsset(app, { filename: 'loose2.stl', folderId: minis });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${minis}&mode=each-child`, { headers: bearer(app.token) });
+    const body = await res.json() as { looseAssetCount: number; results: unknown[] };
+    expect(body.looseAssetCount).toBe(2);
+    expect(body.results).toHaveLength(1); // only Droidkyn
+  });
+
+  it('preview results[] matches the commit\'s created[] one-for-one (title, assetCount, sourceFolderId)', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const circuitMaster = insertFolder(app, 'Circuit Master', minis);
+    insertAsset(app, { filename: 'a.stl', folderId: droidkyn });
+    insertAsset(app, { filename: 'b.stl', folderId: circuitMaster });
+    insertAsset(app, { filename: 'c.stl', folderId: circuitMaster });
+
+    const previewRes = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${minis}&mode=each-child`, { headers: bearer(app.token) });
+    const preview = await previewRes.json() as {
+      results: Array<{ sourceFolderId: string; suggestedTitle: string; assetCount: number }>;
+    };
+
+    const commitRes = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: minis, mode: 'each-child' }),
+    });
+    const commit = await commitRes.json() as { created: Array<{ title: string; sourceFolderId: string; files: unknown[] }> };
+
+    const previewByFolder = new Map(preview.results.map((r) => [r.sourceFolderId, r]));
+    for (const created of commit.created) {
+      const match = previewByFolder.get(created.sourceFolderId);
+      expect(match).toBeDefined();
+      expect(match!.suggestedTitle).toBe(created.title);
+      expect(match!.assetCount).toBe(created.files.length);
+    }
+  });
+
+  it('is additive-only — folders and assets are untouched by an each-child batch', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const asset = insertAsset(app, { filename: 'a.stl', folderId: droidkyn });
+
+    await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: minis, mode: 'each-child' }),
+    });
+
+    const folderRow = app.db.prepare('SELECT id FROM folders WHERE id = ?').get(droidkyn);
+    expect(folderRow).toBeTruthy();
+    const assetRow = app.db.prepare('SELECT folder_id, deleted_at FROM assets WHERE id = ?').get(asset.id) as
+      { folder_id: string; deleted_at: number | null };
+    expect(assetRow.folder_id).toBe(droidkyn);
+    expect(assetRow.deleted_at).toBeNull();
+  });
+
+  it('already-converted marker (alreadyConverted/existingModelIds) is scoped per-child, not per-container', async () => {
+    const app = await bootApp();
+    const minis = insertFolder(app, 'Minis');
+    const droidkyn = insertFolder(app, 'Droidkyn', minis);
+    const circuitMaster = insertFolder(app, 'Circuit Master', minis);
+    insertAsset(app, { filename: 'a.stl', folderId: droidkyn });
+    insertAsset(app, { filename: 'b.stl', folderId: circuitMaster });
+
+    // Convert Droidkyn alone first, mode=single, so only that child has a model.
+    await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ folderId: droidkyn, mode: 'single' }),
+    });
+
+    const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${minis}&mode=each-child`, { headers: bearer(app.token) });
+    const body = await res.json() as { results: Array<{ sourceFolderId: string; alreadyConverted: boolean }> };
+    const byFolder = new Map(body.results.map((r) => [r.sourceFolderId, r.alreadyConverted]));
+    expect(byFolder.get(droidkyn)).toBe(true);
+    expect(byFolder.get(circuitMaster)).toBe(false);
   });
 });
 
