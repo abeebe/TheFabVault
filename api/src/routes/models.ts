@@ -121,7 +121,14 @@ function assetRowToOut(row: AssetRow): AssetOut {
 
 // Resolves the cover thumb URL: the explicit cover_asset_id if it has a
 // usable thumbnail, else the first role='image' file (by sort_order),
-// else null. Same fallback shape as routes/sets.ts#resolveCoverThumb.
+// else — #2187, companion to the shipped #2186 gallery fallback — the
+// first role='part' file with a finished thumbnail (the 3D-render
+// thumb slicers/thumbGen produce for STL/3MF/etc.), else null. Many
+// models created by #2175's from-folder conversion have no image at
+// all (a folder of loose STLs with no photo), so without this last
+// step ModelCard grid tiles fell straight through to the generic
+// placeholder even though a perfectly good part thumbnail existed.
+// Same fallback shape as routes/sets.ts#resolveCoverThumb.
 function resolveCoverThumb(db: Database.Database, coverAssetId: string | null, modelId: string): string | null {
   if (coverAssetId) {
     const row = db.prepare('SELECT id, thumb_status FROM assets WHERE id = ? AND deleted_at IS NULL')
@@ -130,14 +137,24 @@ function resolveCoverThumb(db: Database.Database, coverAssetId: string | null, m
       return `/thumb/${row.id}.jpg`;
     }
   }
-  const fallback = db.prepare(
+  const imageFallback = db.prepare(
     `SELECT a.id FROM model_files mf
      JOIN assets a ON a.id = mf.asset_id
      WHERE mf.model_id = ? AND mf.role = 'image' AND a.deleted_at IS NULL AND a.thumb_status = 'done'
      ORDER BY mf.sort_order ASC, a.created_at DESC
      LIMIT 1`
   ).get(modelId) as { id: string } | undefined;
-  if (fallback && thumbExists(fallback.id)) return `/thumb/${fallback.id}.jpg`;
+  if (imageFallback && thumbExists(imageFallback.id)) return `/thumb/${imageFallback.id}.jpg`;
+
+  const partFallback = db.prepare(
+    `SELECT a.id FROM model_files mf
+     JOIN assets a ON a.id = mf.asset_id
+     WHERE mf.model_id = ? AND mf.role = 'part' AND a.deleted_at IS NULL AND a.thumb_status = 'done'
+     ORDER BY mf.sort_order ASC, a.created_at DESC
+     LIMIT 1`
+  ).get(modelId) as { id: string } | undefined;
+  if (partFallback && thumbExists(partFallback.id)) return `/thumb/${partFallback.id}.jpg`;
+
   return null;
 }
 

@@ -1117,6 +1117,74 @@ describe('PATCH /model/:id/cover', () => {
   });
 });
 
+// #2187 — companion to the shipped #2186 gallery fallback: resolveCoverThumb
+// previously fell through image-cover -> null when a model had no image at
+// all, which #2175's from-folder conversion produces constantly (a folder
+// of loose STLs with no photo). Writes a REAL stub thumb file on disk (same
+// pattern as collections.test.ts's giveModelACoverThumb) — thumbExists()
+// gates the fallback, so without a real file this would false-pass.
+function writeStubThumb(app: Booted, assetId: string): void {
+  const thumbsDir = path.join(app.storageDir, 'thumbs');
+  fs.mkdirSync(thumbsDir, { recursive: true });
+  fs.writeFileSync(path.join(thumbsDir, `${assetId}.jpg`), 'stub-thumb-bytes');
+}
+
+describe('cover thumbnail server-side part fallback (#2187)', () => {
+  it('falls back to the first done-thumb part file when there is no cover and no image', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Loose STLs' }) });
+    const { id } = await createRes.json() as { id: string };
+
+    const part = insertAsset(app, { filename: 'body.stl', thumbStatus: 'done' });
+    writeStubThumb(app, part.id);
+
+    await fetch(`${app.baseUrl}/model/${id}/files`, {
+      method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ assetIds: [part.id], role: 'part' }),
+    });
+
+    const res = await fetch(`${app.baseUrl}/model/${id}`, { headers: bearer(app.token) });
+    const body = await res.json() as { coverThumbUrl: string | null };
+    expect(body.coverThumbUrl).toBe(`/thumb/${part.id}.jpg`);
+  });
+
+  it('an image-role file still wins over a part-role file', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Mixed' }) });
+    const { id } = await createRes.json() as { id: string };
+
+    const part = insertAsset(app, { filename: 'body.stl', thumbStatus: 'done' });
+    writeStubThumb(app, part.id);
+    const image = insertAsset(app, { filename: 'cover.png', thumbStatus: 'done' });
+    writeStubThumb(app, image.id);
+
+    await fetch(`${app.baseUrl}/model/${id}/files`, {
+      method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ assetIds: [part.id], role: 'part' }),
+    });
+    await fetch(`${app.baseUrl}/model/${id}/files`, {
+      method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ assetIds: [image.id], role: 'image' }),
+    });
+
+    const res = await fetch(`${app.baseUrl}/model/${id}`, { headers: bearer(app.token) });
+    const body = await res.json() as { coverThumbUrl: string | null };
+    expect(body.coverThumbUrl).toBe(`/thumb/${image.id}.jpg`);
+  });
+
+  it('remains null when nothing has a finished thumbnail', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, { method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ title: 'Pending Only' }) });
+    const { id } = await createRes.json() as { id: string };
+
+    const part = insertAsset(app, { filename: 'body.stl', thumbStatus: 'pending' });
+    await fetch(`${app.baseUrl}/model/${id}/files`, {
+      method: 'POST', headers: jsonHeaders(app.token), body: JSON.stringify({ assetIds: [part.id], role: 'part' }),
+    });
+
+    const res = await fetch(`${app.baseUrl}/model/${id}`, { headers: bearer(app.token) });
+    const body = await res.json() as { coverThumbUrl: string | null };
+    expect(body.coverThumbUrl).toBeNull();
+  });
+});
+
 describe('GET /model/:id/download — zip of role=part only', () => {
   it('includes only part-role files, not images or docs', async () => {
     const app = await bootApp();
