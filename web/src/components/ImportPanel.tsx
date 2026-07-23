@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, CheckCircle, AlertCircle, ChevronRight, FolderInput } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, ChevronRight, FolderInput, MinusCircle } from 'lucide-react';
 import { Modal } from './Modal.js';
 import { Spinner } from './Spinner.js';
 import { useImportJob } from '../hooks/useImportJob.js';
@@ -29,9 +29,14 @@ export function ImportPanel() {
 
   const doneItems = job.items.filter((i) => i.status === 'done');
   const errorItems = job.items.filter((i) => i.status === 'error');
+  const skippedItems = job.items.filter((i) => i.status === 'skipped');
   const newCount = doneItems.filter((i) => !i.linked).length;
   const linkedCount = doneItems.filter((i) => i.linked).length;
-  const finishedCount = doneItems.length + errorItems.length;
+  // 'skipped' items were never attempted (cancel stopped the pool before
+  // the pool reached them) but they ARE terminal — counting them here is
+  // what lets the progress bar reach 100% on a cancelled run instead of
+  // stalling short forever. See importStore.ts's startImport cancel branch.
+  const finishedCount = doneItems.length + errorItems.length + skippedItems.length;
   const createdSoFar = Math.min(job.newSubAssemblyIdsSeen.size, job.newSubAssemblyTotal);
 
   if (!expanded) {
@@ -110,9 +115,10 @@ export function ImportPanel() {
               newCount={newCount}
               linkedCount={linkedCount}
               failedCount={errorItems.length}
+              skippedCount={skippedItems.length}
             />
 
-            {errorItems.length > 0 && (
+            {(errorItems.length > 0 || skippedItems.length > 0) && (
               <FileDetailsDisclosure open={showFileDetails} onToggle={() => setShowFileDetails((v) => !v)} items={job.items} onlyFailed />
             )}
 
@@ -136,9 +142,9 @@ export function ImportPanel() {
 }
 
 function ResultSummary({
-  folderName, createdCount, mergedCount, newCount, linkedCount, failedCount,
+  folderName, createdCount, mergedCount, newCount, linkedCount, failedCount, skippedCount,
 }: {
-  folderName: string; createdCount: number; mergedCount: number; newCount: number; linkedCount: number; failedCount: number;
+  folderName: string; createdCount: number; mergedCount: number; newCount: number; linkedCount: number; failedCount: number; skippedCount: number;
 }) {
   const nothingNewHappened = createdCount === 0 && mergedCount === 0 && newCount === 0 && linkedCount > 0;
 
@@ -161,6 +167,11 @@ function ResultSummary({
           {failedCount} file{failedCount === 1 ? '' : 's'} failed to import from {folderName}. See details below.
         </p>
       )}
+      {skippedCount > 0 && (
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          {skippedCount} file{skippedCount === 1 ? '' : 's'} skipped (cancelled).
+        </p>
+      )}
     </div>
   );
 }
@@ -173,7 +184,10 @@ function FileDetailsDisclosure({
   items: { file: File; segments: string[]; status: string; linked: boolean; error?: string }[];
   onlyFailed?: boolean;
 }) {
-  const shown = onlyFailed ? items.filter((i) => i.status === 'error') : items;
+  // onlyFailed also surfaces 'skipped' items alongside 'error' ones — both
+  // are terminal-but-not-done outcomes worth the user drilling into from
+  // the Result screen (a cancelled run reports skips here, not just fails).
+  const shown = onlyFailed ? items.filter((i) => i.status === 'error' || i.status === 'skipped') : items;
   return (
     <div>
       <button onClick={onToggle} className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-accent">
@@ -186,6 +200,7 @@ function FileDetailsDisclosure({
             <div key={i} className="flex items-center gap-2 text-xs">
               {item.status === 'done' && <CheckCircle size={12} className="text-green-500 flex-shrink-0" />}
               {item.status === 'error' && <AlertCircle size={12} className="text-amber-500 flex-shrink-0" />}
+              {item.status === 'skipped' && <MinusCircle size={12} className="text-gray-400 flex-shrink-0" />}
               {item.status === 'active' && <Spinner size="sm" />}
               {item.status === 'pending' && <div className="w-3 h-3 rounded-full border-2 border-gray-300 dark:border-gray-600 flex-shrink-0" />}
               <span className="truncate text-gray-600 dark:text-gray-300 flex-1">

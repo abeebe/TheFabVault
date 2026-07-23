@@ -311,6 +311,18 @@ export async function startImport(plan: ImportPlan): Promise<void> {
     Array.from({ length: Math.min(COMMIT_CONCURRENCY, plan.resolutions.length) }, () => worker())
   );
 
+  // Cancel stops the pool from claiming further work (see cancelImport's
+  // comment), but that leaves every item the pool never got to still
+  // 'pending' — an unresolvable state the UI has no way to represent as
+  // "finished." Reid's spec calls this "skipped," not "failed": these
+  // files were never attempted, so they must not read as errors. This is
+  // also why the finished-count math in ImportPanel counts 'skipped'
+  // alongside 'done'/'error' — otherwise the progress bar would never
+  // reach 100% on a cancelled run.
+  if (state.cancelRequested) {
+    updateItems((cur) => cur.map((it) => (it.status === 'pending' ? { ...it, status: 'skipped' } : it)));
+  }
+
   setState({ phase: 'done', currentLocation: '' });
   notifyProjectImport(plan.projectId);
 }
