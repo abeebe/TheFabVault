@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   getSubAssemblyRollups, getProjectRollupTotal, getAllProjectRollups,
   getSingleProjectManifestInfo, getSubtreeIds, returnAssetToUngroupedIfOrphaned,
+  getUngroupedCount, getAllUngroupedCounts,
 } from '../services/manifestRollup.js';
 
 // Minimal in-memory schema — just the tables these tests touch, mirroring
@@ -83,6 +84,17 @@ function placePart(
     `INSERT INTO sub_assembly_parts (sub_assembly_id, asset_id, quantity, printed_count)
      VALUES (?, ?, ?, ?)`
   ).run(subAssemblyId, assetId, quantity, printedCount);
+}
+
+function trashAsset(db: Database.Database, assetId: string): void {
+  db.prepare('UPDATE assets SET deleted_at = unixepoch() WHERE id = ?').run(assetId);
+}
+
+function placeUngrouped(db: Database.Database, projectId: string, assetId: string): void {
+  db.prepare(
+    `INSERT INTO project_assets (project_id, asset_id, sort_order, overrides_json)
+     VALUES (?, ?, 0, '{}')`
+  ).run(projectId, assetId);
 }
 
 describe('getSubAssemblyRollups — recursive bottom-up progress', () => {
@@ -282,5 +294,111 @@ describe('returnAssetToUngroupedIfOrphaned — boundary rule on single-part remo
     const rows = db.prepare('SELECT * FROM project_assets WHERE project_id = ? AND asset_id = ?')
       .all(projectId, asset);
     expect(rows.length).toBe(1);
+  });
+});
+
+describe('#2027 — trashed-but-placed assets drop out of rollups and ungrouped counts', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = makeDb(); });
+
+  it('getSubAssemblyRollups excludes a placement whose asset was soft-deleted', () => {
+    const projectId = makeProject(db);
+    const sa = makeSubAssembly(db, projectId, 'Dome');
+    const live = makeAsset(db, 'live.stl');
+    const trashed = makeAsset(db, 'trashed.stl');
+    placePart(db, sa, live, 3, 3);
+    placePart(db, sa, trashed, 5, 5); // would double the total if counted
+
+    trashAsset(db, trashed);
+
+    const rollups = getSubAssemblyRollups(db, projectId);
+    expect(rollups.get(sa)).toEqual({ needed: 3, done: 3, percent: 100 });
+  });
+
+  it('getSubAssemblyRollups still returns a zero row for a sub-assembly whose only placements are all trashed', () => {
+    const projectId = makeProject(db);
+    const sa = makeSubAssembly(db, projectId, 'Dome');
+    const trashed = makeAsset(db);
+    placePart(db, sa, trashed, 5, 5);
+    trashAsset(db, trashed);
+
+    const rollups = getSubAssemblyRollups(db, projectId);
+    expect(rollups.get(sa)).toEqual({ needed: 0, done: 0, percent: null });
+  });
+
+  it('a trashed placement in a child sub-assembly does not leak into the parent rollup', () => {
+    const projectId = makeProject(db);
+    const leg = makeSubAssembly(db, projectId, 'Leg');
+    const foot = makeSubAssembly(db, projectId, 'Foot', leg);
+    const legPart = makeAsset(db);
+    const trashedFootPart = makeAsset(db);
+    placePart(db, leg, legPart, 2, 2);
+    placePart(db, foot, trashedFootPart, 10, 0);
+    trashAsset(db, trashedFootPart);
+
+    const rollups = getSubAssemblyRollups(db, projectId);
+    expect(rollups.get(foot)).toEqual({ needed: 0, done: 0, percent: null });
+    expect(rollups.get(leg)).toEqual({ needed: 2, done: 2, percent: 100 });
+  });
+
+  it('getProjectRollupTotal excludes a trashed placement from the project-level total', () => {
+    const projectId = makeProject(db);
+    const sa = makeSubAssembly(db, projectId, 'Dome');
+    const live = makeAsset(db);
+    const trashed = makeAsset(db);
+    placePart(db, sa, live, 4, 2);
+    placePart(db, sa, trashed, 6, 6);
+    trashAsset(db, trashed);
+
+    expect(getProjectRollupTotal(db, projectId)).toEqual({ needed: 4, done: 2, percent: 50 });
+  });
+
+  it('getAllProjectRollups excludes a trashed placement from the batched map, but still lists the project', () => {
+    const projectId = makeProject(db);
+    const sa = makeSubAssembly(db, projectId, 'Dome');
+    const trashed = makeAsset(db);
+    placePart(db, sa, trashed, 6, 6);
+    trashAsset(db, trashed);
+
+    const rollups = getAllProjectRollups(db);
+    // hasManifest is still true (a sub_assembly row exists) even though
+    // every one of its placements is trashed.
+    expect(rollups.get(projectId)).toEqual({ needed: 0, done: 0, percent: null });
+  });
+
+  it('getUngroupedCount excludes a trashed asset sitting in the ungrouped pool', () => {
+    const projectId = makeProject(db);
+    const live = makeAsset(db);
+    const trashed = makeAsset(db);
+    placeUngrouped(db, projectId, live);
+    placeUngrouped(db, projectId, trashed);
+    trashAsset(db, trashed);
+
+    expect(getUngroupedCount(db, projectId)).toBe(1);
+  });
+
+  it('getAllUngroupedCounts excludes trashed assets across the batched map', () => {
+    const projectId = makeProject(db);
+    const otherProject = makeProject(db, 'Other');
+    const live = makeAsset(db);
+    const trashed = makeAsset(db);
+    placeUngrouped(db, projectId, live);
+    placeUngrouped(db, projectId, trashed);
+    trashAsset(db, trashed);
+    placeUngrouped(db, otherProject, makeAsset(db));
+
+    const counts = getAllUngroupedCounts(db);
+    expect(counts.get(projectId)).toBe(1);
+    expect(counts.get(otherProject)).toBe(1);
+  });
+
+  it('a project whose only ungrouped asset is trashed has no entry in the batched map (not zero, absent)', () => {
+    const projectId = makeProject(db);
+    const trashed = makeAsset(db);
+    placeUngrouped(db, projectId, trashed);
+    trashAsset(db, trashed);
+
+    const counts = getAllUngroupedCounts(db);
+    expect(counts.has(projectId)).toBe(false);
   });
 });

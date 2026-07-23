@@ -8,7 +8,7 @@ import type {
   PrinterSettings, LaserSettings, VinylSettings, ProjectOverrides,
 } from '../types/index.js';
 import { thumbExists } from '../services/fileStore.js';
-import { getAllProjectRollups, getSingleProjectManifestInfo } from '../services/manifestRollup.js';
+import { getAllProjectRollups, getSingleProjectManifestInfo, getAllUngroupedCounts, getUngroupedCount } from '../services/manifestRollup.js';
 
 const router = Router();
 
@@ -67,10 +67,9 @@ router.get('/projects', requireAuth, (req: Request, res: Response) => {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all() as ProjectRow[];
 
-  const counts = db
-    .prepare('SELECT project_id, COUNT(*) as cnt FROM project_assets GROUP BY project_id')
-    .all() as { project_id: string; cnt: number }[];
-  const countMap = new Map(counts.map((c) => [c.project_id, c.cnt]));
+  // #2027: excludes soft-deleted assets — a trashed-but-still-placed asset
+  // must not inflate the ungrouped count.
+  const countMap = getAllUngroupedCounts(db);
 
   // One query for every project's manifest rollup — avoids an N+1 per-row
   // lookup for the sidebar's percent badge (Reid's UX spec, section 4.2).
@@ -181,7 +180,8 @@ router.patch('/project/:id', requireAuth, (req: Request, res: Response) => {
   if (vinylSettings !== undefined) db.prepare('UPDATE projects SET vinyl_settings_json = ? WHERE id = ?').run(JSON.stringify(vinylSettings), row.id);
 
   const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(row.id) as ProjectRow;
-  const assetCount = (db.prepare('SELECT COUNT(*) as cnt FROM project_assets WHERE project_id = ?').get(row.id) as { cnt: number }).cnt;
+  // #2027: excludes soft-deleted assets, same rule as GET /projects.
+  const assetCount = getUngroupedCount(db, row.id);
   const manifestInfo = getSingleProjectManifestInfo(db, row.id);
   res.json(projectToOut(updated, assetCount, manifestInfo));
 });
