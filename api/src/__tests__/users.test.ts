@@ -417,6 +417,81 @@ describe('POST /users/:id/reset-password', () => {
   });
 });
 
+// #2185 — reset-password bumps token_version, which auth.ts's
+// requireAuth/requireAdmin compare against on every request. A stateless
+// {sub} JWT (pre-#2185) verified fine and matched a live, non-disabled
+// row right up until its own TTL — a reset used to do nothing at all to
+// an already-issued token.
+describe('POST /users/:id/reset-password — token_version bump invalidates outstanding tokens (#2185)', () => {
+  it('a token issued before the reset stops working on the very next request, no waiting for expiry', async () => {
+    const app = await bootApp();
+    const { user, password } = await createMember(app, 'tokenholder');
+    const loginRes = await login(app, 'tokenholder', password);
+    const { token: oldToken } = (await loginRes.json()) as { token: string };
+
+    const before = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(oldToken) });
+    expect(before.status).toBe(200);
+
+    const resetRes = await fetch(`${app.baseUrl}/users/${user.id}/reset-password`, {
+      method: 'POST',
+      headers: jsonHeaders(app.adminToken),
+    });
+    expect(resetRes.status).toBe(200);
+    const { generatedPassword } = (await resetRes.json()) as { generatedPassword: string };
+
+    const after = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(oldToken) });
+    expect(after.status).toBe(401);
+    const meAfter = await fetch(`${app.baseUrl}/auth/me`, { headers: bearer(oldToken) });
+    expect(meAfter.status).toBe(401);
+
+    // Normal login with the new password still works, and that fresh
+    // token (carrying the bumped token_version) is fully usable —
+    // the reset invalidates the OLD token, it doesn't brick the account.
+    const newLoginRes = await login(app, 'tokenholder', generatedPassword);
+    expect(newLoginRes.status).toBe(200);
+    const { token: newToken } = (await newLoginRes.json()) as { token: string };
+    const withNewToken = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(newToken) });
+    expect(withNewToken.status).toBe(200);
+  });
+
+  it('the DB row bumps by exactly 1 per reset, regardless of how many times it happens', async () => {
+    const app = await bootApp();
+    const { user } = await createMember(app, 'multireset');
+
+    const before = app.db.prepare('SELECT token_version FROM users WHERE id = ?').get(user.id) as { token_version: number };
+    expect(before.token_version).toBe(1);
+
+    await fetch(`${app.baseUrl}/users/${user.id}/reset-password`, { method: 'POST', headers: jsonHeaders(app.adminToken) });
+    const afterOne = app.db.prepare('SELECT token_version FROM users WHERE id = ?').get(user.id) as { token_version: number };
+    expect(afterOne.token_version).toBe(2);
+
+    await fetch(`${app.baseUrl}/users/${user.id}/reset-password`, { method: 'POST', headers: jsonHeaders(app.adminToken) });
+    const afterTwo = app.db.prepare('SELECT token_version FROM users WHERE id = ?').get(user.id) as { token_version: number };
+    expect(afterTwo.token_version).toBe(3);
+  });
+
+  it('a refreshed token after a reset carries the NEW token_version, not the stale claim off the token being refreshed', async () => {
+    const app = await bootApp();
+    const { user, password } = await createMember(app, 'refreshafterreset');
+    const loginRes = await login(app, 'refreshafterreset', password);
+    const { token: firstToken } = (await loginRes.json()) as { token: string };
+
+    // Refresh once BEFORE the reset — ordinary case, should still work.
+    const refreshBefore = await fetch(`${app.baseUrl}/auth/refresh`, { method: 'POST', headers: bearer(firstToken) });
+    expect(refreshBefore.status).toBe(200);
+    const { token: refreshedBeforeReset } = (await refreshBefore.json()) as { token: string };
+
+    await fetch(`${app.baseUrl}/users/${user.id}/reset-password`, { method: 'POST', headers: jsonHeaders(app.adminToken) });
+
+    // The token refreshed BEFORE the reset is now just as invalid as the
+    // original — it still carries the pre-reset token_version.
+    const pingWithStaleRefresh = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(refreshedBeforeReset) });
+    expect(pingWithStaleRefresh.status).toBe(401);
+    const refreshAttemptAfterReset = await fetch(`${app.baseUrl}/auth/refresh`, { method: 'POST', headers: bearer(refreshedBeforeReset) });
+    expect(refreshAttemptAfterReset.status).toBe(401);
+  });
+});
+
 describe('disabled users: fail-closed at login and instant JWT revocation', () => {
   it('a disabled user cannot log in — same 401 shape as bad credentials', async () => {
     const app = await bootApp();

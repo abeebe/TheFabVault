@@ -5,6 +5,12 @@ import { getJwtSecret, getUserByUsername } from './db.js';
 
 export interface JwtPayload {
   sub: string;
+  // #2185 — additive alongside `sub`, never a replacement for the
+  // live-row checks below. Optional because a token minted before
+  // migration v17 shipped has no `tv` claim at all; requireAuth/
+  // requireAdmin treat that absence as version 1 (see their own
+  // comments), not as an automatic mismatch.
+  tv?: number;
   iat?: number;
   exp?: number;
 }
@@ -15,17 +21,23 @@ export interface JwtPayload {
 // against the classic RS256/HS256 key-confusion attack.
 const JWT_ALGORITHMS: jwt.Algorithm[] = ['HS256'];
 
-// Deliberately still just `{ sub: username }` — no role/id/disabled claim
-// was added for Phase D (#2177), on purpose. role and disabled are always
-// read from the live `users` row on every request (requireAuth/
-// requireAdmin below), never trusted off the token itself. That is
-// exactly why disabling a user or demoting an admin takes effect on their
-// very next request instead of waiting for the JWT to expire (config.jwtTtl
-// can be hours) — baking role/disabled into the claims would reintroduce
-// that staleness window. Do not add either claim without re-deriving this
-// property some other way first.
-export function createToken(username: string): string {
-  return jwt.sign({ sub: username }, getJwtSecret(), {
+// Still just `{ sub, tv }` — no role/id/disabled claim was added for
+// Phase D (#2177), and none is added now for #2185 either, on purpose.
+// role and disabled are always read from the live `users` row on every
+// request (requireAuth/requireAdmin below), never trusted off the token
+// itself. That is exactly why disabling a user or demoting an admin
+// takes effect on their very next request instead of waiting for the JWT
+// to expire (config.jwtTtl can be hours) — baking role/disabled into the
+// claims would reintroduce that staleness window. Do not add either
+// claim without re-deriving this property some other way first.
+//
+// tokenVersion is required (no default) — every call site must fetch
+// the live row's current token_version and pass it explicitly (login:
+// the row it just authenticated; refresh: req.user's, already attached
+// by requireAuth) rather than the function silently assuming a value
+// that could go stale.
+export function createToken(username: string, tokenVersion: number): string {
+  return jwt.sign({ sub: username, tv: tokenVersion }, getJwtSecret(), {
     expiresIn: config.jwtTtl,
     algorithm: 'HS256',
   });
@@ -86,6 +98,19 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
+  // #2185 — token_version check. A token with no `tv` claim at all
+  // (minted before migration v17 shipped) is treated as version 1, same
+  // as this column's DEFAULT for every existing row — a deploy doesn't
+  // force every already-signed-in session to re-login. A password reset
+  // (routes/users.ts's POST /users/:id/reset-password) bumps the live
+  // row's token_version, so any token minted before that bump — old-
+  // format or new — immediately mismatches and is denied, same response
+  // as every other failure mode here (no leak of which check failed).
+  if ((decoded.tv ?? 1) !== user.token_version) {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
+
   // Attach the row we already fetched (see types/express.d.ts) so
   // downstream handlers don't need a second getUserByUsername() lookup
   // for the common "who is making this request" question.
@@ -126,6 +151,14 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     res.status(401).json({ error: 'Invalid or expired token' });
     return;
   }
+
+  // #2185 — same token_version check as requireAuth; see that function's
+  // comment for the missing-claim-means-version-1 rationale.
+  if ((decoded.tv ?? 1) !== user.token_version) {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
+
   if (user.role !== 'admin') {
     res.status(403).json({ error: 'Forbidden: admin access required' });
     return;

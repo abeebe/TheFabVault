@@ -123,6 +123,18 @@ router.post('/users', requireAdmin, (req: Request, res: Response) => {
 // as create. No self-lockout concern here (unlike PATCH's disable/demote
 // guard): an admin resetting their own password can't lock themselves
 // out, they just get a new password back in the response.
+//
+// #2185 — also bumps token_version. Without this, resetting a password
+// (e.g. because a token/session was suspected compromised, or the user
+// just forgot theirs) left every ALREADY-ISSUED token for that account
+// fully valid until its own TTL expired naturally (stateless {sub} JWTs
+// have no server-side session to revoke) — the whole point of a reset in
+// a "credentials may be compromised" scenario undermined by the old
+// token still working. auth.ts's requireAuth/requireAdmin compare each
+// token's `tv` claim (or the implicit 1 for a pre-v17 token) against the
+// live row's token_version and 401 on any mismatch, so this UPDATE is
+// what makes that comparison actually fail for every token minted before
+// this reset, immediately, on their very next request.
 router.post('/users/:id/reset-password', requireAdmin, (req: Request, res: Response) => {
   const { id } = req.params;
   const { password } = req.body as { password?: string };
@@ -144,7 +156,7 @@ router.post('/users/:id/reset-password', requireAdmin, (req: Request, res: Respo
   const plainPassword = suppliedPassword || generatePassword();
   const hash = hashPassword(plainPassword);
 
-  db.prepare('UPDATE users SET password_hash = ?, updated_at = unixepoch() WHERE id = ?').run(hash, id);
+  db.prepare('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = unixepoch() WHERE id = ?').run(hash, id);
 
   const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow;
   const body: UserOut & { generatedPassword?: string } = {
