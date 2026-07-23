@@ -7,6 +7,7 @@ import {
 import { api } from '../lib/api.js';
 import { DuplicatesModal } from './DuplicatesModal.js';
 import { OrphansModal } from './OrphansModal.js';
+import { UsersSection } from './UsersSection.js';
 import type { AdminConfig, MountSlotStatus } from '../types/index.js';
 
 interface AdminSettingsProps {
@@ -721,6 +722,9 @@ export function AdminSettings({ isOpen, onClose }: AdminSettingsProps) {
                   )}
                 </div>
               </div>
+
+              {/* ── Users (Phase D2, #2178) ─────────────────────────────────── */}
+              <UsersSection />
 
               {/* ── Library Tools ───────────────────────────────────────────── */}
               <div className="space-y-4 pt-4 border-t border-gray-200 dark:border-gray-700">

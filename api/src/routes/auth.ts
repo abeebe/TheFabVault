@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { createToken, requireAuth } from '../auth.js';
 import { adminExists, getJwtSecret, getUserByUsername } from '../db.js';
 import { verifyPassword } from '../passwords.js';
-import type { LoginRequest, LoginResponse, HealthResponse } from '../types/index.js';
+import type { LoginRequest, LoginResponse, HealthResponse, AuthMeOut } from '../types/index.js';
 
 const router = Router();
 
@@ -98,16 +98,38 @@ router.post('/auth/login', (req: Request, res: Response) => {
     return;
   }
 
-  // Same response for "no such user" and "wrong password" — don't leak
-  // which one was wrong.
+  // Same response for "no such user", "wrong password", AND "disabled
+  // user" — don't leak which one it was. Fail-closed: `disabled` is
+  // checked in the same condition as the credential check rather than a
+  // separate branch afterward, so there is no code path that verifies
+  // the password first and only then remembers to check disabled (#2177,
+  // Phase D — same disabled=1 semantics requireAuth/requireAdmin enforce
+  // per-request; this is just the same rule at the login gate).
   const user = getUserByUsername(username);
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  if (!user || !verifyPassword(password, user.password_hash) || user.disabled) {
     res.status(401).json({ error: 'Invalid credentials' });
     return;
   }
 
   const token = createToken(user.username);
   const body: LoginResponse = { token, expiresIn: config.jwtTtl };
+  res.json(body);
+});
+
+// GET /auth/me — requireAuth. Returns the caller's own identity/role from
+// the live `users` row already attached by requireAuth (req.user), not
+// from the JWT claims (which only ever carry `sub` — see auth.ts's
+// createToken comment). This is the D2/D4 contract: every client-side
+// role gate (admin-only nav, "is this mine" ownership checks, etc.) reads
+// from this endpoint's response, never from decoding the token itself.
+router.get('/auth/me', requireAuth, (req: Request, res: Response) => {
+  const user = req.user!; // requireAuth guarantees this is set
+  const body: AuthMeOut = {
+    id: user.id,
+    username: user.username,
+    displayName: user.display_name,
+    role: user.role,
+  };
   res.json(body);
 });
 

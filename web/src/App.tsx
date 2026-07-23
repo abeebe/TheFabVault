@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Spinner } from './components/Spinner.js';
 import { AppShell } from './components/AppShell.js';
 import { useAuth } from './hooks/useAuth.js';
+import { MeProvider } from './hooks/useMe.js';
 
 function LoginPage({ onLogin }: { onLogin: (u: string, p: string) => Promise<void> }) {
   const [username, setUsername] = useState('');
@@ -93,5 +94,14 @@ export function App() {
     return <LoginPage onLogin={login} />;
   }
 
-  return <AppShell logout={logout} authRequired={authRequired} />;
+  // MeProvider fetches GET /auth/me (Phase D, #2177) exactly once
+  // per-session, right where isAuthenticated first flips true -- see
+  // useMe.tsx for why this lives above AppShell rather than each
+  // consumer (nav gating, Vault/convert route guards, ModelPage/
+  // CollectionPage ownership checks) fetching its own copy.
+  return (
+    <MeProvider isAuthenticated={isAuthenticated}>
+      <AppShell logout={logout} authRequired={authRequired} />
+    </MeProvider>
+  );
 }
