@@ -345,6 +345,61 @@ describe('PATCH /model/:id', () => {
     expect(clearRes.status).toBe(200);
     expect((await clearRes.json() as { sourceUrl: string | null }).sourceUrl).toBeNull();
   });
+
+  // #2166: validate-then-write. Before this fix, title (an earlier field
+  // in the handler's field order) would already be UPDATEd by the time
+  // sourceUrl's validation 400s, leaving the model half-patched. Now every
+  // field is validated first — a later field failing must leave NO field
+  // changed, not just leave the invalid one alone.
+  it('a PATCH where a later field is invalid leaves NO field changed (atomicity)', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'Original Title', description: 'Original description' }),
+    });
+    const created = await createRes.json() as { id: string; updatedAt: number };
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({
+        title: 'Renamed', // valid, and ordered before sourceUrl in the handler
+        description: 'Renamed description', // valid
+        sourceUrl: 'javascript:alert(document.cookie)', // invalid — should 400 the whole request
+      }),
+    });
+    expect(patchRes.status).toBe(400);
+
+    const row = app.db.prepare('SELECT title, description, source_url, updated_at FROM models WHERE id = ?').get(created.id) as
+      { title: string; description: string | null; source_url: string | null; updated_at: number };
+    expect(row.title).toBe('Original Title');
+    expect(row.description).toBe('Original description');
+    expect(row.source_url).toBeNull();
+    expect(row.updated_at).toBe(created.updatedAt);
+  });
+
+  it('a PATCH where an invalid category (checked mid-handler) rejects and leaves an earlier valid field untouched', async () => {
+    const app = await bootApp();
+    const createRes = await fetch(`${app.baseUrl}/models`, {
+      method: 'POST',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'Original Title' }),
+    });
+    const created = await createRes.json() as { id: string };
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(app.token),
+      body: JSON.stringify({ title: 'Renamed', categoryId: uuidv4() }),
+    });
+    expect(patchRes.status).toBe(400);
+
+    const row = app.db.prepare('SELECT title, category_id FROM models WHERE id = ?').get(created.id) as
+      { title: string; category_id: string | null };
+    expect(row.title).toBe('Original Title');
+    expect(row.category_id).toBeNull();
+  });
 });
 
 describe('DELETE /model/:id — soft vs permanent, deletion semantics', () => {
