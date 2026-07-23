@@ -574,3 +574,171 @@ describe('draft lifecycle', () => {
     fs.rmSync(sharedDataDir, { recursive: true, force: true });
   });
 });
+
+describe('GET /import/zip/:draftId/file — draft content preview (#2176)', () => {
+  it('serves the README content for the owner', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([
+      { name: 'files/dragon_body.stl', content: 'stl bytes' },
+      { name: 'README.md', content: '# Dragon\nA nice articulated dragon.' },
+    ]);
+    const draftRes = await uploadZip(app, zip, 'articulated_dragon_printables.zip');
+    const draft = await draftRes.json() as DraftResponse;
+    expect(draft.plan.descriptionSource).toBe('README.md');
+
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=${encodeURIComponent(draft.plan.descriptionSource!)}`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { path: string; content: string };
+    expect(body.path).toBe('README.md');
+    expect(body.content).toBe('# Dragon\nA nice articulated dragon.');
+  });
+
+  it('serves a detected LICENSE file the same way', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([
+      { name: 'files/thing.stl', content: 'stl bytes' },
+      { name: 'images/render.jpg', content: 'jpg bytes' },
+      { name: 'LICENSE.txt', content: 'MIT License text here' },
+    ]);
+    const draftRes = await uploadZip(app, zip, 'thing_thingiverse.zip');
+    const draft = await draftRes.json() as DraftResponse;
+    expect(draft.plan.licenseFile).toBe('LICENSE.txt');
+
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=${encodeURIComponent(draft.plan.licenseFile!)}`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json() as { content: string }).content).toBe('MIT License text here');
+  });
+
+  it('400s for a non-UUID-shaped draft id rather than reaching the filesystem at all', async () => {
+    const app = await bootApp();
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/..%2fvictim-dir/file?path=README.md`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('404s for a well-formed but unknown draft id', async () => {
+    const app = await bootApp();
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${crypto.randomUUID()}/file?path=README.md`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('404s (never leaking that the draft exists) for a different, non-admin user\'s draft; admin still can', async () => {
+    const app = await bootApp();
+    const memberA = await createMemberUser(app, 'member-a');
+    const memberB = await createMemberUser(app, 'member-b');
+
+    const zip = buildRawZip([{ name: 'README.md', content: 'owned by member A' }]);
+    const draftRes = await uploadZip(app, zip, 'import.zip', memberA.token);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const otherRes = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=README.md`,
+      { headers: bearer(memberB.token) },
+    );
+    expect(otherRes.status).toBe(404);
+
+    const ownRes = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=README.md`,
+      { headers: bearer(memberA.token) },
+    );
+    expect(ownRes.status).toBe(200);
+
+    // The seeded bootApp() user is admin — the admin override applies
+    // here too, same as DELETE/commit.
+    const adminRes = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=README.md`,
+      { headers: bearer(app.token) },
+    );
+    expect(adminRes.status).toBe(200);
+  });
+
+  it('400s when the path query parameter is missing', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'README.md', content: 'hi' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const res = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/file`, { headers: bearer(app.token) });
+    expect(res.status).toBe(400);
+  });
+
+  it('400s for a file that is not README/LICENSE/text/markdown — the allowlist, not a denylist', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([
+      { name: 'files/model.stl', content: 'binary-ish stl bytes' },
+      { name: 'README.md', content: 'hi' },
+    ]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=${encodeURIComponent('files/model.stl')}`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('404s for a path-traversal attempt in the path query param instead of escaping the draft dir', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'README.md', content: 'hi' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    // README.md passes isPreviewableTextPath's name check (basename is
+    // still "README.md" after path-joining) but resolveContainedPath
+    // must refuse to resolve it outside the draft dir.
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=${encodeURIComponent('../../README.md')}`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('404s for a text-named path that was never actually in the draft', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'README.md', content: 'hi' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=${encodeURIComponent('NOTES.md')}`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('400s for a text file over the preview size cap', async () => {
+    const app = await bootApp();
+    const hugeContent = 'x'.repeat(300 * 1024); // > 256 KiB MAX_PREVIEW_BYTES
+    const zip = buildRawZip([{ name: 'README.md', content: hugeContent }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const res = await fetch(
+      `${app.baseUrl}/import/zip/${draft.draftId}/file?path=README.md`,
+      { headers: bearer(app.token) },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('denies with no token', async () => {
+    const app = await bootApp();
+    const zip = buildRawZip([{ name: 'README.md', content: 'hi' }]);
+    const draftRes = await uploadZip(app, zip);
+    const draft = await draftRes.json() as DraftResponse;
+
+    const res = await fetch(`${app.baseUrl}/import/zip/${draft.draftId}/file?path=README.md`);
+    expect(res.status).toBe(401);
+  });
+});

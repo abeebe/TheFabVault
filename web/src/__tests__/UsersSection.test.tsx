@@ -151,7 +151,11 @@ describe('UsersSection (#2178)', () => {
       user({ id: 'u1', username: 'alice', role: 'admin' }),
       user({ id: 'u2', username: 'bob', role: 'member' }),
     ]);
-    mockUpdate.mockRejectedValue(new Error(JSON.stringify({ error: 'You cannot demote your own account' })));
+    // #2181: apiFetch now unwraps `{error: string}` JSON bodies itself,
+    // so api.users.update() (which this mock stands in for) rejects with
+    // the plain message already -- not the raw JSON blob this test used
+    // to simulate pre-fix.
+    mockUpdate.mockRejectedValue(new Error('You cannot demote your own account'));
     render(<UsersSection />);
     await screen.findByText('bob');
 

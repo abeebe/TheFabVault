@@ -14,6 +14,26 @@ function getToken(): string | null {
   return localStorage.getItem('mv_token');
 }
 
+// #2181: every API error route responds with a `{error: string}` JSON
+// body (see routes/*.ts's `res.status(...).json({ error: ... })`
+// convention), but apiFetch used to throw the raw response body
+// verbatim -- callers saw `Error('{"error":"You cannot disable your
+// own account"}')` and had to unwrap the JSON themselves (or not
+// bother, and show the raw braces-and-quotes text to a user). Central
+// fix here: unwrap once, in the one place every caller's error already
+// flows through. Falls back to the raw text for a non-JSON body (a
+// proxy error page, a plaintext 502, etc.) instead of throwing on
+// invalid JSON or losing the message.
+function extractErrorMessage(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody) as { error?: unknown };
+    if (parsed && typeof parsed.error === 'string' && parsed.error) return parsed.error;
+  } catch {
+    // Not JSON -- fall through to the raw text.
+  }
+  return rawBody;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -34,7 +54,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `HTTP ${res.status}`);
+    throw new Error(extractErrorMessage(text) || `HTTP ${res.status}`);
   }
 
   if (res.status === 204) return undefined as T;
@@ -396,6 +416,15 @@ export interface ZipImportDraftResponse {
   expiresAt: number;
 }
 
+// GET /import/zip/:draftId/file response (#2176) -- content-preview for
+// a README/LICENSE/text file already sitting in the draft, used to
+// prefill the model description textarea instead of just showing the
+// path hint.
+export interface ZipImportFilePreview {
+  path: string;
+  content: string;
+}
+
 export interface ZipImportCommitFile {
   // Must match one of the draft plan's files[].path exactly (byte-for-
   // byte, whatever separator/case the archive used) -- the server looks
@@ -547,7 +576,10 @@ export const api = {
             try { resolve(JSON.parse(xhr.responseText) as AssetOut); }
             catch (err) { reject(err); }
           } else {
-            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+            // Same unwrap as apiFetch (#2181) — these XHR paths exist only
+            // for upload-progress events, but hit the same `{error}`-
+            // shaped JSON error bodies as every other endpoint.
+            reject(new Error(extractErrorMessage(xhr.responseText) || `HTTP ${xhr.status}`));
           }
         };
         xhr.onerror = () => reject(new Error('Network error'));
@@ -855,7 +887,10 @@ export const api = {
             try { resolve(JSON.parse(xhr.responseText) as ZipImportDraftResponse); }
             catch (err) { reject(err); }
           } else {
-            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+            // Same unwrap as apiFetch (#2181) — these XHR paths exist only
+            // for upload-progress events, but hit the same `{error}`-
+            // shaped JSON error bodies as every other endpoint.
+            reject(new Error(extractErrorMessage(xhr.responseText) || `HTTP ${xhr.status}`));
           }
         };
         xhr.onerror = () => reject(new Error('Network error'));
@@ -869,6 +904,12 @@ export const api = {
 
     abandon: (draftId: string): Promise<void> =>
       apiFetch(`/import/zip/${draftId}`, { method: 'DELETE' }),
+
+    // #2176 -- content preview for a README/LICENSE/text file in the
+    // draft, so the wizard can prefill the description textarea from
+    // actual README content instead of just a path hint.
+    previewFile: (draftId: string, path: string): Promise<ZipImportFilePreview> =>
+      apiFetch(`/import/zip/${draftId}/file?path=${encodeURIComponent(path)}`),
   },
 
   folders: {
@@ -1005,7 +1046,10 @@ export const api = {
             try { resolve(JSON.parse(xhr.responseText) as ImportPlacementResult); }
             catch (err) { reject(err); }
           } else {
-            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+            // Same unwrap as apiFetch (#2181) — these XHR paths exist only
+            // for upload-progress events, but hit the same `{error}`-
+            // shaped JSON error bodies as every other endpoint.
+            reject(new Error(extractErrorMessage(xhr.responseText) || `HTTP ${xhr.status}`));
           }
         };
         xhr.onerror = () => reject(new Error('Network error'));

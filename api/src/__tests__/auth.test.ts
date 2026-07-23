@@ -31,13 +31,14 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import type Database from 'better-sqlite3';
-import { LOGIN_MAX_ATTEMPTS } from '../routes/auth.js';
+import { LOGIN_MAX_ATTEMPTS, LOGIN_IP_MAX_ATTEMPTS } from '../routes/auth.js';
 
 interface Booted {
   baseUrl: string;
-  createToken: (username: string) => string;
+  createToken: (username: string, tokenVersion: number) => string;
   getJwtSecret: () => string;
   getDb: () => Database.Database;
   close: () => Promise<void>;
@@ -144,6 +145,17 @@ function bearer(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
+// Inserts a second account directly (this bootApp only wires up
+// authRouter/mountsRouter, not routes/users.ts) — used only by the
+// composite rate-limit keying tests below (#2183), which need two real
+// accounts sharing one source IP.
+async function createSecondUser(app: Booted, username: string, password: string): Promise<void> {
+  const { hashPassword } = await import('../passwords.js');
+  app.getDb().prepare(
+    "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, 'member')",
+  ).run(crypto.randomUUID(), username, hashPassword(password));
+}
+
 const ADMIN_USER = 'admin';
 const ADMIN_PASS = 'correct-horse-battery-staple';
 
@@ -160,14 +172,14 @@ describe('fail-closed: empty users table', () => {
     // Getting a 401 here proves requireAuth's DB-backed live-user check
     // is what denies — not merely "no token was sent" (covered
     // separately below).
-    const token = app.createToken('ghost-admin');
+    const token = app.createToken('ghost-admin', 1);
     const res = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(token) });
     expect(res.status).toBe(401);
   });
 
   it('requireAdmin-gated route also denies the same well-signed, no-matching-row token', async () => {
     const app = await bootApp(null);
-    const token = app.createToken('ghost-admin');
+    const token = app.createToken('ghost-admin', 1);
     const res = await fetch(`${app.baseUrl}/admin/mounts`, { headers: bearer(token) });
     expect(res.status).toBe(401);
   });
@@ -206,7 +218,7 @@ describe('token validity', () => {
 
   it('denies a valid, unexpired token whose sub user has since been deleted', async () => {
     const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
-    const token = app.createToken(ADMIN_USER);
+    const token = app.createToken(ADMIN_USER, 1);
 
     const before = await fetch(`${app.baseUrl}/protected/ping`, { headers: bearer(token) });
     expect(before.status).toBe(200);
@@ -268,6 +280,165 @@ describe('login rate limiter', () => {
     // — the limiter gates before credentials are checked at all.
     const stillLimited = await login(app, ADMIN_USER, ADMIN_PASS);
     expect(stillLimited.status).toBe(429);
+  });
+
+  // #2183 — composite IP+username keying. Every request in this whole
+  // suite comes from the same real loopback peer (see auth.test.ts's own
+  // file-header rationale for why trust proxy isn't set here), so this
+  // is exactly the "one shared IP, two accounts" scenario the household
+  // fix targets.
+  it('one account exhausting its bucket does not lock out a second account sharing the same source IP', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+    await createSecondUser(app, 'housemate', 'housemate-password-123');
+
+    for (let i = 0; i < LOGIN_MAX_ATTEMPTS; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await login(app, ADMIN_USER, 'wrong-password');
+      expect(res.status).toBe(401);
+    }
+    const adminLimited = await login(app, ADMIN_USER, 'wrong-password');
+    expect(adminLimited.status).toBe(429);
+
+    // The OTHER account, same source IP, is completely unaffected —
+    // still evaluated on credentials (401 for a deliberately wrong
+    // password), not yet rate-limited.
+    const housemateStillOk = await login(app, 'housemate', 'wrong-password');
+    expect(housemateStillOk.status).toBe(401);
+
+    // And their correct password still works.
+    const housemateLogin = await login(app, 'housemate', 'housemate-password-123');
+    expect(housemateLogin.status).toBe(200);
+  });
+
+  it('the SAME account from the same IP still trips at the threshold (composite keying does not weaken single-account protection)', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+    await createSecondUser(app, 'housemate', 'housemate-password-123');
+
+    // Interleave attempts against BOTH accounts from the same IP — proves
+    // the two buckets are independently tracked (housemate's attempts
+    // don't count toward admin's bucket or vice versa), not just that
+    // they eventually converge on the same global limit.
+    for (let i = 0; i < LOGIN_MAX_ATTEMPTS; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await login(app, 'housemate', 'wrong-password');
+      // eslint-disable-next-line no-await-in-loop
+      const res = await login(app, ADMIN_USER, 'wrong-password');
+      expect(res.status).toBe(401);
+    }
+
+    const adminLimited = await login(app, ADMIN_USER, 'wrong-password');
+    expect(adminLimited.status).toBe(429);
+    const housemateLimited = await login(app, 'housemate', 'wrong-password');
+    expect(housemateLimited.status).toBe(429);
+  });
+});
+
+// #2183 follow-up — Vera's bounded auth review (Medium finding): the
+// composite ip::username bucket alone removed the old ip-only ceiling
+// with nothing put back, so one IP spreading its attempts thin across
+// many distinct accounts (never touching any single account's own
+// threshold twice) drew zero 429s no matter how many total requests it
+// sent — reproduced at 450 requests / 50 usernames. This coarser,
+// ip-alone counter (checked ADDITIONALLY to the composite one) closes
+// that gap.
+describe('login rate limiter — coarse per-IP ceiling on top of the composite bucket (#2183 follow-up)', () => {
+  it('many distinct usernames from one IP eventually hit the coarse IP ceiling, even though no single account ever approaches its own threshold', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+
+    // Every request targets a DIFFERENT username (one attempt each) —
+    // this is exactly the "spread thin across many accounts" shape that
+    // used to draw zero 429s: no composite bucket ever sees more than
+    // one attempt, so the per-account limiter (cap 10) never fires.
+    for (let i = 0; i < LOGIN_IP_MAX_ATTEMPTS; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await login(app, `grind-user-${i}`, 'whatever-password');
+      expect(res.status).toBe(401);
+    }
+
+    // The very next request — yet another never-before-seen username,
+    // still nowhere near ANY composite bucket's own threshold — is now
+    // refused by the coarse ip-alone ceiling.
+    const limited = await login(app, `grind-user-${LOGIN_IP_MAX_ATTEMPTS}`, 'whatever-password');
+    expect(limited.status).toBe(429);
+  }, 20000);
+
+  it('a legitimate household spread across a few real accounts, well under both limits, is never rate-limited', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+    await createSecondUser(app, 'housemate-a', 'housemate-a-password-123');
+    await createSecondUser(app, 'housemate-b', 'housemate-b-password-123');
+
+    // A handful of ordinary logins per account, all from the same shared
+    // home IP — nowhere near LOGIN_MAX_ATTEMPTS (10) per account, and
+    // nowhere near LOGIN_IP_MAX_ATTEMPTS (80) in aggregate.
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, ADMIN_USER, ADMIN_PASS)).status).toBe(200);
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, 'housemate-a', 'housemate-a-password-123')).status).toBe(200);
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, 'housemate-b', 'housemate-b-password-123')).status).toBe(200);
+    }
+  });
+});
+
+// #2184 — a fixed dummy-hash scrypt derivation now runs on the
+// unknown-username path so response timing can't be used to enumerate
+// valid usernames (previously: unknown username short-circuited before
+// verifyPassword ever ran at all — measured ~2-4ms vs ~60-130ms for a
+// known username with a wrong password on reference hardware, see the
+// describe block's own comment for the measurement methodology).
+describe('login timing parity for unknown usernames (#2184)', () => {
+  // A single-shot absolute-threshold timing assertion is too noisy in
+  // this harness to be a reliable regression guard: a fresh Express app
+  // + fetch()-over-loopback's own first-request overhead (JIT warmup,
+  // socket setup, route matching) already varies by tens of ms on its
+  // own, independent of whether scrypt ran at all. Instead, both
+  // conditions are measured MULTIPLE times against the SAME booted app
+  // (so both get the same JIT/connection warmup) and the MIN duration of
+  // each (the closest either gets to isolating actual per-request CPU
+  // cost, least polluted by GC/scheduler blips) is compared as a RATIO —
+  // this is what the underlying property actually is ("timing doesn't
+  // reveal username existence"), not an absolute number tied to
+  // whatever hardware CI happens to run on.
+  const SAMPLES = 6;
+
+  async function minDurationMs(fn: () => Promise<Response>): Promise<number> {
+    let min = Infinity;
+    for (let i = 0; i < SAMPLES; i++) {
+      const start = process.hrtime.bigint();
+      // eslint-disable-next-line no-await-in-loop
+      await fn();
+      const elapsed = Number(process.hrtime.bigint() - start) / 1e6;
+      if (elapsed < min) min = elapsed;
+    }
+    return min;
+  }
+
+  it('unknown-username and known-username-wrong-password logins cost comparable time (same order of magnitude, not a short-circuit)', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+
+    const unknownMs = await minDurationMs(() => login(app, 'this-username-does-not-exist', 'whatever-password'));
+    const wrongPasswordMs = await minDurationMs(() => login(app, ADMIN_USER, 'wrong-password'));
+
+    // Pre-#2184, the unknown-username path skipped verifyPassword
+    // entirely and measured roughly 3-5x faster than the known-username
+    // path in manual testing (~30ms vs ~150ms per the ticket). A ratio
+    // bounded well inside that gap (0.4-2.5x either direction) is a
+    // durable regression signal without being a flaky exact-timing
+    // assertion.
+    const ratio = unknownMs / wrongPasswordMs;
+    expect(ratio).toBeGreaterThan(0.4);
+    expect(ratio).toBeLessThan(2.5);
+  });
+
+  it('unknown-username and known-username-wrong-password responses remain byte-for-byte identical (unaffected by the timing fix)', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+
+    const unknownRes = await login(app, 'nobody-by-this-name', 'whatever');
+    const wrongPasswordRes = await login(app, ADMIN_USER, 'wrong-password');
+
+    expect(unknownRes.status).toBe(wrongPasswordRes.status);
+    expect(await unknownRes.json()).toEqual(await wrongPasswordRes.json());
   });
 });
 

@@ -374,6 +374,32 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (model_id, user_id)
   );
   CREATE INDEX IF NOT EXISTS idx_model_likes_user ON model_likes(user_id);`,
+  // v17: token_version — closes #2185 (stateless {sub} JWTs meant a
+  // password reset never invalidated tokens already issued: the old
+  // token still verified fine against the JWT secret and still matched
+  // a live, non-disabled users row, right up until its own TTL expired
+  // naturally). A plain ADD COLUMN, not a v15-style table-copy — unlike
+  // v13's `role CHECK(role IN ('admin'))`, there is no CHECK constraint
+  // on this column to drop, so SQLite's normal ALTER TABLE ADD COLUMN
+  // (with a literal DEFAULT) applies to every existing row in place.
+  //
+  // ADDITIVE claim, not a replacement for {sub}: auth.ts's createToken
+  // now signs { sub, tv: tokenVersion } instead of { sub } alone, but
+  // role/id/disabled/display_name are still read from the live `users`
+  // row on every request exactly as before (auth.ts's own header
+  // comment on why role/disabled were deliberately kept out of the
+  // token still holds) — token_version is the only thing that rides in
+  // the token now. requireAuth/requireAdmin compare the token's claim
+  // against the live row's current value and 401 on any mismatch,
+  // treating a token with no `tv` claim at all (anything minted before
+  // this migration, up to config.jwtTtl seconds old) as version 1 — the
+  // same value this column's DEFAULT gives every existing row — so a
+  // deploy doesn't force-logout every already-signed-in session, while
+  // a password reset (routes/users.ts's POST /users/:id/reset-password,
+  // the only reset-password route in this app) still bumps the live
+  // row's token_version and immediately invalidates every token minted
+  // before that bump, old-format or new.
+  `ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 /**

@@ -476,46 +476,63 @@ router.patch('/model/:id', requireAuth, (req: Request, res: Response) => {
     license?: string | null;
   };
 
+  // #2166: validate every provided field FIRST, writing nothing, so a
+  // multi-field PATCH that fails validation partway through (e.g. a valid
+  // title alongside an invalid sourceUrl) can never leave the earlier
+  // fields written while the later ones 400. Each entry is one column's
+  // (sql-fragment, value) pair; all of them are applied together inside a
+  // single transaction below only once every field has passed validation.
+  const updates: { column: string; value: string | null }[] = [];
+
   if (title !== undefined) {
     if (!title.trim()) { res.status(400).json({ error: 'title cannot be empty' }); return; }
-    db.prepare('UPDATE models SET title = ?, updated_at = unixepoch() WHERE id = ?').run(title.trim(), row.id);
+    updates.push({ column: 'title', value: title.trim() });
   }
   if (description !== undefined) {
-    db.prepare('UPDATE models SET description = ?, updated_at = unixepoch() WHERE id = ?').run(description?.trim() || null, row.id);
+    updates.push({ column: 'description', value: description?.trim() || null });
   }
   if (categoryId !== undefined) {
     if (categoryId) {
       const cat = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
       if (!cat) { res.status(400).json({ error: 'Category not found' }); return; }
     }
-    db.prepare('UPDATE models SET category_id = ?, updated_at = unixepoch() WHERE id = ?').run(categoryId || null, row.id);
+    updates.push({ column: 'category_id', value: categoryId || null });
   }
   if (tags !== undefined) {
     if (!Array.isArray(tags)) { res.status(400).json({ error: 'tags must be an array' }); return; }
-    db.prepare('UPDATE models SET tags_json = ?, updated_at = unixepoch() WHERE id = ?').run(JSON.stringify(tags), row.id);
+    updates.push({ column: 'tags_json', value: JSON.stringify(tags) });
   }
   if (visibility !== undefined) {
     if (!isModelVisibility(visibility)) {
       res.status(400).json({ error: `visibility must be one of: ${MODEL_VISIBILITY.join(', ')}` });
       return;
     }
-    db.prepare('UPDATE models SET visibility = ?, updated_at = unixepoch() WHERE id = ?').run(visibility, row.id);
+    updates.push({ column: 'visibility', value: visibility });
   }
   if (sourceUrl !== undefined) {
     if (!isValidSourceUrl(sourceUrl)) {
       res.status(400).json({ error: 'sourceUrl must be a valid http(s) URL' });
       return;
     }
-    db.prepare('UPDATE models SET source_url = ?, updated_at = unixepoch() WHERE id = ?').run(sourceUrl?.trim() || null, row.id);
+    updates.push({ column: 'source_url', value: sourceUrl?.trim() || null });
   }
   if (sourceSite !== undefined) {
-    db.prepare('UPDATE models SET source_site = ?, updated_at = unixepoch() WHERE id = ?').run(sourceSite?.trim() || null, row.id);
+    updates.push({ column: 'source_site', value: sourceSite?.trim() || null });
   }
   if (sourceAuthor !== undefined) {
-    db.prepare('UPDATE models SET source_author = ?, updated_at = unixepoch() WHERE id = ?').run(sourceAuthor?.trim() || null, row.id);
+    updates.push({ column: 'source_author', value: sourceAuthor?.trim() || null });
   }
   if (license !== undefined) {
-    db.prepare('UPDATE models SET license = ?, updated_at = unixepoch() WHERE id = ?').run(license?.trim() || null, row.id);
+    updates.push({ column: 'license', value: license?.trim() || null });
+  }
+
+  if (updates.length > 0) {
+    const applyUpdates = db.transaction((rows: { column: string; value: string | null }[]) => {
+      for (const u of rows) {
+        db.prepare(`UPDATE models SET ${u.column} = ?, updated_at = unixepoch() WHERE id = ?`).run(u.value, row.id);
+      }
+    });
+    applyUpdates(updates);
   }
 
   const updated = db.prepare('SELECT * FROM models WHERE id = ?').get(row.id) as ModelRow;

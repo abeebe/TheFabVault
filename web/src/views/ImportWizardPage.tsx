@@ -25,16 +25,16 @@ import type {
 // Builds against api/src/routes/modelImport.ts (C2, #2172) and
 // api/src/services/zipImportClassify.ts (C1, #2171) exactly as mirrored in
 // lib/api.ts's Zip Import section -- see that file's own header comment
-// for the "this shape IS the contract" note. One deliberate scope
-// decision worth flagging: ZipImportPlan.descriptionSource/licenseFile are
-// PATHS inside the draft, not file CONTENT -- there is no API route that
-// serves a draft file's bytes back to the client before commit (by
-// design: routes/modelImport.ts only ever exposes create/commit/abandon
-// for a draft). The description/license fields below are therefore
-// editable free text with a "detected at <path>" hint, never a
-// pre-filled copy of the README/LICENSE text itself -- surfacing a path
-// the wizard can't actually show the contents of as if it were the real
-// text would be a fabricated-content bug, not a convenience.
+// for the "this shape IS the contract" note. ZipImportPlan.descriptionSource
+// is a PATH inside the draft; the description textarea below is prefilled
+// with that file's actual content via api.import.previewFile (#2176,
+// GET /import/zip/:draftId/file) once the draft loads -- previously there
+// was no route serving a draft file's bytes back before commit, so this
+// used to be a "detected at <path>, paste it in yourself" hint only (see
+// git history for that prior comment if useful context). The fetch is
+// best-effort: a failure (network blip, file over the preview size cap)
+// falls back to the pre-#2176 behavior -- an empty, freely-editable
+// textarea with the same hint -- rather than blocking the wizard.
 type Step = 'upload' | 'plan' | 'results';
 
 // 'exclude' is wizard-only -- never sent to the server as a role. A file
@@ -150,6 +150,11 @@ export function ImportWizardPage() {
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
 
   const [form, setForm] = useState<PlanFormState | null>(null);
+  // #2176 -- whether the description-prefill fetch failed (network blip,
+  // over the server's preview size cap, etc.). Non-fatal to the wizard;
+  // only changes the hint text under the textarea back to the pre-#2176
+  // "paste it in yourself" copy for that one draft.
+  const [readmePrefillFailed, setReadmePrefillFailed] = useState(false);
 
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
@@ -193,7 +198,21 @@ export function ImportWizardPage() {
       setForm(initialFormState(draft.plan));
       setCommitError(null);
       setResult(null);
+      setReadmePrefillFailed(false);
       setStep('plan');
+
+      // #2176 -- prefill the description from the detected README's
+      // actual content, best-effort. Fire-and-forget relative to the
+      // step transition above: the wizard is already usable with an
+      // empty description while this resolves, and a failure here must
+      // never block getting to the plan step.
+      if (draft.plan.descriptionSource) {
+        api.import.previewFile(draft.draftId, draft.plan.descriptionSource)
+          .then((preview) => {
+            setForm((prev) => (prev ? { ...prev, description: preview.content } : prev));
+          })
+          .catch(() => setReadmePrefillFailed(true));
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -249,6 +268,7 @@ export function ImportWizardPage() {
     setResult(null);
     setUploadError(null);
     setUploadProgress(0);
+    setReadmePrefillFailed(false);
     draftLifecycle.current = { id: null, finalized: false };
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
@@ -472,14 +492,20 @@ export function ImportWizardPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
-            {plan.descriptionSource && (
+            <label htmlFor="import-description-textarea" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
+            {plan.descriptionSource && readmePrefillFailed && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                Detected {basename(plan.descriptionSource)} in the zip — this wizard can&apos;t read its
-                contents before commit, so copy in what you want and edit freely.
+                Detected {basename(plan.descriptionSource)} in the zip, but couldn&apos;t load its
+                contents -- paste in what you want and edit freely.
+              </p>
+            )}
+            {plan.descriptionSource && !readmePrefillFailed && (
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                Prefilled from {basename(plan.descriptionSource)} -- edit freely before committing.
               </p>
             )}
             <textarea
+              id="import-description-textarea"
               value={form.description}
               onChange={(e) => patchForm({ description: e.target.value })}
               rows={4}

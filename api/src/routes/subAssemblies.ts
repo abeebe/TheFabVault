@@ -24,6 +24,7 @@ import { requireAuth } from '../auth.js';
 import { getDb } from '../db.js';
 import {
   getSubAssemblyRollups, getProjectRollupTotal, getSubtreeIds, returnAssetToUngroupedIfOrphaned,
+  getUngroupedCount,
 } from '../services/manifestRollup.js';
 import { validateReparent } from '../services/subAssemblyTree.js';
 import { thumbExists } from '../services/fileStore.js';
@@ -131,9 +132,8 @@ router.get('/project/:id/manifest', requireAuth, (req: Request, res: Response) =
     .filter((p) => assetMap.has(p.asset_id))
     .map((p) => partRowToOut(p, assetMap.get(p.asset_id)!));
 
-  const ungroupedCount = (db.prepare(
-    'SELECT COUNT(*) as cnt FROM project_assets WHERE project_id = ?'
-  ).get(req.params.id) as { cnt: number }).cnt;
+  // #2027: excludes soft-deleted assets — see getUngroupedCount doc.
+  const ungroupedCount = getUngroupedCount(db, req.params.id);
 
   const manifest: ManifestOut = {
     subAssemblies,

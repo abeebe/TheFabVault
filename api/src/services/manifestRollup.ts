@@ -37,12 +37,25 @@ export function getSubAssemblyRollups(
          SELECT c.ancestor_id, sa.id
          FROM closure c
          JOIN sub_assemblies sa ON sa.parent_id = c.descendant_id
+       ),
+       -- #2027: a placement whose asset has been soft-deleted (trashed but
+       -- still "placed") must drop out of the rollup entirely — it's not a
+       -- physical part anyone can print anymore. Filtering here (inner join
+       -- to assets, live rows only) rather than in the outer LEFT JOIN's ON
+       -- clause keeps the closure's LEFT JOIN semantics intact: a
+       -- sub-assembly with zero LIVE parts still gets its row (needed=0,
+       -- done=0, percent=null), same as one with zero parts at all.
+       live_parts AS (
+         SELECT p.sub_assembly_id, p.quantity, p.printed_count
+         FROM sub_assembly_parts p
+         JOIN assets a ON a.id = p.asset_id
+         WHERE a.deleted_at IS NULL
        )
        SELECT c.ancestor_id AS sub_assembly_id,
-              COALESCE(SUM(p.quantity), 0) AS needed,
-              COALESCE(SUM(MIN(p.printed_count, p.quantity)), 0) AS done
+              COALESCE(SUM(lp.quantity), 0) AS needed,
+              COALESCE(SUM(MIN(lp.printed_count, lp.quantity)), 0) AS done
        FROM closure c
-       LEFT JOIN sub_assembly_parts p ON p.sub_assembly_id = c.descendant_id
+       LEFT JOIN live_parts lp ON lp.sub_assembly_id = c.descendant_id
        GROUP BY c.ancestor_id`
     )
     .all(projectId) as { sub_assembly_id: string; needed: number; done: number }[];
@@ -65,7 +78,8 @@ export function getProjectRollupTotal(db: Database.Database, projectId: string):
               COALESCE(SUM(MIN(p.printed_count, p.quantity)), 0) AS done
        FROM sub_assembly_parts p
        JOIN sub_assemblies sa ON sa.id = p.sub_assembly_id
-       WHERE sa.project_id = ?`
+       JOIN assets a ON a.id = p.asset_id
+       WHERE sa.project_id = ? AND a.deleted_at IS NULL`
     )
     .get(projectId) as { needed: number; done: number };
   return { needed: row.needed, done: row.done, percent: toPercent(row.needed, row.done) };
@@ -80,10 +94,11 @@ export function getAllProjectRollups(db: Database.Database): Map<string, SubAsse
   const rows = db
     .prepare(
       `SELECT sa.project_id AS project_id,
-              COALESCE(SUM(p.quantity), 0) AS needed,
-              COALESCE(SUM(MIN(p.printed_count, p.quantity)), 0) AS done
+              COALESCE(SUM(CASE WHEN a.deleted_at IS NULL THEN p.quantity END), 0) AS needed,
+              COALESCE(SUM(CASE WHEN a.deleted_at IS NULL THEN MIN(p.printed_count, p.quantity) END), 0) AS done
        FROM sub_assemblies sa
        LEFT JOIN sub_assembly_parts p ON p.sub_assembly_id = sa.id
+       LEFT JOIN assets a ON a.id = p.asset_id
        GROUP BY sa.project_id`
     )
     .all() as { project_id: string; needed: number; done: number }[];
@@ -107,6 +122,41 @@ export function getSingleProjectManifestInfo(
   if (!has) return { hasManifest: false, manifestPercent: null };
   const total = getProjectRollupTotal(db, projectId);
   return { hasManifest: true, manifestPercent: total.percent };
+}
+
+// #2027: the ungrouped-pool count (project_assets), consistently excluding
+// soft-deleted assets. Pulled out into one function rather than left as
+// three copies of the same raw COUNT(*) inline in routes/projects.ts and
+// routes/subAssemblies.ts — a trashed asset sitting in project_assets
+// (soft-delete never removes the project_assets row, see routes/assets.ts's
+// DELETE handler) must not inflate the "N ungrouped" badge shown next to
+// the manifest and the project sidebar.
+export function getUngroupedCount(db: Database.Database, projectId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS cnt
+       FROM project_assets pa
+       JOIN assets a ON a.id = pa.asset_id
+       WHERE pa.project_id = ? AND a.deleted_at IS NULL`
+    )
+    .get(projectId) as { cnt: number };
+  return row.cnt;
+}
+
+// Same shape as getUngroupedCount but batched across every project in one
+// query, mirroring getAllProjectRollups — used by GET /projects so the
+// sidebar's ungrouped-count badge doesn't cost a query per row.
+export function getAllUngroupedCounts(db: Database.Database): Map<string, number> {
+  const rows = db
+    .prepare(
+      `SELECT pa.project_id AS project_id, COUNT(*) AS cnt
+       FROM project_assets pa
+       JOIN assets a ON a.id = pa.asset_id
+       WHERE a.deleted_at IS NULL
+       GROUP BY pa.project_id`
+    )
+    .all() as { project_id: string; cnt: number }[];
+  return new Map(rows.map((r) => [r.project_id, r.cnt]));
 }
 
 // All sub_assembly ids in a subtree, self included — used by the delete

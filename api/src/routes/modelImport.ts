@@ -32,7 +32,7 @@ import { getDb } from '../db.js';
 import { sanitizeFilename } from '../services/fileStore.js';
 import { saveUploadedFile, findAssetByHash, needsThumbnail } from '../services/assetUpload.js';
 import { enqueueThumb } from '../services/thumbGen.js';
-import { classifyZipEntries, type ZipImportPlan } from '../services/zipImportClassify.js';
+import { classifyZipEntries, isPreviewableTextPath, type ZipImportPlan } from '../services/zipImportClassify.js';
 import {
   scratchRootDir, draftDirFor, resolveContainedPath, extractZip, writeDraftMeta, readDraftMeta,
   deleteDraftDir, sweepExpiredDrafts, MAX_ZIP_UPLOAD_BYTES, DRAFT_TTL_MS, ZipTooLargeError,
@@ -161,6 +161,68 @@ router.delete('/import/zip/:draftId', requireAuth, (req: Request, res: Response)
   }
   deleteDraftDir(req.params.draftId);
   res.status(204).end();
+});
+
+// ─── GET /import/zip/:draftId/file?path=... — draft content preview (#2176) ──
+//
+// Lets the wizard show the actual contents of a README/LICENSE/text file
+// already sitting in the draft's extracted directory, instead of just the
+// path hint — used to prefill the model description textarea from a
+// zip's README. Same security posture as commit's per-path re-validation
+// (C2, above), not a new pattern:
+//   - draftId is regex-gated (isValidDraftId) before it ever reaches
+//     draftDirFor/readDraftMeta, same as every other :draftId route.
+//   - ownership is re-checked here independently (isOwnDraftOrAdmin),
+//     never inherited from a prior request — 404, not 403, on a mismatch,
+//     same not-found-vs-forbidden convention as every other draft route.
+//   - the `path` query param is re-run through resolveContainedPath
+//     (never trusted from the plan alone) before any read, exactly like
+//     commit's per-file resolution.
+//   - text files only: isPreviewableTextPath allowlists README/LICENSE/
+//     .txt/.md by name — a caller cannot use this to read an arbitrary
+//     3D model, image, or binary blob out of the draft even though it
+//     sits in the same directory tree the caller does own.
+//   - size-capped (MAX_PREVIEW_BYTES) so a maliciously huge file renamed
+//     to .txt can't be read fully into memory just because its name
+//     passes the allowlist.
+const MAX_PREVIEW_BYTES = 256 * 1024; // 256 KiB — generous for a README/LICENSE, not for arbitrary content
+
+router.get('/import/zip/:draftId/file', requireAuth, (req: Request, res: Response) => {
+  const { draftId } = req.params;
+  if (!isValidDraftId(draftId)) { res.status(400).json({ error: 'Invalid draft id' }); return; }
+
+  const meta = readDraftMeta(draftId);
+  if (!meta || !isOwnDraftOrAdmin(meta, req.user!)) {
+    res.status(404).json({ error: 'Draft not found or expired' });
+    return;
+  }
+
+  const rawPath = req.query.path;
+  if (typeof rawPath !== 'string' || !rawPath) {
+    res.status(400).json({ error: 'path query parameter is required' });
+    return;
+  }
+
+  if (!isPreviewableTextPath(rawPath)) {
+    res.status(400).json({ error: 'Only README/LICENSE/text/markdown files can be previewed' });
+    return;
+  }
+
+  const draftDir = draftDirFor(draftId);
+  const absPath = resolveContainedPath(draftDir, rawPath);
+  if (!absPath || !fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
+    res.status(404).json({ error: 'File not found in draft' });
+    return;
+  }
+
+  const { size } = fs.statSync(absPath);
+  if (size > MAX_PREVIEW_BYTES) {
+    res.status(400).json({ error: `File exceeds the ${MAX_PREVIEW_BYTES}-byte preview limit` });
+    return;
+  }
+
+  const content = fs.readFileSync(absPath, 'utf8');
+  res.json({ path: rawPath, content });
 });
 
 // ─── POST /import/zip/:draftId/commit — create the model ─────────────────────

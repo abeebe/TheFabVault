@@ -93,7 +93,7 @@ describe('MIGRATIONS: fresh DB reaches v15 with the expected schema', () => {
     const db = makeDb();
     runMigrations(db);
     expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
-    expect(MIGRATIONS.length).toBe(16);
+    expect(MIGRATIONS.length).toBe(17);
   });
 
   it('creates categories/models/model_files/print_profiles with the expected columns', () => {
@@ -109,7 +109,7 @@ describe('MIGRATIONS: fresh DB reaches v15 with the expected schema', () => {
 
     const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name);
     expect(userCols).toEqual(
-      expect.arrayContaining(['id', 'username', 'password_hash', 'role', 'display_name', 'disabled', 'created_at', 'updated_at']),
+      expect.arrayContaining(['id', 'username', 'password_hash', 'role', 'display_name', 'disabled', 'created_at', 'updated_at', 'token_version']),
     );
 
     const modelCols = (db.prepare('PRAGMA table_info(models)').all() as { name: string }[]).map((c) => c.name);
@@ -306,5 +306,39 @@ describe('MIGRATIONS: fresh DB reaches v16 with collections + likes (#2167)', ()
     // deletes the collection.
     const collectionStillThere = db.prepare('SELECT id FROM collections WHERE id = ?').get('c2');
     expect(collectionStillThere).toBeTruthy();
+  });
+});
+
+describe('MIGRATIONS: fresh DB reaches v17 with users.token_version (#2185)', () => {
+  it('adds token_version with DEFAULT 1, applied to a freshly-created row', () => {
+    const db = makeDb();
+    runMigrations(db);
+
+    const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name);
+    expect(userCols).toContain('token_version');
+
+    db.prepare("INSERT INTO users (id, username, password_hash, role) VALUES ('u1', 'aaron', 'h', 'admin')").run();
+    const row = db.prepare('SELECT token_version FROM users WHERE id = ?').get('u1') as { token_version: number };
+    expect(row.token_version).toBe(1);
+  });
+
+  it('backfills token_version=1 on a v16-shaped row that predates this column, a plain ADD COLUMN not a table-copy', () => {
+    const db = makeDb();
+    runMigrations(db, MIGRATIONS.slice(0, 16));
+    expect(db.pragma('user_version', { simple: true })).toBe(16);
+    db.prepare(
+      "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES ('legacy', 'aaron', 'scrypt:hash', 'admin', 1700000000, 1700000000)",
+    ).run();
+
+    runMigrations(db, MIGRATIONS);
+    expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+
+    const row = db.prepare('SELECT * FROM users WHERE id = ?').get('legacy') as {
+      username: string; role: string; token_version: number; created_at: number;
+    };
+    expect(row.username).toBe('aaron'); // survived a plain ADD COLUMN, nothing copied/reset
+    expect(row.role).toBe('admin');
+    expect(row.token_version).toBe(1);
+    expect(row.created_at).toBe(1700000000);
   });
 });

@@ -153,6 +153,11 @@ interface NormalizedEntry {
 const WINDOWS_DRIVE_ABS_RE = /^[A-Za-z]:\//;
 const README_RE = /^readme\.(md|txt)$/i;
 const LICENSE_RE = /^(license|licence|copying)(\.(md|txt))?$/i;
+// Generic plain-text extension, for a text file that isn't specifically
+// a README or LICENSE (e.g. notes.txt, changelog.md) but is still safe
+// to read and preview as text — used only by isPreviewableTextPath
+// below, not by any plan-classification heuristic above.
+const GENERIC_TEXT_RE = /\.(txt|md)$/i;
 const PROFILE_HINT_WORDS = ['profile', 'sliced', 'print_settings', 'printsettings'];
 
 const JUNK_BASENAME_RE = /^(\.ds_store|thumbs\.db|desktop\.ini)$/i;
@@ -312,6 +317,22 @@ function detectSourceSite(usable: NormalizedEntry[], files: NormalizedEntry[], r
   if (hasFilesDir && hasImagesDir && hasRootLicenseTxt) return 'thingiverse';
   if (!hasFilesDir && !hasImagesDir && topLevelHasModel && topLevelHasImage) return 'makerworld';
   return null;
+}
+
+// Whether `rawPath` (the exact path string as it appears in a plan's
+// files[].path / descriptionSource / licenseFile — i.e. NOT yet
+// filesystem-resolved) is safe to read and preview as plain text (#2176,
+// GET /import/zip/:draftId/file). README/LICENSE (with or without a
+// .md/.txt extension, matching README_RE/LICENSE_RE above) or any other
+// plain .txt/.md file — never a 3D model, image, archive, or executable,
+// regardless of what a caller's `path` query param claims. This is a
+// name/extension check only; the route's own resolveContainedPath +
+// existsSync/isFile + size-cap checks are what actually gate reading the
+// bytes off disk — this function exists so that gate has a text-only
+// allowlist to apply, not a denylist that could miss a future extension.
+export function isPreviewableTextPath(rawPath: string): boolean {
+  const basename = path.posix.basename(rawPath.replace(/\\/g, '/'));
+  return README_RE.test(basename) || LICENSE_RE.test(basename) || GENERIC_TEXT_RE.test(basename);
 }
 
 // -----------------------------------------------------------------------

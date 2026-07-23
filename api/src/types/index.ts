@@ -304,6 +304,11 @@ export interface UserRow {
   disabled: number; // 0 = active, 1 = disabled (SQLite has no boolean type)
   created_at: number;
   updated_at: number;
+  // #2185, migration v17 — bumped on password reset to invalidate every
+  // token minted before the bump (see auth.ts's requireAuth/requireAdmin
+  // and createToken). Never exposed on UserOut/AuthMeOut — this is an
+  // internal revocation counter, not part of the admin-facing user shape.
+  token_version: number;
 }
 
 export interface AssetRow {
