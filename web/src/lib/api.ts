@@ -251,7 +251,7 @@ export interface ModelDetailOut extends ModelOut {
   profiles: PrintProfileOut[];
 }
 
-// ─── Folder→model conversion preview (Phase B, #2170) ─────────────────────────
+// ─── Folder→model conversion preview (Phase B, #2170; modes #2175) ────────────
 // Mirrors api/src/types/index.ts's FolderConversionPreviewOut exactly —
 // same cross-engineer-contract convention as the rest of this section.
 export interface FolderConversionPreviewFile {
@@ -261,9 +261,20 @@ export interface FolderConversionPreviewFile {
   sortOrder: number;
 }
 
-export interface FolderConversionPreviewOut {
-  folderId: string;
-  folderName: string;
+// #2175 — two grouping modes, one shared per-resulting-model shape (see
+// api/src/routes/models.ts's handler comment for the full rationale):
+//   'single'     — the selected folder becomes exactly one model,
+//                   recursively collecting every descendant asset.
+//   'each-child' — the selected folder is a container; each of its
+//                   IMMEDIATE named (non-bare-GUID) child folders becomes
+//                   its own recursive model. Bare-GUID children and any
+//                   assets sitting directly in the container are never
+//                   converted by this mode.
+export type FolderConversionMode = 'single' | 'each-child';
+
+export interface FolderConversionResultEntry {
+  sourceFolderId: string;
+  sourceFolderName: string;
   suggestedTitle: string;
   assetCount: number;
   countsByRole: Record<ModelFileRole, number>;
@@ -271,6 +282,48 @@ export interface FolderConversionPreviewOut {
   coverAssetId: string | null;
   alreadyConverted: boolean;
   existingModelIds: string[];
+}
+
+export interface FolderConversionSkippedChild {
+  folderId: string;
+  folderName: string;
+  reason: 'bare-guid-leaf';
+}
+
+export interface FolderConversionPreviewOut {
+  mode: FolderConversionMode;
+  folderId: string;
+  folderName: string;
+  // Back-compat flat fields — mirror results[0] exactly for mode
+  // 'single' (the default when mode is omitted); absent for
+  // 'each-child', which has no single "the" result. See the API-side
+  // type's comment for the full back-compat rationale.
+  suggestedTitle?: string;
+  assetCount?: number;
+  countsByRole?: Record<ModelFileRole, number>;
+  files?: FolderConversionPreviewFile[];
+  coverAssetId?: string | null;
+  alreadyConverted?: boolean;
+  existingModelIds?: string[];
+  // Unified breakdown — one entry per resulting model regardless of
+  // mode: exactly 1 for 'single' (identical to the flat fields above), N
+  // for 'each-child'.
+  results: FolderConversionResultEntry[];
+  // 'each-child' only (always [] for 'single').
+  skippedChildren: FolderConversionSkippedChild[];
+  // Count of assets sitting directly in the selected/container folder
+  // itself. Always 0 for 'single'. Informational only for 'each-child' —
+  // these are never converted by that mode.
+  looseAssetCount: number;
+}
+
+// #2175 — each-child batch commit response. mode 'single' keeps the
+// pre-#2175 response shape (the created ModelDetailOut directly, not
+// this wrapper) — see api/src/routes/models.ts's POST handler comment.
+export interface FolderConversionBatchOut {
+  mode: 'each-child';
+  created: ModelDetailOut[];
+  skippedChildren: FolderConversionSkippedChild[];
 }
 
 export interface ModelCreateBody {
@@ -698,15 +751,37 @@ export const api = {
     // Explicit folder→model conversion — never silent/automatic. The
     // folder and its assets are untouched; this only creates a new model
     // + model_files links.
-    fromFolder: (folderId: string, title?: string): Promise<ModelDetailOut> =>
-      apiFetch('/models/from-folder', { method: 'POST', body: JSON.stringify({ folderId, title }) }),
+    //
+    // mode 'single' (default, omit entirely for pre-#2175 back-compat):
+    // recursive — the folder and every descendant collapse into ONE
+    // model, response is that model's ModelDetailOut directly, same
+    // shape as before #2175.
+    fromFolder: (folderId: string, title?: string, mode?: FolderConversionMode): Promise<ModelDetailOut> =>
+      apiFetch('/models/from-folder', {
+        method: 'POST', body: JSON.stringify({ folderId, title, mode }),
+      }),
 
-    // Dry-run counterpart of fromFolder above — same classification,
-    // zero writes (see routes/models.ts's preview handler comment). The
-    // bulk convert wizard calls this once per folder before the user
-    // confirms anything.
-    previewFromFolder: (folderId: string): Promise<FolderConversionPreviewOut> =>
-      apiFetch(`/models/from-folder/preview?folder_id=${encodeURIComponent(folderId)}`),
+    // mode 'each-child' (#2175) — the folder is a container; each of its
+    // immediate named (non-bare-GUID) child folders becomes its own
+    // recursive model in one atomic batch. childTitles optionally
+    // overrides a given child folder id's title (falls back to the
+    // child's own name). Response wraps the created models + whichever
+    // immediate children were skipped for being bare-GUID-named — see
+    // FolderConversionBatchOut.
+    fromFolderEachChild: (
+      folderId: string, childTitles?: Record<string, string>,
+    ): Promise<FolderConversionBatchOut> =>
+      apiFetch('/models/from-folder', {
+        method: 'POST', body: JSON.stringify({ folderId, mode: 'each-child', childTitles }),
+      }),
+
+    // Dry-run counterpart of fromFolder/fromFolderEachChild above — same
+    // classification, zero writes (see routes/models.ts's preview
+    // handler comment). The bulk convert wizard calls this once per
+    // selected folder before the user confirms anything; mode defaults
+    // to 'single' when omitted, same back-compat rule as the commit.
+    previewFromFolder: (folderId: string, mode?: FolderConversionMode): Promise<FolderConversionPreviewOut> =>
+      apiFetch(`/models/from-folder/preview?folder_id=${encodeURIComponent(folderId)}${mode ? `&mode=${mode}` : ''}`),
 
     // Link assets already in the vault onto a model.
     attachExisting: (

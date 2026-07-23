@@ -108,6 +108,11 @@ export interface FolderOut {
   name: string;
   parentId: string | null;
   createdAt: number;
+  // #2175: true when `name` is a standalone 8-4-4-4-12 hex UUID (server
+  // computes this — api/src/services/modelConvert.ts's isBareGuidName —
+  // so the bulk convert wizard's tree filtering never drifts out of
+  // sync with the actual Mode B eligibility rule).
+  isBareGuid: boolean;
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
