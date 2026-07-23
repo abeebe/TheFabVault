@@ -49,9 +49,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for arm64 emulation on this amd64 runner)
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -71,7 +68,7 @@ jobs:
         with:
           context: ./api
           file: ./api/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/abeebe/thefabvault-api:latest
@@ -82,7 +79,7 @@ jobs:
         with:
           context: ./web
           file: ./web/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           build-args: |
             VITE_API_URL=${{ secrets.VITE_API_URL }}
@@ -93,33 +90,27 @@ jobs:
 
       - name: Summary
         run: |
-          echo "Multi-arch (linux/amd64, linux/arm64) images pushed to GHCR:"
+          echo "amd64-only images pushed to GHCR (per-push build, single platform):"
           echo "  ghcr.io/abeebe/thefabvault-api:latest"
           echo "  ghcr.io/abeebe/thefabvault-web:latest"
           echo ""
           echo "This is Aaron's own production build track: the web image bakes in"
           echo "secrets.VITE_API_URL (the internal fabvault-api hostname), so :latest"
-          echo "and :<sha> are NOT meant for general public self-hosting. Versioned"
-          echo "releases (v*.*.* tags) are built separately by release.yml with a"
+          echo "and :<sha> are NOT meant for general public self-hosting."
+          echo ""
+          echo "Per-push builds are amd64-only on purpose (#2049): the internal"
+          echo "deploy target (ct-102, 10.10.5.252) is amd64-only, and the arm64 leg"
+          echo "under QEMU emulation was taking ~75min per push, blocking deploys."
+          echo "Dropping QEMU/arm64 from this hot path gets per-push builds back to"
+          echo "~10-15min. arm64 packaging for public self-hosting is NOT lost -- it"
+          echo "is built separately by release.yml (multi-arch: linux/amd64 +"
+          echo "linux/arm64, with its own QEMU setup) on v*.*.* tag pushes, with a"
           echo "generic VITE_API_URL for that purpose."
           echo ""
-          echo "Both platforms are built via Buildx with QEMU emulation for the"
-          echo "arm64 leg. The arm64 build compiles better-sqlite3's native module"
-          echo "under emulation -- verified working end-to-end on 2026-07-20 (full"
-          echo "'docker buildx build --platform linux/arm64' of api/Dockerfile ran"
-          echo "all stages to completion, including the native compile, and a"
-          echo "repeat run returned a clean exit 0 off the shared build cache)."
-          echo ""
-          echo "Safe for the live stack: :latest is now a multi-arch manifest (an"
-          echo "OCI image index with one entry per platform), not a single-platform"
-          echo "image. 'docker pull'/'docker compose pull' on an amd64 host (the"
-          echo "Docker host this stack runs on, 10.10.5.252) resolves that index to"
-          echo "its amd64 entry automatically -- this is how every official"
-          echo "multi-arch image (nginx, postgres, node, etc) already works, and"
-          echo "portainer-image-watcher already requests the OCI image-index media"
-          echo "type when checking for digest changes, so no watcher change is"
-          echo "needed. Confirmed against portainer-image-watcher.sh and"
-          echo "portainer-stack-redeploy.sh before this workflow change shipped."
+          echo ":latest and :<sha> from this workflow are now single-platform"
+          echo "(linux/amd64) images, not a multi-arch manifest. That matches the"
+          echo "amd64-only deploy target (10.10.5.252) exactly, so 'docker pull'/"
+          echo "'docker compose pull' there is unaffected."
           echo ""
           echo "Redeploy is handled by the VM-side watcher (portainer-image-watcher)."
           echo "Stack will pull new images automatically within 5 minutes."
