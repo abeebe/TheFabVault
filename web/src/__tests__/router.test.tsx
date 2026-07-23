@@ -37,6 +37,10 @@ const mockModelGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as ModelD
 const mockCategoriesList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
 const mockCollectionsList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
 const mockCollectionGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as unknown));
+// /projects, /projects/:id (#2182) -- mirrors the Collections mocks above.
+const mockProjectsList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+const mockProjectGet = vi.fn((..._args: unknown[]) => Promise.resolve({} as unknown));
+const mockProjectCreate = vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'newproj1' }));
 // /convert (#2170) — defaults keep every pre-existing route test folder-
 // and-preview-free; the wizard smoke test below overrides these per-case.
 const mockFoldersList = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
@@ -71,7 +75,13 @@ vi.mock('../lib/api.js', () => ({
       fileUrl: () => '',
     },
     folders: { list: (...args: unknown[]) => mockFoldersList(...args) },
-    projects: { list: () => Promise.resolve([]), addAssets: () => Promise.resolve() },
+    projects: {
+      list: (...args: unknown[]) => mockProjectsList(...args),
+      get: (...args: unknown[]) => mockProjectGet(...args),
+      create: (...args: unknown[]) => mockProjectCreate(...args),
+      addAssets: () => Promise.resolve(),
+    },
+    manifest: { get: () => Promise.resolve(null) },
     sets: { list: () => Promise.resolve([]), addAssets: () => Promise.resolve() },
     trash: { list: () => Promise.resolve({ items: [], total: 0 }) },
     models: {
@@ -114,6 +124,19 @@ beforeEach(() => {
     id: 'col1', name: 'My Collection', description: null, ownerId: null, visibility: 'public',
     coverModelId: null, coverThumbUrl: null, modelCount: 0, createdAt: 0, models: [],
   }));
+  mockProjectsList.mockClear();
+  mockProjectsList.mockImplementation(() => Promise.resolve([]));
+  mockProjectGet.mockClear();
+  // hasManifest: false keeps useManifest's fetch a no-op (it only calls
+  // api.manifest.get when the loaded project has a manifest) -- these are
+  // route-wiring smoke tests, not ProjectView behavior coverage.
+  mockProjectGet.mockImplementation(() => Promise.resolve({
+    id: 'proj1', name: 'My Project', description: null, folderId: null, tags: [],
+    printerSettings: {}, laserSettings: {}, vinylSettings: {},
+    assetCount: 0, hasManifest: false, manifestPercent: null, createdAt: 0, assets: [],
+  }));
+  mockProjectCreate.mockClear();
+  mockProjectCreate.mockImplementation(() => Promise.resolve({ id: 'newproj1' }));
   mockFoldersList.mockClear();
   mockFoldersList.mockImplementation(() => Promise.resolve([]));
   mockPreviewFromFolder.mockClear();
@@ -183,15 +206,37 @@ describe('AppShell routing', () => {
     expect(await screen.findByText('Dragon Prints')).toBeTruthy();
   });
 
-  it('renders the persistent nav switch on every route (as admin -- Vault/Projects are admin-only as of #2180)', async () => {
+  it('renders the persistent nav switch on every route (as admin -- Vault is admin-only as of #2180; Projects is member-visible as of #2182)', async () => {
     renderAt('/vault');
     expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Collections' })).toBeTruthy();
-    // Vault/Projects nav links are gated on useMe()'s async isAdmin --
-    // findByRole retries until mockMe (admin, by this file's default)
-    // resolves and AppShell re-renders with them present.
+    expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
+    // Vault's nav link is gated on useMe()'s async isAdmin -- findByRole
+    // retries until mockMe (admin, by this file's default) resolves and
+    // AppShell re-renders with it present.
     expect(await screen.findByRole('link', { name: 'Vault' })).toBeTruthy();
-    expect(await screen.findByRole('link', { name: 'Projects' })).toBeTruthy();
+  });
+
+  // #2182: Projects moved off /vault onto its own member-reachable route --
+  // same route-wiring smoke shape as Browse/Collections above (see
+  // ProjectsPage.test.tsx-equivalent coverage note: none exists yet, this
+  // file is the only routing coverage for the new pages, mirroring how
+  // CollectionsPage/CollectionPage were first covered here in #2169).
+  it('renders ProjectsPage at /projects', async () => {
+    renderAt('/projects');
+    expect(await screen.findByRole('button', { name: /new project/i })).toBeTruthy();
+    expect(mockProjectsList).toHaveBeenCalled();
+  });
+
+  it('renders ProjectPage at /projects/:id with the id threaded through to the fetch', async () => {
+    renderAt('/projects/proj1');
+    // ProjectView renders the project name twice at once (its own header
+    // h2, plus a second span in the no-manifest "ungrouped" content area)
+    // -- findByText throws on the ambiguity, so this asserts presence via
+    // findAllByText the same way router.test.tsx already does for "Browse"
+    // (nav link + breadcrumb) above.
+    expect((await screen.findAllByText('My Project')).length).toBeGreaterThan(0);
+    expect(mockProjectGet).toHaveBeenCalledWith('proj1');
   });
 
   // #2169 (Phase B3): Collections list + detail added as top-level routes,
@@ -237,28 +282,32 @@ describe('AppShell routing', () => {
   });
 });
 
-// Member-mode role gating (Phase D4, #2180, plan §6): Vault nav item +
-// /convert are admin-only; a member neither sees the Vault/Projects nav
-// links nor gets a working page if they land on /vault or /convert by
+// Member-mode role gating (Phase D4, #2180, plan §6; revised #2182): Vault
+// nav item + /convert are admin-only; a member neither sees the Vault nav
+// link nor gets a working page if they land on /vault or /convert by
 // direct URL (stale bookmark, typed link, whatever) -- they get a clean
 // Not-authorized state, never a crash or a half-functional page. This is
 // the client-side UX layer only -- every route these guard is
 // independently requireAdmin-gated server-side regardless of what
 // RequireAdmin decides to render (see RequireAdmin.tsx's own comment).
+// Projects (#2182) is no longer part of this gate -- it has its own
+// member-reachable route now, so it gets its own describe block below
+// rather than living in the "hides ... for a member" assertion the way
+// it did under D4.
 describe('AppShell member-mode gating (#2180)', () => {
   beforeEach(() => {
     mockMe.mockImplementation(() => Promise.resolve({ id: 'member1', username: 'bob', displayName: null, role: 'member' }));
   });
 
-  it('hides the Vault and Projects nav links for a member', async () => {
+  it('hides the Vault nav link for a member', async () => {
     renderAt('/');
     await waitFor(() => expect(mockMe).toHaveBeenCalled());
     // Give the resolved identity a tick to land in AppShell's isAdmin.
     await waitFor(() => expect(screen.queryByRole('link', { name: 'Vault' })).toBeNull());
-    expect(screen.queryByRole('link', { name: 'Projects' })).toBeNull();
-    // Browse/Collections stay visible regardless of role.
+    // Browse/Collections/Projects stay visible regardless of role.
     expect(screen.getByRole('link', { name: 'Browse' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Collections' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
   });
 
   it('shows a clean Not-authorized state on direct-URL access to /vault as a member', async () => {
@@ -281,13 +330,42 @@ describe('AppShell member-mode gating (#2180)', () => {
     renderAt('/vault');
     expect(screen.queryByText('Not authorized')).toBeNull();
   });
+
+  // #2182's actual bug report: a member had NO way to reach the Projects
+  // surface at all, because ProjectView only ever mounted inside
+  // VaultPage (admin-gated). This is the direct regression test for that.
+  it('reaches /projects directly, with no Not-authorized gate (#2182)', async () => {
+    renderAt('/projects');
+    expect(await screen.findByRole('button', { name: /new project/i })).toBeTruthy();
+    expect(screen.queryByText('Not authorized')).toBeNull();
+  });
+
+  it('reaches /projects/:id directly, with no Not-authorized gate (#2182)', async () => {
+    renderAt('/projects/proj1');
+    // ProjectView renders the project name twice at once (its own header
+    // h2, plus a second span in the no-manifest "ungrouped" content area)
+    // -- findByText throws on the ambiguity, so this asserts presence via
+    // findAllByText the same way router.test.tsx already does for "Browse"
+    // (nav link + breadcrumb) above.
+    expect((await screen.findAllByText('My Project')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Not authorized')).toBeNull();
+  });
 });
 
-describe('AppShell admin-mode gating (#2180)', () => {
+describe('AppShell admin-mode gating (#2180, #2182)', () => {
   it('an admin can still reach /vault and /convert directly', async () => {
     renderAt('/vault');
     expect((await screen.findAllByText('All Files')).length).toBeGreaterThan(0);
     expect(screen.queryByText('Not authorized')).toBeNull();
+  });
+
+  // Ticket's explicit acceptance shape: "admins additionally get Vault" --
+  // i.e. an admin has both the Vault nav item (admin-only) AND the
+  // Projects nav item (member-visible, so admins get it too) at once.
+  it('sees both the Vault and Projects nav links at the same time', async () => {
+    renderAt('/');
+    expect(screen.getByRole('link', { name: 'Projects' })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'Vault' })).toBeTruthy();
   });
 });
 

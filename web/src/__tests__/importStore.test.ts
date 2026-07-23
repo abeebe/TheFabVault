@@ -198,6 +198,12 @@ describe('importStore — cancel semantics', () => {
     // reported as errors (that would misrepresent "never attempted" as
     // "failed").
     expect(s.items.some((i) => i.status === 'error')).toBe(false);
+    // Regression #2047: items the pool never got to must reach a terminal
+    // 'skipped' state, not hang at 'pending' forever — that's what let the
+    // gray dot never resolve and the progress bar stall short of 100%.
+    expect(s.items.some((i) => i.status === 'pending')).toBe(false);
+    expect(s.items.some((i) => i.status === 'skipped')).toBe(true);
+    expect(s.items.filter((i) => i.status === 'done').length + s.items.filter((i) => i.status === 'skipped').length).toBe(10);
   });
 });
 
