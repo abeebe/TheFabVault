@@ -110,19 +110,54 @@ export function isBareGuidName(name: string): boolean {
   return BARE_GUID_RE.test(name.trim());
 }
 
+// Defensive recursion cap (fold-in, Remy's review of this ticket):
+// folders.parent_id has no DB-level cycle constraint — routes/folders.ts's
+// PATCH /folder/:id guards against CREATING a cycle through normal use,
+// but that's an application-layer check on ONE mutation path, not a
+// schema guarantee, so it doesn't retroactively protect against a
+// cyclic parent_id arriving some other way (a hand-edited row, a bad
+// migration/import). Confirmed unreachable through this endpoint today,
+// but the CTE below has no bound of its own: UNION ALL never dedupes,
+// so a genuine cycle makes it re-add the same ids forever. Because
+// better-sqlite3 is synchronous, that hangs the entire Node process
+// (Remy reproduced >15s with no termination on a hand-built cyclic
+// fixture) — not a query timeout, a frozen server. depth caps the walk
+// at MAX_FOLDER_TREE_DEPTH levels: Aaron's real tree is ~5 levels deep,
+// so this is enormous headroom for any legitimate tree while
+// guaranteeing the query always terminates. Same fix applied to the
+// structurally identical services/manifestRollup.ts#getSubtreeIds
+// (sub_assemblies.parent_id, same unbounded UNION ALL pattern).
+const MAX_FOLDER_TREE_DEPTH = 100;
+
 // Every folder id in rootFolderId's subtree, root included — same
 // WITH RECURSIVE closure shape as services/manifestRollup.ts's
 // getSubtreeIds (sub_assemblies.parent_id is structurally identical to
 // folders.parent_id).
 export function getRecursiveFolderIds(db: Database.Database, rootFolderId: string): string[] {
   const rows = db.prepare(
-    `WITH RECURSIVE folder_tree(id) AS (
-       SELECT ?
+    `WITH RECURSIVE folder_tree(id, depth) AS (
+       SELECT ?, 0
        UNION ALL
-       SELECT f.id FROM folders f JOIN folder_tree ON f.parent_id = folder_tree.id
+       SELECT f.id, folder_tree.depth + 1
+       FROM folders f JOIN folder_tree ON f.parent_id = folder_tree.id
+       WHERE folder_tree.depth < ?
      )
-     SELECT id FROM folder_tree`
-  ).all(rootFolderId) as { id: string }[];
+     SELECT id, depth FROM folder_tree`
+  ).all(rootFolderId, MAX_FOLDER_TREE_DEPTH) as { id: string; depth: number }[];
+
+  // A row AT the cap means the walk was still finding new children right
+  // up to the boundary — either a cycle (would otherwise run forever) or
+  // a genuinely unusual tree deeper than any real vault has. Either way,
+  // terminate gracefully with whatever was collected rather than
+  // throwing a 500 on what might be a legitimate (if extreme) deep tree
+  // — this is a safety valve, not a validation error.
+  if (rows.some((r) => r.depth === MAX_FOLDER_TREE_DEPTH)) {
+    console.warn(
+      `[modelConvert] getRecursiveFolderIds hit the ${MAX_FOLDER_TREE_DEPTH}-level depth cap under `
+      + `folder ${rootFolderId} — likely a cyclic parent_id. Returning the truncated set instead of hanging.`
+    );
+  }
+
   return rows.map((r) => r.id);
 }
 

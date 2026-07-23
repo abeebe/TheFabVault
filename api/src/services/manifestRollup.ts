@@ -159,6 +159,21 @@ export function getAllUngroupedCounts(db: Database.Database): Map<string, number
   return new Map(rows.map((r) => [r.project_id, r.cnt]));
 }
 
+// Defensive recursion cap (fold-in, #2175 closing-api review): same
+// unbounded WITH RECURSIVE pattern services/modelConvert.ts's
+// getRecursiveFolderIds had before this fold-in, on the structurally
+// identical parent_id shape (sub_assemblies vs folders). No DB-level
+// cycle constraint backs sub_assemblies.parent_id either — services/
+// subAssemblyTree.ts's validateReparent guards the one normal mutation
+// path (reparenting), not a schema guarantee — so a cyclic parent_id
+// arriving some other way would hang this synchronous, single-threaded
+// better-sqlite3 query (and the whole Node process with it) forever,
+// since UNION ALL never dedupes and just keeps re-adding the cycle's
+// ids. depth caps the walk at MAX_SUBTREE_DEPTH levels — real build
+// manifests are nowhere near this deep — guaranteeing termination
+// instead of a freeze.
+const MAX_SUBTREE_DEPTH = 100;
+
 // All sub_assembly ids in a subtree, self included — used by the delete
 // path to know which placements are about to be cascade-deleted before
 // they're gone, so the affected assets can be evaluated for return to the
@@ -166,14 +181,28 @@ export function getAllUngroupedCounts(db: Database.Database): Map<string, number
 export function getSubtreeIds(db: Database.Database, rootId: string): string[] {
   const rows = db
     .prepare(
-      `WITH RECURSIVE subtree(id) AS (
-         SELECT ?
+      `WITH RECURSIVE subtree(id, depth) AS (
+         SELECT ?, 0
          UNION ALL
-         SELECT sa.id FROM subtree s JOIN sub_assemblies sa ON sa.parent_id = s.id
+         SELECT sa.id, subtree.depth + 1
+         FROM subtree JOIN sub_assemblies sa ON sa.parent_id = subtree.id
+         WHERE subtree.depth < ?
        )
-       SELECT id FROM subtree`
+       SELECT id, depth FROM subtree`
     )
-    .all(rootId) as { id: string }[];
+    .all(rootId, MAX_SUBTREE_DEPTH) as { id: string; depth: number }[];
+
+  // Same graceful-termination rationale as getRecursiveFolderIds: a row
+  // at the cap means either a cycle or a genuinely unusual depth — log
+  // and return the truncated set, never throw on what might be a
+  // legitimate (if extreme) deep tree.
+  if (rows.some((r) => r.depth === MAX_SUBTREE_DEPTH)) {
+    console.warn(
+      `[manifestRollup] getSubtreeIds hit the ${MAX_SUBTREE_DEPTH}-level depth cap under sub_assembly `
+      + `${rootId} — likely a cyclic parent_id. Returning the truncated set instead of hanging.`
+    );
+  }
+
   return rows.map((r) => r.id);
 }
 

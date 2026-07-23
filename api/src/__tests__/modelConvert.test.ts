@@ -221,4 +221,54 @@ describe('recursive folder-tree helpers (#2175)', () => {
     expect(skipped).toHaveLength(1);
     expect(isBareGuidName(skipped[0].name)).toBe(true);
   });
+
+  // Defensive-depth-cap fold-in (Remy's review): folders.parent_id has no
+  // DB-level cycle constraint — routes/folders.ts's PATCH cycle guard is
+  // an application-layer check on the reparent mutation path, not a
+  // schema guarantee, so a cyclic parent_id can still exist via a
+  // hand-edited row (exactly what this fixture builds directly against
+  // the DB, bypassing every app-level check, same reproduction method
+  // Remy used). Before the depth cap, this hung the WITH RECURSIVE query
+  // — and the whole synchronous better-sqlite3 process with it —
+  // indefinitely, since UNION ALL never dedupes and just re-adds the
+  // cycle's ids forever. This test is the regression guard: it must
+  // complete fast and return a bounded set, not hang.
+  it('terminates fast and returns a bounded set on a cyclic parent_id, instead of hanging', () => {
+    const a = mkFolder('A');
+    const b = mkFolder('B', a);
+    // Hand-built cycle: A's parent_id now points at B, so A -> B -> A.
+    // Bypasses the app layer entirely — this is a DB-level fixture, not
+    // something reachable through routes/folders.ts's PATCH endpoint.
+    db.prepare('UPDATE folders SET parent_id = ? WHERE id = ?').run(b, a);
+
+    const start = Date.now();
+    const ids = getRecursiveFolderIds(db, a);
+    const elapsedMs = Date.now() - start;
+
+    // Fast, not hung — this is the actual regression guard. Generous
+    // threshold (a real freeze is >15s per Remy's report; this asserts
+    // two orders of magnitude under that) so the assertion is about
+    // "did it hang" not "is it micro-optimized".
+    expect(elapsedMs).toBeLessThan(2000);
+    // Bounded: capped at MAX_FOLDER_TREE_DEPTH (100) + 1 rows, not an
+    // ever-growing set. The exact count doesn't matter as much as "it
+    // stopped at all" — both ids alternate into the result until the cap.
+    expect(ids.length).toBeLessThanOrEqual(101);
+    expect(ids.length).toBeGreaterThan(0);
+    // Both cycle members are present — the cap didn't just return the
+    // root and bail before doing any real traversal.
+    expect(new Set(ids)).toEqual(new Set([a, b]));
+  });
+
+  it('a legitimately deep (but non-cyclic) chain well under the cap returns every level, unaffected', () => {
+    let parent: string | null = null;
+    const chain: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      const id = mkFolder(`Level ${i}`, parent);
+      chain.push(id);
+      parent = id;
+    }
+    const ids = getRecursiveFolderIds(db, chain[0]);
+    expect(new Set(ids)).toEqual(new Set(chain));
+  });
 });

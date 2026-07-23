@@ -249,6 +249,31 @@ describe('getSubtreeIds', () => {
     const leaf = makeSubAssembly(db, projectId, 'Leaf');
     expect(getSubtreeIds(db, leaf)).toEqual([leaf]);
   });
+
+  // Defensive-depth-cap fold-in (#2175 closing-api review): same
+  // unbounded-cycle risk as services/modelConvert.ts's
+  // getRecursiveFolderIds (sub_assemblies.parent_id is structurally
+  // identical to folders.parent_id, and validateReparent guards only the
+  // normal reparent mutation path, not the schema). Hand-built cycle,
+  // bypassing that guard entirely, same reproduction method as the
+  // folders-side test — this is the regression guard: must terminate
+  // fast with a bounded result, not hang the process.
+  it('terminates fast and returns a bounded set on a cyclic parent_id, instead of hanging', () => {
+    const projectId = makeProject(db);
+    const a = makeSubAssembly(db, projectId, 'A');
+    const b = makeSubAssembly(db, projectId, 'B', a);
+    // Hand-built cycle: A's parent_id now points at B, so A -> B -> A.
+    db.prepare('UPDATE sub_assemblies SET parent_id = ? WHERE id = ?').run(b, a);
+
+    const start = Date.now();
+    const ids = getSubtreeIds(db, a);
+    const elapsedMs = Date.now() - start;
+
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(ids.length).toBeLessThanOrEqual(101);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids)).toEqual(new Set([a, b]));
+  });
 });
 
 describe('returnAssetToUngroupedIfOrphaned — boundary rule on single-part removal (Remy review fix)', () => {
