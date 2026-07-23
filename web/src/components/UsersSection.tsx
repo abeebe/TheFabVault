@@ -16,26 +16,6 @@ import type { UserOut, UserRole } from '../lib/api.js';
 // per the ticket this renders inline as a section, matching Network
 // Mounts/Library Tools below it.
 
-// routes/users.ts (server) returns `{ error: string }` JSON on every 4xx,
-// but apiFetch (lib/api.ts) throws `Error(rawResponseText)` without
-// parsing it -- true for every error path in AdminSettings.tsx today, not
-// something introduced here. Left as-is there (fixing apiFetch's error
-// handling is shared-file, cross-cutting, and out of scope for a UI
-// ticket), but the self-lockout 409 text is exactly what an admin needs to
-// read in the moment ("You cannot disable your own account"), so it's
-// worth unwrapping locally just for this section's errors. Falls back to
-// the raw message for anything that isn't a `{error}`-shaped body.
-function friendlyError(err: unknown, fallback: string): string {
-  if (!(err instanceof Error)) return fallback;
-  try {
-    const parsed = JSON.parse(err.message) as { error?: unknown };
-    if (parsed && typeof parsed.error === 'string') return parsed.error;
-  } catch {
-    // Not JSON -- fall through to the raw message.
-  }
-  return err.message || fallback;
-}
-
 interface OneTimeReveal {
   username: string;
   password: string;
@@ -132,7 +112,7 @@ export function UsersSection() {
         setReveal({ username: created.username, password: created.generatedPassword, mode: 'created' });
       }
     } catch (err) {
-      setCreateError(friendlyError(err, 'Failed to create user'));
+      setCreateError(err instanceof Error ? err.message : 'Failed to create user');
     } finally {
       setCreateSubmitting(false);
     }
@@ -144,7 +124,7 @@ export function UsersSection() {
     try {
       await updateUser(user.id, { role: user.role === 'admin' ? 'member' : 'admin' });
     } catch (err) {
-      setRowError({ id: user.id, message: friendlyError(err, 'Failed to update role') });
+      setRowError({ id: user.id, message: err instanceof Error ? err.message : 'Failed to update role' });
     } finally {
       setRowBusyId(null);
     }
@@ -156,7 +136,7 @@ export function UsersSection() {
     try {
       await updateUser(user.id, { disabled: !user.disabled });
     } catch (err) {
-      setRowError({ id: user.id, message: friendlyError(err, 'Failed to update account status') });
+      setRowError({ id: user.id, message: err instanceof Error ? err.message : 'Failed to update account status' });
     } finally {
       setRowBusyId(null);
     }
@@ -172,7 +152,7 @@ export function UsersSection() {
         setReveal({ username: result.username, password: result.generatedPassword, mode: 'reset' });
       }
     } catch (err) {
-      setRowError({ id: user.id, message: friendlyError(err, 'Failed to reset password') });
+      setRowError({ id: user.id, message: err instanceof Error ? err.message : 'Failed to reset password' });
     } finally {
       setRowBusyId(null);
     }
