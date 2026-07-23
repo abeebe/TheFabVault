@@ -3,7 +3,7 @@
 // modelConvert.test.ts's classifyExt/planFolderConversion suites.
 
 import { describe, expect, it } from 'vitest';
-import { classifyZipEntries, type ZipEntryInput } from '../services/zipImportClassify.js';
+import { classifyZipEntries, isPreviewableTextPath, type ZipEntryInput } from '../services/zipImportClassify.js';
 import {
   entries,
   PRINTABLES_ZIP_FILENAME, PRINTABLES_ENTRIES,
@@ -251,5 +251,44 @@ describe('classifyZipEntries — structural correctness', () => {
   it('falls back to "Untitled Import" if the zip filename itself is empty and there is no root folder', () => {
     const plan = classifyZipEntries(entries('a.stl'), '');
     expect(plan.suggestedTitle).toBe('Untitled Import');
+  });
+});
+
+describe('isPreviewableTextPath (#2176) — allowlist for GET /import/zip/:draftId/file', () => {
+  it('allows README.md and README.txt at any depth, case-insensitively', () => {
+    expect(isPreviewableTextPath('README.md')).toBe(true);
+    expect(isPreviewableTextPath('readme.txt')).toBe(true);
+    expect(isPreviewableTextPath('files/nested/ReadMe.MD')).toBe(true);
+  });
+
+  it('allows LICENSE/LICENCE/COPYING with or without an extension', () => {
+    expect(isPreviewableTextPath('LICENSE')).toBe(true);
+    expect(isPreviewableTextPath('LICENSE.txt')).toBe(true);
+    expect(isPreviewableTextPath('licence.md')).toBe(true);
+    expect(isPreviewableTextPath('COPYING')).toBe(true);
+  });
+
+  it('allows a generic .txt/.md file that is not specifically README/LICENSE', () => {
+    expect(isPreviewableTextPath('notes.txt')).toBe(true);
+    expect(isPreviewableTextPath('CHANGELOG.md')).toBe(true);
+  });
+
+  it('rejects a 3D model, image, or archive extension regardless of name', () => {
+    expect(isPreviewableTextPath('model.stl')).toBe(false);
+    expect(isPreviewableTextPath('render.jpg')).toBe(false);
+    expect(isPreviewableTextPath('project.3mf')).toBe(false);
+    expect(isPreviewableTextPath('bundle.zip')).toBe(false);
+  });
+
+  it('rejects a file with no extension that is not README/LICENSE by name', () => {
+    expect(isPreviewableTextPath('Makefile')).toBe(false);
+    expect(isPreviewableTextPath('notes')).toBe(false);
+  });
+
+  it('checks the basename only — a directory named readme.md/ does not fool it via a trailing path', () => {
+    // basename() of a normalized path with backslashes still resolves
+    // correctly regardless of the archive tool's separator convention.
+    expect(isPreviewableTextPath('some\\windows\\path\\README.md')).toBe(true);
+    expect(isPreviewableTextPath('files/model.stl/README.md')).toBe(true);
   });
 });

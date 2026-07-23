@@ -416,6 +416,15 @@ export interface ZipImportDraftResponse {
   expiresAt: number;
 }
 
+// GET /import/zip/:draftId/file response (#2176) -- content-preview for
+// a README/LICENSE/text file already sitting in the draft, used to
+// prefill the model description textarea instead of just showing the
+// path hint.
+export interface ZipImportFilePreview {
+  path: string;
+  content: string;
+}
+
 export interface ZipImportCommitFile {
   // Must match one of the draft plan's files[].path exactly (byte-for-
   // byte, whatever separator/case the archive used) -- the server looks
@@ -895,6 +904,12 @@ export const api = {
 
     abandon: (draftId: string): Promise<void> =>
       apiFetch(`/import/zip/${draftId}`, { method: 'DELETE' }),
+
+    // #2176 -- content preview for a README/LICENSE/text file in the
+    // draft, so the wizard can prefill the description textarea from
+    // actual README content instead of just a path hint.
+    previewFile: (draftId: string, path: string): Promise<ZipImportFilePreview> =>
+      apiFetch(`/import/zip/${draftId}/file?path=${encodeURIComponent(path)}`),
   },
 
   folders: {

@@ -20,6 +20,7 @@ const mockCategoriesList = vi.fn();
 const mockUploadZip = vi.fn();
 const mockCommit = vi.fn();
 const mockAbandon = vi.fn();
+const mockPreviewFile = vi.fn();
 
 vi.mock('../lib/api.js', () => ({
   api: {
@@ -28,6 +29,7 @@ vi.mock('../lib/api.js', () => ({
       uploadZip: (...args: unknown[]) => mockUploadZip(...args),
       commit: (...args: unknown[]) => mockCommit(...args),
       abandon: (...args: unknown[]) => mockAbandon(...args),
+      previewFile: (...args: unknown[]) => mockPreviewFile(...args),
     },
   },
 }));
@@ -104,9 +106,14 @@ beforeEach(() => {
   mockUploadZip.mockReset();
   mockCommit.mockReset();
   mockAbandon.mockReset();
+  mockPreviewFile.mockReset();
   mockCategoriesList.mockResolvedValue([]);
   mockUploadZip.mockResolvedValue(draftResponse());
   mockAbandon.mockResolvedValue(undefined);
+  // #2176 -- default happy path for every test that doesn't care about
+  // the prefill itself; the dedicated describe block below overrides
+  // this per-test to assert the prefill/failure behavior specifically.
+  mockPreviewFile.mockResolvedValue({ path: 'Dragon/README.md', content: 'A nice articulated dragon.' });
 });
 
 afterEach(cleanup);
@@ -156,6 +163,54 @@ describe('ImportWizardPage — plan step round-trip', () => {
 
     expect(screen.queryByText('._body.stl')).toBeNull();
     expect(screen.getByText(/1 junk\/directory entry was automatically excluded/)).toBeTruthy();
+  });
+});
+
+describe('ImportWizardPage — description prefill from README content (#2176)', () => {
+  it('prefills the description textarea from previewFile\'s content once the draft loads', async () => {
+    await uploadAndReachPlanStep();
+
+    expect(mockPreviewFile).toHaveBeenCalledWith('draft-1', 'Dragon/README.md');
+    await waitFor(() => {
+      expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('A nice articulated dragon.');
+    });
+    expect(screen.getByText(/Prefilled from README.md/)).toBeTruthy();
+  });
+
+  it('never calls previewFile when the plan has no descriptionSource', async () => {
+    mockUploadZip.mockResolvedValue(draftResponse({ plan: plan({ descriptionSource: null }) }));
+    await uploadAndReachPlanStep();
+
+    expect(mockPreviewFile).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('falls back to an empty, freely-editable textarea with a "couldn\'t load" hint when previewFile fails', async () => {
+    mockPreviewFile.mockRejectedValue(new Error('File not found in draft'));
+    await uploadAndReachPlanStep();
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn.t load its/)).toBeTruthy();
+    });
+    expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('');
+
+    // Still freely editable -- the failure doesn't lock the field.
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Manually typed description' } });
+    expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('Manually typed description');
+  });
+
+  it('does not block reaching the plan step while the prefill fetch is still in flight', async () => {
+    let resolvePreview!: (v: { path: string; content: string }) => void;
+    mockPreviewFile.mockReturnValue(new Promise((resolve) => { resolvePreview = resolve; }));
+
+    await uploadAndReachPlanStep(); // resolves once the plan step itself renders, independent of previewFile
+
+    expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('');
+
+    resolvePreview({ path: 'Dragon/README.md', content: 'Arrived late.' });
+    await waitFor(() => {
+      expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('Arrived late.');
+    });
   });
 });
 
