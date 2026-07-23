@@ -51,7 +51,13 @@ function formatSize(bytes: number): string {
 // ─── Image gallery carousel ─────────────────────────────────────────────────
 // Main frame + thumbnail strip; clicking the main frame opens the full
 // ModelViewer modal (rating/meta/versions) for that asset -- reused
-// exactly as AssetGrid/SetView already do, not re-implemented here.
+// exactly as AssetGrid/SetView already do, not re-implemented here. As of
+// #2186 the caller may pass part-role files here too (the no-images
+// fallback, see ModelPage's galleryItems) -- this component doesn't care
+// either way, since api.assets.thumbUrl works identically for any asset
+// with a done thumbnail, and onExpand's ModelViewer already dispatches by
+// file extension (ThreeViewer/GCodeViewer/plain image), same as
+// PartsQuickView's onView below.
 
 function Gallery({ images, onExpand }: { images: ModelFileOut[]; onExpand: (asset: AssetOut) => void }) {
   const [index, setIndex] = useState(0);
@@ -409,6 +415,16 @@ export function ModelPage() {
 
   const images = model.files.filter((f) => f.role === 'image');
   const parts = model.files.filter((f) => f.role === 'part');
+  // #2186: models with zero uploaded images (common for a straight STL/3MF
+  // import with no photos) used to show an empty "No images yet" gallery
+  // even though their part files already have auto-generated render
+  // thumbnails once thumb_status flips to 'done'. Falling back to those
+  // gives the page something to show without waiting on the uploader to
+  // add photos. Only a fallback -- any image-role file still wins outright,
+  // same as ModelCard's cover-fallback below (image > first done-thumb
+  // part > nothing).
+  const partThumbs = parts.filter((f) => f.asset.thumbStatus === 'done' && f.asset.thumbUrl);
+  const galleryItems = images.length > 0 ? images : partThumbs;
   const filesByRole: Record<FileRole, ModelFileOut[]> = { part: [], image: [], doc: [], other: [] };
   for (const f of model.files) filesByRole[f.role].push(f);
 
@@ -546,7 +562,7 @@ export function ModelPage() {
       <div className="flex-1 overflow-y-auto p-5">
         {tab === 'overview' && (
           <div className="max-w-3xl space-y-6">
-            <Gallery images={images} onExpand={setPreviewAsset} />
+            <Gallery images={galleryItems} onExpand={setPreviewAsset} />
             <PartsQuickView parts={parts} onView={setPreviewAsset} />
 
             <div>
