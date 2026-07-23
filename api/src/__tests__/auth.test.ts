@@ -34,7 +34,7 @@ import path from 'path';
 import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import type Database from 'better-sqlite3';
-import { LOGIN_MAX_ATTEMPTS } from '../routes/auth.js';
+import { LOGIN_MAX_ATTEMPTS, LOGIN_IP_MAX_ATTEMPTS } from '../routes/auth.js';
 
 interface Booted {
   baseUrl: string;
@@ -330,6 +330,54 @@ describe('login rate limiter', () => {
     expect(adminLimited.status).toBe(429);
     const housemateLimited = await login(app, 'housemate', 'wrong-password');
     expect(housemateLimited.status).toBe(429);
+  });
+});
+
+// #2183 follow-up — Vera's bounded auth review (Medium finding): the
+// composite ip::username bucket alone removed the old ip-only ceiling
+// with nothing put back, so one IP spreading its attempts thin across
+// many distinct accounts (never touching any single account's own
+// threshold twice) drew zero 429s no matter how many total requests it
+// sent — reproduced at 450 requests / 50 usernames. This coarser,
+// ip-alone counter (checked ADDITIONALLY to the composite one) closes
+// that gap.
+describe('login rate limiter — coarse per-IP ceiling on top of the composite bucket (#2183 follow-up)', () => {
+  it('many distinct usernames from one IP eventually hit the coarse IP ceiling, even though no single account ever approaches its own threshold', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+
+    // Every request targets a DIFFERENT username (one attempt each) —
+    // this is exactly the "spread thin across many accounts" shape that
+    // used to draw zero 429s: no composite bucket ever sees more than
+    // one attempt, so the per-account limiter (cap 10) never fires.
+    for (let i = 0; i < LOGIN_IP_MAX_ATTEMPTS; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await login(app, `grind-user-${i}`, 'whatever-password');
+      expect(res.status).toBe(401);
+    }
+
+    // The very next request — yet another never-before-seen username,
+    // still nowhere near ANY composite bucket's own threshold — is now
+    // refused by the coarse ip-alone ceiling.
+    const limited = await login(app, `grind-user-${LOGIN_IP_MAX_ATTEMPTS}`, 'whatever-password');
+    expect(limited.status).toBe(429);
+  }, 20000);
+
+  it('a legitimate household spread across a few real accounts, well under both limits, is never rate-limited', async () => {
+    const app = await bootApp({ username: ADMIN_USER, password: ADMIN_PASS });
+    await createSecondUser(app, 'housemate-a', 'housemate-a-password-123');
+    await createSecondUser(app, 'housemate-b', 'housemate-b-password-123');
+
+    // A handful of ordinary logins per account, all from the same shared
+    // home IP — nowhere near LOGIN_MAX_ATTEMPTS (10) per account, and
+    // nowhere near LOGIN_IP_MAX_ATTEMPTS (80) in aggregate.
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, ADMIN_USER, ADMIN_PASS)).status).toBe(200);
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, 'housemate-a', 'housemate-a-password-123')).status).toBe(200);
+      // eslint-disable-next-line no-await-in-loop
+      expect((await login(app, 'housemate-b', 'housemate-b-password-123')).status).toBe(200);
+    }
   });
 });
 

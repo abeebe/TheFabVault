@@ -80,17 +80,52 @@ function rateLimitKeyFor(ip: string, username: string | undefined): string {
   return `${ip}::${(username ?? '').trim()}`;
 }
 
-function checkRateLimit(key: string): boolean {
+// #2183 follow-up (Vera's bounded auth review, Medium finding): the
+// composite ip::username bucket above removed the OLD ip-alone ceiling
+// with nothing put back in its place — per-account protection went up,
+// but the aggregate-per-IP backstop that used to exist quietly went to
+// zero. Reproduced: 450 requests from one IP spread across 50 distinct
+// usernames (9 each, one under each composite bucket's own cap) drew
+// zero 429s — a single IP could grind the entire account list at
+// effectively unbounded volume as long as it never touched any one
+// account's threshold twice. This second, coarser counter — keyed on IP
+// ALONE, independent of the composite map — is checked IN ADDITION to
+// the composite check below; either tripping denies the request. It
+// restores the old per-IP backstop without reintroducing the original
+// cross-account-lockout bug: a household still won't lock each other out
+// under ordinary use (a handful of legitimate logins across a few
+// accounts is nowhere near 80/15min), but one IP grinding through many
+// accounts now hits a ceiling regardless of how the attempts are spread
+// across usernames.
+export const LOGIN_IP_WINDOW_MS = 15 * 60 * 1000; // 15 minutes — same window as the composite limiter
+export const LOGIN_IP_MAX_ATTEMPTS = 80; // within Vera's suggested 60-100 range
+const loginAttemptsByIp = new Map<string, number[]>();
+
+// Both counters are sliding-window (filter-then-push), same shape as the
+// original single limiter — pulled into one generic function so the two
+// maps can never drift into subtly different semantics from each other.
+function checkAndConsume(map: Map<string, number[]>, key: string, windowMs: number, maxAttempts: number): boolean {
   const now = Date.now();
-  const attempts = loginAttempts.get(key) ?? [];
-  const recent = attempts.filter((t) => now - t < LOGIN_WINDOW_MS);
-  if (recent.length >= LOGIN_MAX_ATTEMPTS) {
-    loginAttempts.set(key, recent);
+  const attempts = map.get(key) ?? [];
+  const recent = attempts.filter((t) => now - t < windowMs);
+  if (recent.length >= maxAttempts) {
+    map.set(key, recent);
     return false;
   }
   recent.push(now);
-  loginAttempts.set(key, recent);
+  map.set(key, recent);
   return true;
+}
+
+// Deliberately evaluates BOTH counters unconditionally (not short-
+// circuited with `&&`) — every login attempt from an IP must count
+// toward the coarse IP-alone ceiling regardless of whether it also trips
+// (or is already tripped by) the composite per-account bucket. Denies if
+// EITHER limit is at capacity.
+function checkRateLimit(ip: string, username: string | undefined): boolean {
+  const compositeOk = checkAndConsume(loginAttempts, rateLimitKeyFor(ip, username), LOGIN_WINDOW_MS, LOGIN_MAX_ATTEMPTS);
+  const ipOk = checkAndConsume(loginAttemptsByIp, ip, LOGIN_IP_WINDOW_MS, LOGIN_IP_MAX_ATTEMPTS);
+  return compositeOk && ipOk;
 }
 
 // #2184 — a fixed, valid-format scrypt hash used ONLY to give
@@ -123,12 +158,13 @@ router.post('/auth/login', (req: Request, res: Response) => {
   const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
   const { username, password } = req.body as LoginRequest;
 
-  // #2183 — composite IP+username key, computed before the presence
-  // check below so even a malformed request (missing username/password)
-  // still consumes a slot in SOME bucket rather than being rate-limit-
-  // exempt — see rateLimitKeyFor's own comment for why composite, not
-  // IP-only or username-only.
-  if (!checkRateLimit(rateLimitKeyFor(ip, username))) {
+  // #2183 — checked before the presence check below so even a malformed
+  // request (missing username/password) still consumes a slot in both
+  // counters rather than being rate-limit-exempt. checkRateLimit gates
+  // on the composite ip::username bucket AND the coarser ip-alone
+  // ceiling (Vera's finding) — either tripping denies the request; see
+  // checkRateLimit's own comment for why both are needed together.
+  if (!checkRateLimit(ip, username)) {
     res.status(429).json({ error: 'Too many login attempts. Try again later.' });
     return;
   }
