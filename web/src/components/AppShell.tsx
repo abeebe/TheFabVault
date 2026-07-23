@@ -11,6 +11,8 @@ import { BrowsePage } from '../views/BrowsePage.js';
 import { ModelPage } from '../views/ModelPage.js';
 import { CollectionsPage } from '../views/CollectionsPage.js';
 import { CollectionPage } from '../views/CollectionPage.js';
+import { ProjectsPage } from '../views/ProjectsPage.js';
+import { ProjectPage } from '../views/ProjectPage.js';
 import { ConvertWizardPage } from '../views/ConvertWizardPage.js';
 import { ImportWizardPage } from '../views/ImportWizardPage.js';
 
@@ -52,10 +54,15 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 // why (its drop targets depend on Vault's folder/project selection state,
 // which isn't lifted above the route switch in this ticket).
 //
-// "Projects" doesn't have its own route yet (per the #2153 plan, Projects
-// stays inside Vault's sidebar as the "what am I building" layer for now),
-// so it points at /vault same as the Vault link — not a placeholder route,
-// just the existing destination for that functionality today.
+// "Projects" (#2182): now its own member-reachable route (/projects,
+// /projects/:id -- ProjectsPage.tsx / ProjectPage.tsx), separate from
+// /vault. Before this ticket it pointed at /vault same as the Vault link,
+// because Projects only existed as a sidebar-selected view inside
+// VaultPage and ProjectView (the actual detail UI) had no other caller --
+// see the Member-mode gating comment below for why that meant members
+// couldn't reach it at all. VaultPage's own Projects sidebar section and
+// ProjectView instance are untouched (still admin-only via /vault) --
+// this is a new, independent entry point, not a move.
 //
 // Landing flip (#2168): / is now Browse (search-first discovery, see
 // BrowsePage.tsx), and Vault moved to /vault only -- the old / alias from
@@ -74,24 +81,20 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 // are both top-level routed pages, not something embedded in VaultPage's
 // sidebar-driven view-switching the way SetView is.
 //
-// Member-mode gating (Phase D4, #2180, plan §6): the ticket's scope is
-// "Vault nav item + AdminSettings entry + /convert visible to admins
-// only; members: Browse/Collections/Projects." The Vault and Projects
-// nav links point at the exact same /vault route today (Projects has no
-// route of its own yet -- it's a sidebar-selected view inside VaultPage,
-// see the "Projects" comment a few lines up), and VaultPage as a whole
-// is the raw asset-library-plus-admin-tools surface (folders, tags,
-// duplicates/orphans, network mounts, the Settings/AdminSettings entry
-// point) -- not something that cleanly splits into an
-// admin-only-half/member-reachable-half at this component's boundary
-// without a real refactor (a dedicated /projects route rendering just
-// VaultPage's Projects surface). That refactor is out of scope for this
-// UI-gating ticket, so both links are gated together here: a member
-// loses one-click Projects access via the top nav for now, rather than
-// this leaving a "Projects" link that silently bounces them to a
-// Not-authorized page every time they click it. Flagged to Derek as a
-// deviation from "members keep [the Projects nav item]" -- recommend a
-// follow-up ticket to give Projects its own member-reachable route.
+// Member-mode gating (Phase D4, #2180, plan §6; revised #2182): the D4
+// ticket's scope was "Vault nav item + AdminSettings entry + /convert
+// visible to admins only; members: Browse/Collections/Projects" -- but at
+// the time, the Vault and Projects nav links pointed at the exact same
+// /vault route (Projects had no route of its own, just a sidebar-selected
+// view inside VaultPage), and VaultPage as a whole is the raw
+// asset-library-plus-admin-tools surface (folders, tags, duplicates/
+// orphans, network mounts, the Settings/AdminSettings entry point) -- not
+// something that cleanly split into an admin-only-half/member-reachable-
+// half without a real refactor. D4 gated both links together as a stopgap
+// and flagged the deviation for a follow-up. #2182 is that follow-up:
+// Projects now has its own route (/projects, see above), so it's
+// member-visible like Browse/Collections; Vault stays admin-only, gating
+// only the raw file tree it actually is.
 export function AppShell({ logout, authRequired }: Props) {
   const { theme, cycleTheme } = useTheme();
   const { isAdmin } = useMe();
@@ -101,11 +104,9 @@ export function AppShell({ logout, authRequired }: Props) {
       <nav className="flex items-center gap-1 px-3 py-1.5 bg-surface-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
         <NavLink to="/" end className={navLinkClass}>Browse</NavLink>
         <NavLink to="/collections" className={navLinkClass}>Collections</NavLink>
+        <NavLink to="/projects" className={navLinkClass}>Projects</NavLink>
         {isAdmin && (
-          <>
-            <NavLink to="/vault" className={navLinkClass}>Vault</NavLink>
-            <NavLink to="/vault" className={navLinkClass}>Projects</NavLink>
-          </>
+          <NavLink to="/vault" className={navLinkClass}>Vault</NavLink>
         )}
         <div className="flex-1" />
         <ThemeToggle theme={theme} onCycle={cycleTheme} />
@@ -133,6 +134,12 @@ export function AppShell({ logout, authRequired }: Props) {
           <Route path="/models/:id" element={<ModelPage />} />
           <Route path="/collections" element={<CollectionsPage />} />
           <Route path="/collections/:id" element={<CollectionPage />} />
+          {/* Projects (#2182) -- member-reachable, no RequireAdmin guard.
+              Separate from /vault's own Projects sidebar section/
+              ProjectView instance (still admin-only); see the routing
+              comment above the nav links. */}
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/projects/:id" element={<ProjectPage />} />
           {/* Bulk folder→model convert wizard (#2170) — admin-ish power
               tool, not on the persistent nav; reached via AdminSettings'
               Library Tools section (see AdminSettings.tsx). Admin-only
