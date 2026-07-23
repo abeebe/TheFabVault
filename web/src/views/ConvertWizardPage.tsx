@@ -499,7 +499,18 @@ export function ConvertWizardPage() {
 
                 {withAssets.length === 0 && (
                   <p className="text-sm text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-                    <AlertTriangle size={14} /> No named subfolder has convertible files — nothing to convert.
+                    <AlertTriangle size={14} />
+                    {namedResults.length === 0
+                      // Kit's #2175 fold-in review finding: this is the
+                      // path that used to crash before singleEntry was
+                      // gated on mode==='single' — an each-child preview
+                      // with a genuinely empty results[] (every
+                      // immediate child was bare-GUID, or there were no
+                      // immediate children at all). Worded distinctly
+                      // from the "named but empty" case below so the
+                      // message stays accurate either way.
+                      ? 'This folder has no named subfolders — nothing to convert.'
+                      : "None of this folder's named subfolders have convertible files — nothing to convert."}
                   </p>
                 )}
 

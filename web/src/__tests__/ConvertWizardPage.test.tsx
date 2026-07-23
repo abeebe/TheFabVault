@@ -164,6 +164,76 @@ describe('ConvertWizardPage — select step (tree)', () => {
     expect(screen.queryByText('a1b2c3d4-e5f6-4789-a012-3456789abcde')).toBeNull();
   });
 
+  // Kit's review finding on the first cut of this file: a bare-GUID
+  // folder that itself CONTAINS a named descendant was hidden outright,
+  // same as a genuine bare-GUID leaf — which made the named descendant
+  // completely unreachable (the GUID node never rendered, so it never
+  // got a chance to expand into its own children). Fix: render such a
+  // folder as a non-pickable pass-through ("(unnamed folder)") that's
+  // still expandable, so anything named underneath stays reachable.
+  it('renders a bare-GUID folder with a named descendant as an expandable, non-pickable pass-through — the named child stays reachable and selectable', async () => {
+    mockFoldersList.mockResolvedValue([
+      folder('guidparent', '3f2504e0-4f89-11d3-9a0c-0305e82c3301', null, true),
+      folder('namedchild', 'Chassis', 'guidparent'),
+    ]);
+    renderWizard();
+
+    // The pass-through container is NOT hidden (unlike a genuine leaf) —
+    // it renders, just relabeled instead of showing the raw GUID.
+    expect(await screen.findByText('(unnamed folder)')).toBeTruthy();
+    expect(screen.queryByText('3f2504e0-4f89-11d3-9a0c-0305e82c3301')).toBeNull();
+    // Chassis isn't visible yet — the pass-through starts collapsed.
+    expect(screen.queryByText('Chassis')).toBeNull();
+
+    // Clicking the pass-through row drills in (not selects — it has no
+    // Preview button consequence of its own).
+    fireEvent.click(screen.getByText('(unnamed folder)'));
+    expect(screen.queryByRole('button', { name: /Preview/ })).toBeNull();
+
+    // Chassis is now reachable AND actually selectable.
+    expect(await screen.findByText('Chassis')).toBeTruthy();
+    fireEvent.click(screen.getByText('Chassis'));
+    expect(await screen.findByRole('button', { name: /Preview/ })).toBeTruthy();
+  });
+
+  it('stays reachable through MULTIPLE nested bare-GUID pass-through layers before reaching a named folder', async () => {
+    mockFoldersList.mockResolvedValue([
+      folder('guid1', '11111111-1111-4111-8111-111111111111', null, true),
+      folder('guid2', '22222222-2222-4222-8222-222222222222', 'guid1', true),
+      folder('deep', 'Deeply Nested Part', 'guid2'),
+    ]);
+    renderWizard();
+
+    // Starts collapsed — only guid1 (the root) is visible until expanded.
+    expect(await screen.findAllByText('(unnamed folder)')).toHaveLength(1);
+
+    fireEvent.click(screen.getByText('(unnamed folder)')); // expand guid1 -> reveals guid2
+    // guid2 is ALSO a pass-through (it has a named descendant of its
+    // own) — two "(unnamed folder)" rows now, proving the descendant
+    // check works transitively across multiple bare-GUID hops, not just
+    // one level.
+    const passThroughsAfterFirstExpand = await screen.findAllByText('(unnamed folder)');
+    expect(passThroughsAfterFirstExpand).toHaveLength(2);
+    fireEvent.click(passThroughsAfterFirstExpand[1]); // expand guid2 -> reveals Deeply Nested Part
+
+    expect(await screen.findByText('Deeply Nested Part')).toBeTruthy();
+    fireEvent.click(screen.getByText('Deeply Nested Part'));
+    expect(await screen.findByRole('button', { name: /Preview/ })).toBeTruthy();
+  });
+
+  it('still fully hides a bare-GUID folder with NO named descendant anywhere in its subtree (regression check — genuine leaves are unaffected by the pass-through fix)', async () => {
+    mockFoldersList.mockResolvedValue([
+      folder('guidleaf', '4f2504e0-4f89-11d3-9a0c-0305e82c3302', null, true),
+      folder('guidgrandchild', '5f2504e0-4f89-11d3-9a0c-0305e82c3303', 'guidleaf', true), // also bare-GUID, no named descendant either
+    ]);
+    mockModelsList.mockResolvedValue({ items: [], total: 0 });
+    renderWizard();
+
+    // Nothing named anywhere -> the picker's own "no named folders" message.
+    expect(await screen.findByText('No named folders in the vault yet.')).toBeTruthy();
+    expect(screen.queryByText('(unnamed folder)')).toBeNull();
+  });
+
   it('shows an already-converted badge sourced from GET /models on the matching tree row', async () => {
     mockFoldersList.mockResolvedValue([folder('f1', 'Dragon Prints'), folder('f2', 'Skull Planter')]);
     mockModelsList.mockResolvedValue({ items: [modelOut({ id: 'existing1', sourceFolderId: 'f1' })], total: 1 });
@@ -386,6 +456,37 @@ describe('ConvertWizardPage — Mode B (each-child) review + confirm', () => {
     expect(screen.getByText(/Skipped — no convertible files/)).toBeTruthy();
     expect(screen.getByText('guid-leaf-1')).toBeTruthy();
     expect(screen.getByText(/Skipped — GUID-named folder/)).toBeTruthy();
+  });
+
+  // Kit's #2175 fold-in review finding: the singleEntry crash (fixed by
+  // gating it on mode==='single') only actually reproduces when Mode
+  // B's results[] is EMPTY — every other Mode B test above has at least
+  // one entry, so none of them would have caught a regression here.
+  // This drives that exact path (zero eligible named children — every
+  // immediate child is bare-GUID) all the way through a full render.
+  it('Mode B on a container with ZERO eligible named children (all bare-GUID) renders fully without crashing, in a sensible all-excluded state', async () => {
+    mockFoldersList.mockResolvedValue([folder('container1', 'OnlyGuids')]);
+    mockPreviewFromFolder.mockResolvedValue(eachChildPreview({
+      folderId: 'container1',
+      folderName: 'OnlyGuids',
+      results: [],
+      skippedChildren: [
+        { folderId: 'g1', folderName: 'guid-1', reason: 'bare-guid-leaf' },
+        { folderId: 'g2', folderName: 'guid-2', reason: 'bare-guid-leaf' },
+      ],
+      looseAssetCount: 0,
+    }));
+
+    renderWizard();
+    await screen.findByText('OnlyGuids');
+    fireEvent.click(screen.getByText('OnlyGuids'));
+    fireEvent.click(screen.getByText(/Each named subfolder → its own model/));
+    fireEvent.click(screen.getByRole('button', { name: /Preview/ }));
+
+    expect(await screen.findByText('This folder has no named subfolders — nothing to convert.')).toBeTruthy();
+    expect(screen.getByText(/2 GUID-named folders skipped/)).toBeTruthy();
+    const confirmButton = await screen.findByRole('button', { name: /Confirm & convert 0 models/ }) as HTMLButtonElement;
+    expect(confirmButton.disabled).toBe(true);
   });
 
   it('is all-or-nothing on already-converted children — blocks Confirm until every eligible child is re-checked', async () => {
