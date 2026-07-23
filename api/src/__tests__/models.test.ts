@@ -557,6 +557,66 @@ describe('GET /models/from-folder/preview — dry run, no writes', () => {
     const res = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`);
     expect(res.status).toBe(401);
   });
+
+  // Vera phase-D auth review (#2179 fast-follow, Medium): this handler's
+  // source_folder_id lookup for alreadyConverted/existingModelIds had no
+  // visibility filter at all — unlike every other model read in this
+  // file — so a private model's real UUID leaked here to a caller who is
+  // correctly 404'd on GET /model/:id, the list, and download for that
+  // same model. Bounded impact (folders/assets are the shared pool, so
+  // the leaked id unlocked nothing further), but it's exactly the
+  // existence-hiding inconsistency this phase's review hunted for.
+  it('a private model owned by someone else never surfaces via preview — id absent, alreadyConverted false; owner and admin still see it', async () => {
+    const app = await bootApp();
+    const folderId = insertFolder(app, 'Secret Prints');
+    insertAsset(app, { filename: 'a.stl', folderId });
+
+    const alice = await createMemberUser(app, 'alice');
+    const bob = await createMemberUser(app, 'bob');
+
+    const createRes = await fetch(`${app.baseUrl}/models/from-folder`, {
+      method: 'POST',
+      headers: jsonHeaders(alice.token),
+      body: JSON.stringify({ folderId }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json() as { id: string };
+
+    const patchRes = await fetch(`${app.baseUrl}/model/${created.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders(alice.token),
+      body: JSON.stringify({ visibility: 'private' }),
+    });
+    expect(patchRes.status).toBe(200);
+
+    // Bob (neither owner nor admin): the folder's real, shared contents
+    // still preview correctly (assetCount/files are not visibility-
+    // scoped — only the marker is), but the already-converted marker
+    // must not leak Alice's private model.
+    const bobRes = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(bob.token) });
+    expect(bobRes.status).toBe(200);
+    const bobRawBody = await bobRes.text();
+    // Defense at the wire level, not just "the field is empty" — same
+    // convention as auth.test.ts's mount-password redaction test: the
+    // literal id must not appear anywhere in the response body.
+    expect(bobRawBody).not.toContain(created.id);
+    const bobBody = JSON.parse(bobRawBody) as { alreadyConverted: boolean; existingModelIds: string[]; assetCount: number };
+    expect(bobBody.alreadyConverted).toBe(false);
+    expect(bobBody.existingModelIds).toEqual([]);
+    expect(bobBody.assetCount).toBe(1); // the folder's real contents are still visible
+
+    // Alice (owner) still sees her own private model reflected.
+    const aliceRes = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(alice.token) });
+    const aliceBody = await aliceRes.json() as { alreadyConverted: boolean; existingModelIds: string[] };
+    expect(aliceBody.alreadyConverted).toBe(true);
+    expect(aliceBody.existingModelIds).toEqual([created.id]);
+
+    // Admin bypasses visibility entirely, same as every other read.
+    const adminRes = await fetch(`${app.baseUrl}/models/from-folder/preview?folder_id=${folderId}`, { headers: bearer(app.token) });
+    const adminBody = await adminRes.json() as { alreadyConverted: boolean; existingModelIds: string[] };
+    expect(adminBody.alreadyConverted).toBe(true);
+    expect(adminBody.existingModelIds).toEqual([created.id]);
+  });
 });
 
 describe('POST /model/:id/files — attach existing + upload with dedup', () => {

@@ -648,9 +648,32 @@ router.get('/models/from-folder/preview', requireAuth, asyncHandler(async (req: 
   // constraint stopping a second from-folder conversion of the same
   // folder (a wizard re-check is the explicit override), so this can
   // legitimately be more than one.
+  //
+  // Visibility filter (Vera phase-D review, #2179 fast-follow — this
+  // handler was the one query in this file that predated the D3 pass and
+  // hadn't been threaded): without it, a private model someone else owns
+  // still surfaced its real UUID here even though GET /model/:id, the
+  // list, and download all correctly 404/omit it for the same caller.
+  // Same fragment, same splice pattern as GET /models above — this is a
+  // filtered existence check, not a single row already in hand, so this
+  // uses visibilityFragment (query-level) rather than isVisible
+  // (single-row) for the same reason GET /models does: a JS post-filter
+  // here would be trivial to get right today but is the wrong shape to
+  // copy from if this query ever grows a LIMIT.
+  //
+  // Semantics note: this means alreadyConverted/existingModelIds now
+  // reflects only what THIS caller can see. If Alice already converted
+  // folder F into a private model, Bob's preview correctly reads
+  // "not yet converted" (assetCount/files still reflect the folder's
+  // real, shared contents — only the marker is scoped) — confirming
+  // conversion creates a second model row, owned by Bob. That's the
+  // intended existence-hiding behavior, not a bug: models are per-owner,
+  // and the alternative (leaking that *some* private model already
+  // claims this folder) is exactly the disclosure this fix closes.
+  const visFrag = visibilityFragment(visCtx(req));
   const existing = db.prepare(
-    'SELECT id FROM models WHERE source_folder_id = ? AND deleted_at IS NULL'
-  ).all(folderId) as Array<{ id: string }>;
+    `SELECT id FROM models WHERE source_folder_id = ? AND deleted_at IS NULL AND (${visFrag.sql})`
+  ).all(folderId, ...visFrag.params) as Array<{ id: string }>;
 
   res.json({
     folderId,
