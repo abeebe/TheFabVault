@@ -3,7 +3,9 @@ import { buildFolderPath, foldersWithPaths } from '../lib/folderTreePaths.js';
 import type { FolderOut } from '../types/index.js';
 
 function folder(id: string, name: string, parentId: string | null = null): FolderOut {
-  return { id, name, parentId, createdAt: 0 };
+  return {
+    id, name, parentId, createdAt: 0, isBareGuid: false,
+  };
 }
 
 describe('buildFolderPath', () => {
