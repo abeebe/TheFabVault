@@ -5,7 +5,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { config } from './config.js';
+import { config, TRUSTED_PROXY_ADDR } from './config.js';
 import { adminExists, getDb, closeDb } from './db.js';
 import { requireLoopback } from './internalAccess.js';
 import authRouter from './routes/auth.js';
@@ -50,7 +50,12 @@ const app = express();
 // publishes the api container's port directly on the host. The other
 // half of #2060 — the unauthenticated /internal/asset-raw disclosure —
 // is closed immediately below by requireLoopback.
-app.set('trust proxy', '10.10.5.16');
+//
+// TRUSTED_PROXY_ADDR is imported from config.ts (#2075) rather than
+// inlined so __tests__/trustProxy.test.ts's regression suite exercises
+// the exact same value this line configures — see that constant's own
+// comment.
+app.set('trust proxy', TRUSTED_PROXY_ADDR);
 
 // CORS
 app.use(cors({

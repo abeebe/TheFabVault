@@ -18,6 +18,19 @@ function getStorageDir(): string {
   return process.env.STORAGE_DIR ?? './data/storage';
 }
 
+// NPM's exact proxy address, trusted for X-Forwarded-For resolution
+// (index.ts's `app.set('trust proxy', TRUSTED_PROXY_ADDR)`). Pulled out
+// into a named, exported constant (#2075) rather than left as a bare
+// string literal inline at the app.set() call so
+// __tests__/trustProxy.test.ts's regression suite imports the exact
+// same value index.ts configures — a literal-string copy in the test
+// file could silently drift from index.ts's if the trusted address is
+// ever changed (an NPM migration, a new hop) without anyone noticing
+// the test no longer proves anything about the real config. See the
+// exact-match rationale at the app.set() call site in index.ts and at
+// the login rate limiter in routes/auth.ts.
+export const TRUSTED_PROXY_ADDR = '10.10.5.16';
+
 // Auth (username/password/JWT secret) intentionally does NOT live here.
 // AUTH_USERNAME/AUTH_PASSWORD are read directly (once, at boot) only by
 // db.ts's one-time seed function — they are bootstrap input, not ongoing
