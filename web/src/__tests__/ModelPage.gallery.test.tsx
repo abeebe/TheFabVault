@@ -130,6 +130,41 @@ describe('ModelPage gallery -- no-images fallback to part render thumbnails (#21
     expect(screen.queryByAltText('body.stl')).toBeNull();
   });
 
+  // Regression for a mutation Kit caught in review: concatenating
+  // images+partThumbs (instead of falling back only when images.length
+  // is 0) still passes every assertion above, because the main frame
+  // shows index 0 (the image) either way and the part thumbnail's own
+  // alt text never appears as the CURRENT frame. What a concat mutation
+  // DOES change is the gallery's total item count -- Gallery only renders
+  // its prev/next arrows and thumbnail strip when it has more than one
+  // item (`images.length > 1`, Gallery's own prop is literally named
+  // that). With exactly one real image and zero other legitimate gallery
+  // items, those must be absent; a concat mutation would push the count
+  // to 2 and make them appear. This is the one assertion in this file
+  // that actually fails under that mutation -- verified by hand: swapping
+  // the ModelPage.tsx `galleryItems` line for
+  // `[...images, ...partThumbs]` turns this test red, reverting turns it
+  // green again, exactly the "images win outright" contract this
+  // describe block's name promises.
+  it('never concatenates a done-thumb part alongside a real image -- only the image appears, and the gallery reports zero OTHER items', async () => {
+    mockGet.mockResolvedValue(baseModel({
+      files: [
+        makeFile({
+          role: 'part', asset: { id: 'p1', filename: 'body.stl', thumbStatus: 'done', thumbUrl: '/thumb/p1.jpg' },
+        }),
+        makeFile({
+          role: 'image', assetId: 'i1',
+          asset: { id: 'i1', filename: 'photo.jpg', originalName: 'photo.jpg', thumbStatus: 'done', thumbUrl: '/thumb/i1.jpg' },
+        }),
+      ],
+    }));
+    renderModelPage();
+
+    await screen.findByAltText('photo.jpg');
+    expect(screen.queryByLabelText('Next image')).toBeNull();
+    expect(screen.queryByLabelText('Previous image')).toBeNull();
+  });
+
   it('clicking a fallback part thumbnail opens the same preview handoff a real image would (ModelViewer mounts)', async () => {
     mockGet.mockResolvedValue(baseModel({
       files: [
